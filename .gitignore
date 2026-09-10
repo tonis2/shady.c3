@@ -1,0 +1,17 @@
+build/
+shady.c3l
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dll
+*.dylib
+*.exe
+*.out
+*.spirv
+*.spv
+.vscode
+.claude
+CLAUDE.md

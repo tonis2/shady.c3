@@ -1,0 +1,173 @@
+# shady.c3
+
+A shader compiler in [C3](https://c3-lang.org). Source string in, SPIR-V out,
+in the same process — no files, no subprocesses, no external toolchain.
+
+```c3
+import shady;
+
+shady::Diagnostic diagnostic;
+char[]? spirv = shady::compile(source, &diagnostic);
+if (catch spirv)
+{
+    io::eprintfn("%d:%d: %s", diagnostic.line, diagnostic.column, diagnostic.message);
+    return;
+}
+defer free(spirv);
+
+ShaderModule module = vk::loadShaderModule(device, spirv)!!;
+```
+
+One module holds every entry point, told apart by name, so a vertex and a
+fragment stage come out of a single `VkShaderModule`.
+
+A bad shader is a fault with a line and a column. It never exits the process
+and never writes a temporary file, so compiling at startup — or on a file
+watch, or per frame — is safe.
+
+## The language
+
+C3-shaped, deliberately: `float4`/`float4x4` type names, postfix `@attributes`,
+braces without trailing semicolons. [`LANGUAGE.md`](LANGUAGE.md) is the
+specification.
+
+```
+struct VertexIn
+{
+    float3 position;
+    float4 color;
+    float2 uv;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+    float2 uv;
+}
+
+struct Uniforms
+{
+    float4x4 projection;
+    float4x4 view;
+}
+
+uniform Uniforms uniforms;
+texture2d tex;
+sampler tex_sampler;
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    FragmentIn output;
+    output.position = uniforms.projection * uniforms.view * float4(input.position, 1.0);
+    output.color    = input.color;
+    output.uv       = input.uv;
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    return tex.sample(tex_sampler, input.uv) * input.color;
+}
+```
+
+Descriptor sets and bindings are assigned in declaration order unless an
+explicit `@set`/`@binding` says otherwise; a collision is an error rather than
+a silent overwrite.
+
+### Buffer device addresses
+
+A `buffer` is a struct reached through a 64-bit GPU address instead of a
+descriptor — Vulkan's `bufferDeviceAddress`. It lets a vertex shader pull its
+own vertices, with no vertex input bindings or attributes at all.
+
+```
+buffer Vertex
+{
+    float3 position;
+    float4 color;
+}
+
+struct Push { Vertex* vertices; }
+push_constant Push pc;
+
+struct VertexIn { uint index @builtin(vertex_index); }
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    Vertex* v = pc.vertices;
+
+    FragmentIn output;
+    output.position = mvp * float4(v[input.index].position, 1.0);
+    output.color    = v[input.index].color;
+    return output;
+}
+```
+
+Declaring a `buffer` switches the module to the `PhysicalStorageBuffer64`
+addressing model and SPIR-V 1.3, lays the struct out std430, and puts an
+`Aligned` operand on every access through the address. See
+[`LANGUAGE.md` §10](LANGUAGE.md), which also records why indexing lowers to
+explicit 64-bit arithmetic rather than to `OpPtrAccessChain`.
+
+## What works
+
+Structs, uniform blocks with std140 layout, push constants and buffer device
+addresses with std430, textures and samplers, every vector and matrix product,
+mixed constructors like `float4(xyz, 1.0)`, swizzles, `if`/`while`/`for`
+lowered to structured control flow, ~30 GLSL.std.450 builtins, `discard`, and
+several entry points in one module.
+
+Not yet: `break`/`continue`, plain non-entry-point functions, arrays, storage
+buffers. Compute entry points are wired but untested. Each of these fails with
+a position and a message rather than miscompiling.
+
+## Using it
+
+As a C3 dependency, unpacked in your `lib/` directory:
+
+```json
+{
+  "dependency-search-paths": ["lib"],
+  "dependencies": ["shady"]
+}
+```
+
+Or as a submodule:
+
+```sh
+git submodule add https://github.com/tonis2/shady.c3.git lib/shady.c3l
+```
+
+There is nothing to build and nothing to link — it is pure C3.
+
+## Tests
+
+```sh
+c3c test
+```
+
+The tests check emitted SPIR-V structurally: entry points, descriptor
+decorations, block offsets, the addressing model. Validate the output with
+`spirv-val --target-env vulkan1.3` rather than plain `spirv-val` — the generic
+environment accepts things Vulkan rejects.
+
+## Layout
+
+| | |
+|---|---|
+| `LANGUAGE.md` | the specification |
+| `shady/spec.c3` | SPIR-V constants |
+| `shady/module.c3` | module assembly, sections, id allocation, dedup |
+| `shady/types.c3` | type and constant constructors |
+| `shady/function.c3` | function bodies, blocks, instructions |
+| `shady/lexer.c3` | tokenizer |
+| `shady/ast.c3` | syntax tree |
+| `shady/parser.c3` | recursive descent parser |
+| `shady/sema.c3` | type table, std140/std430 layout |
+| `shady/codegen.c3` | AST to SPIR-V, single pass |
+| `shady/compile.c3` | bindings, stage lowering, the public entry point |
+
+Resolution and emission happen together — there is no typed IR, and an
+expression's type is worked out as its instructions are emitted. That is why
+this is a few thousand lines rather than tens of thousands.

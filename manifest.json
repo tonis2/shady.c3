@@ -1,0 +1,11 @@
+{
+  "provides": "shady",
+  "sources": ["shady/**"],
+  "targets": {
+    "linux-x64": { },
+    "linux-aarch64": { },
+    "macos-x64": { },
+    "macos-aarch64": { },
+    "windows-x64": { }
+  }
+}

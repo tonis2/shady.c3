@@ -1,0 +1,22 @@
+{
+	"langrev": "1",
+	"warnings": ["no-unused"],
+	"authors": ["Tonis"],
+	"version": "0.1.0",
+	"script-dir": "./",
+	"dependency-search-paths": ["./"],
+	"sources": ["shady/**"],
+	"test-sources": ["test/**"],
+	"linked-libraries": [],
+	"targets": {
+		"shady": {
+			"type": "static-lib"
+		},
+		"zip": {
+			"type": "prepare",
+			"exec": ["zip -r shady.c3l ./shady/*.c3 ./manifest.json"]
+		}
+	},
+	"output": "./build",
+	"build-dir": "./build"
+}
