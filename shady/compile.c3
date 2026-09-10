@@ -48,7 +48,7 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 		// uint.max marks 'not yet assigned', so an explicit binding of 0 still counts.
 		Resource resource = { .name = decl.name, .binding = UNASSIGNED_BINDING };
 
-		if (Attribute* set = find_attribute(decl.attributes, "set"))
+		if (Attribute* set = decl.attributes.find("set"))
 		{
 			if (set.args.len != 1)
 			{
@@ -57,7 +57,7 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 			}
 			resource.set = (uint)set.args[0].number;
 		}
-		if (Attribute* binding = find_attribute(decl.attributes, "binding"))
+		if (Attribute* binding = decl.attributes.find("binding"))
 		{
 			if (binding.args.len != 1)
 			{
@@ -89,7 +89,7 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 				return CODEGEN_ERROR~;
 			}
 			has_push_constant = true;
-			if (find_attribute(decl.attributes, "set") || find_attribute(decl.attributes, "binding"))
+			if (decl.attributes.find( "set") || decl.attributes.find( "binding"))
 			{
 				self.fail(decl.line, decl.column, "a push_constant block has no set or binding");
 				return CODEGEN_ERROR~;
@@ -228,9 +228,9 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 				.name        = source.name,
 				.type        = member_type,
 				.attributes  = source.attributes,
-				.is_position = find_attribute(source.attributes, "position") != null,
+				.is_position = source.attributes.find("position") != null,
 			};
-			if (Attribute* builtin = find_attribute(source.attributes, "builtin"))
+			if (Attribute* builtin = source.attributes.find("builtin"))
 			{
 				uint which;
 				if (builtin.args.len != 1 || !builtin.args[0].is_name || !builtin_from_name(builtin.args[0].name, &which))
@@ -391,7 +391,7 @@ fn void? Codegen.stage_variables(&self, Type* type, uint storage, StageVarList* 
 		else
 		{
 			uint location = next_location;
-			if (Attribute* explicit_location = find_attribute(member.attributes, "location"))
+			if (Attribute* explicit_location = member.attributes.find("location"))
 			{
 				location = (uint)explicit_location.args[0].number;
 			}
@@ -399,7 +399,7 @@ fn void? Codegen.stage_variables(&self, Type* type, uint storage, StageVarList* 
 			next_location = location + 1;
 		}
 
-		if (find_attribute(member.attributes, "flat")) self.mod.decorate(id, DECORATION_FLAT);
+		if (member.attributes.find("flat")) self.mod.decorate(id, DECORATION_FLAT);
 
 		out.push({ .id = id, .type = member.type, .member_index = (usz)i, .is_position = member.is_position });
 		self.interface_ids.push(id);
@@ -538,7 +538,7 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
 	}
 	else if (execution_model == EXECUTION_MODEL_GLCOMPUTE)
 	{
-		Attribute* threads = find_attribute(decl.attributes, "threads");
+		Attribute* threads = decl.attributes.find( "threads");
 		if (!threads || threads.args.len != 3)
 		{
 			self.fail(decl.line, decl.column, "a @compute entry point needs @threads(x, y, z)");
@@ -643,15 +643,15 @@ fn void? Codegen.build(&self)
 
 		uint       execution_model;
 		Attribute* stage;
-		if (stage = find_attribute(decl.attributes, "vertex"), stage)
+		if (stage = decl.attributes.find( "vertex"), stage)
 		{
 			execution_model = EXECUTION_MODEL_VERTEX;
 		}
-		else if (stage = find_attribute(decl.attributes, "fragment"), stage)
+		else if (stage = decl.attributes.find( "fragment"), stage)
 		{
 			execution_model = EXECUTION_MODEL_FRAGMENT;
 		}
-		else if (stage = find_attribute(decl.attributes, "compute"), stage)
+		else if (stage = decl.attributes.find( "compute"), stage)
 		{
 			execution_model = EXECUTION_MODEL_GLCOMPUTE;
 		}

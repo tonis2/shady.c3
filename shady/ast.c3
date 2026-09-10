@@ -51,9 +51,9 @@ struct Attribute
  Look up an attribute by name. Returns null when absent, so callers read as
  `if (Attribute* a = find_attribute(attrs, "location")) ...`.
 *>
-fn Attribute* find_attribute(Attribute[] attributes, String name)
+fn Attribute* Attribute[].find(self, String name)
 {
-	foreach (&attribute : attributes)
+	foreach (&attribute : self)
 	{
 		if (attribute.name == name) return attribute;
 	}

@@ -72,8 +72,8 @@ fn void parses_the_cube_shader() @test
 	// @position must survive onto the member.
 	shady::Decl* fragment_in = ast.find("FragmentIn");
 	shady::Member* position  = &fragment_in.struct_decl.members[0];
-	assert(shady::find_attribute(position.attributes, "position") != null, "@position lost");
-	assert(shady::find_attribute(fragment_in.struct_decl.members[1].attributes, "position") == null);
+	assert(position.attributes.find("position") != null, "@position lost");
+	assert(fragment_in.struct_decl.members[1].attributes.find("position") == null);
 
 	// A module-level variable is just `Type name;`. What kind of resource it
 	// is comes from the type, which the parser does not resolve.
@@ -83,7 +83,7 @@ fn void parses_the_cube_shader() @test
 
 	// The block kind rides on the struct, not on the variable.
 	shady::Decl* uniforms_type = ast.find("Uniforms");
-	assert(shady::find_attribute(uniforms_type.attributes, "uniform") != null, "@uniform lost");
+	assert(uniforms_type.attributes.find("uniform") != null, "@uniform lost");
 
 	shady::Decl* tex = ast.find("tex");
 	assert(tex.kind == shady::DeclKind.RESOURCE);
@@ -91,7 +91,7 @@ fn void parses_the_cube_shader() @test
 
 	shady::Decl* vert = ast.find("vert");
 	assert(vert.kind == shady::DeclKind.FUNCTION);
-	assert(shady::find_attribute(vert.attributes, "vertex") != null, "@vertex lost");
+	assert(vert.attributes.find("vertex") != null, "@vertex lost");
 	assert(vert.function.return_type.name == "FragmentIn");
 	assert(vert.function.params.len == 1);
 	assert(vert.function.params[0].type.name == "VertexIn");
@@ -205,9 +205,9 @@ fn void attribute_arguments() @test
 	defer ast.free();
 
 	shady::Decl* shadow = ast.find("shadow");
-	shady::Attribute* set = shady::find_attribute(shadow.attributes, "set");
+	shady::Attribute* set = shadow.attributes.find("set");
 	assert(set.args.len == 1 && set.args[0].number == 1.0);
-	shady::Attribute* binding = shady::find_attribute(shadow.attributes, "binding");
+	shady::Attribute* binding = shadow.attributes.find("binding");
 	assert(binding.args[0].number == 2.0);
 }
 
