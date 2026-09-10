@@ -67,6 +67,7 @@ alias LocalList    = List{Local};
 alias ResourceList = List{Resource};
 alias StageVarList = List{StageVar};
 alias IdListC      = List{Id};
+alias StringList   = List{String};
 
 struct Codegen
 {

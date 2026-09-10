@@ -19,7 +19,18 @@ ShaderModule module = vk::loadShaderModule(device, spirv)!!;
 ```
 
 One module holds every entry point, told apart by name, so a vertex and a
-fragment stage come out of a single `VkShaderModule`.
+fragment stage come out of a single `VkShaderModule` — as do several variants
+of the same stage:
+
+```
+fn FragmentIn stage_in(VertexIn input) @vertex(main)         { ... }
+fn float4 shade_textured(FragmentIn input) @fragment(opaque) { ... }
+fn float4 shade_solid(FragmentIn input) @fragment            { ... }
+```
+
+An entry point is named after its function unless the stage attribute gives a
+name. The host selects one through `pName` in
+`VkPipelineShaderStageCreateInfo`.
 
 A bad shader is a fault with a line and a column. It never exits the process
 and never writes a temporary file, so compiling at startup — or on a file

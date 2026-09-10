@@ -201,15 +201,18 @@ Compile-time constants. The initialiser must be a constant expression.
 | Attribute | Applies to | Meaning |
 |---|---|---|
 | `@vertex` | function | Vertex entry point |
+| `@vertex(name)` | function | …published under `name` instead of the function's (§6.1) |
 | `@fragment` | function | Fragment entry point |
+| `@fragment(name)` | function | …published under `name` |
 | `@compute` | function | Compute entry point |
+| `@compute(name)` | function | …published under `name` |
 | `@threads(x, y, z)` | `@compute` function | Workgroup size, required on compute |
 | `@uniform` | struct | A uniform buffer: std140, takes a binding |
 | `@pushconstant` | struct | The pipeline's push constants: std430, no binding |
 | `@address` | struct | Reached through a device address: std430, no binding |
 | `@position` | struct member | `BuiltIn Position` instead of a location |
 | `@location(n)` | struct member | Pin the location; others auto-assign around it |
-| `@builtin(name)` | struct member / parameter | A SPIR-V builtin (§6.3) |
+| `@builtin(name)` | struct member / parameter | A SPIR-V builtin (§6.4) |
 | `@set(n)` | module-level variable | Descriptor set |
 | `@binding(n)` | module-level variable | Binding within the set |
 | `@flat` | struct member | `Flat` interpolation |
@@ -288,11 +291,45 @@ applies `view` first.
 
 ## 6. Entry points
 
-Every function carrying a stage attribute becomes an `OpEntryPoint` **named
-after the function**, and all of them land in a single SPIR-V module. There is
-no pipeline declaration; the host selects a stage by entry point name.
+Every function carrying a stage attribute becomes an `OpEntryPoint`, and all of
+them land in a single SPIR-V module. There is no pipeline declaration; the host
+selects a stage by entry point name, through `pName` in
+`VkPipelineShaderStageCreateInfo`.
 
-### 6.1 Vertex
+A module may hold as many entry points as it likes, of any stage, including
+several of the same stage:
+
+```
+fn FragmentIn stage_in(VertexIn input) @vertex(main) { ... }
+fn FragmentIn stage_in_shadow(VertexIn input) @vertex { ... }
+
+fn float4 shade_textured(FragmentIn input) @fragment(opaque) { ... }
+fn float4 shade_solid(FragmentIn input) @fragment { ... }
+```
+
+That compiles to four entry points named `main`, `stage_in_shadow`, `opaque`
+and `shade_solid` — one `VkShaderModule`, four things a pipeline can select.
+
+### 6.1 Naming
+
+An entry point is named after its function. A stage attribute may override
+that with a single name argument:
+
+```
+fn float4 shade(FragmentIn input) @fragment(main)
+```
+
+publishes an entry point called `main`. That matters when the host hardcodes a
+name, and it lets variants keep readable function names while presenting the
+names a pipeline expects.
+
+The function keeps its own name as `OpName`, separately from the name the entry
+point publishes, so a disassembly still maps back to the source.
+
+Two entry points may not share a name — the host has nothing else to tell them
+apart by — and the argument must be a name, not a number.
+
+### 6.2 Vertex
 ```
 fn FragmentIn vert(VertexIn input) @vertex
 ```
@@ -303,7 +340,7 @@ skipped when assigning locations.
 
 Exactly one member of a vertex output struct must be `@position`.
 
-### 6.2 Fragment
+### 6.3 Fragment
 ```
 fn float4 frag(FragmentIn input) @fragment
 ```
@@ -327,7 +364,7 @@ between the two stages could not otherwise work. Note that the *generic* SPIR-V
 validator accepts it and only `spirv-val --target-env vulkan1.3` catches it, so
 validate against the Vulkan environment.
 
-### 6.3 Builtins
+### 6.4 Builtins
 Read via `@builtin(name)` on an input struct member:
 
 | Name | Type | Stages |

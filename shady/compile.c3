@@ -407,13 +407,35 @@ fn void? Codegen.stage_variables(&self, Type* type, uint storage, StageVarList* 
 }
 
 <*
+ The name an entry point is published under.
+
+ The function's own name by default, or the stage attribute's argument when it
+ has one: `fn float4 shade(...) @fragment(main)` compiles to an entry point
+ called `main`. That matters when the host hardcodes a name, and it lets two
+ variants keep readable function names while presenting the names a pipeline
+ expects.
+*>
+fn String? Codegen.entry_name(&self, Decl* decl, Attribute* stage)
+{
+	if (!stage.args.len) return decl.name;
+
+	if (stage.args.len != 1 || !stage.args[0].is_name)
+	{
+		self.fail(stage.line, stage.column, string::format(self.allocator,
+			"@%s takes one name, or nothing at all", stage.name));
+		return CODEGEN_ERROR~;
+	}
+	return stage.args[0].name;
+}
+
+<*
  Emit one entry point.
 
  The parameter struct is rebuilt as a function local so the body can read it
  with ordinary member access, and the return value is scattered back out to the
  stage's output variables (see emit_return).
 *>
-fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model)
+fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, String entry_name)
 {
 	self.inputs.clear();
 	self.outputs.clear();
@@ -505,8 +527,10 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model)
 	function.end();
 	self.func = null;
 
+	// OpName keeps the function's own name so a disassembly maps back to the
+	// source; the entry point publishes whatever the stage attribute asked for.
 	self.mod.name(function.id, decl.name);
-	self.mod.entry_point(execution_model, function.id, decl.name, self.interface_ids.array_view());
+	self.mod.entry_point(execution_model, function.id, entry_name, self.interface_ids.array_view());
 
 	if (execution_model == EXECUTION_MODEL_FRAGMENT)
 	{
@@ -607,15 +631,30 @@ fn void? Codegen.build(&self)
 	self.assign_bindings(self.ast)!;
 	self.emit_resources(self.ast)!;
 
-	bool has_entry_point = false;
+	// One module can hold as many entry points as it likes, of any stage. The
+	// host picks between them by name, through `pName` in
+	// VkPipelineShaderStageCreateInfo, so the names have to be distinct.
+	StringList entry_names;
+	entry_names.init(self.allocator, 4);
+
 	foreach (decl : self.ast.decls)
 	{
 		if (decl.kind != DeclKind.FUNCTION) continue;
 
-		uint execution_model;
-		if (find_attribute(decl.attributes, "vertex"))        { execution_model = EXECUTION_MODEL_VERTEX; }
-		else if (find_attribute(decl.attributes, "fragment")) { execution_model = EXECUTION_MODEL_FRAGMENT; }
-		else if (find_attribute(decl.attributes, "compute"))  { execution_model = EXECUTION_MODEL_GLCOMPUTE; }
+		uint       execution_model;
+		Attribute* stage;
+		if (stage = find_attribute(decl.attributes, "vertex"), stage)
+		{
+			execution_model = EXECUTION_MODEL_VERTEX;
+		}
+		else if (stage = find_attribute(decl.attributes, "fragment"), stage)
+		{
+			execution_model = EXECUTION_MODEL_FRAGMENT;
+		}
+		else if (stage = find_attribute(decl.attributes, "compute"), stage)
+		{
+			execution_model = EXECUTION_MODEL_GLCOMPUTE;
+		}
 		else
 		{
 			self.fail(decl.line, decl.column,
@@ -623,11 +662,20 @@ fn void? Codegen.build(&self)
 			return CODEGEN_ERROR~;
 		}
 
-		self.emit_entry_point(decl, execution_model)!;
-		has_entry_point = true;
+		String entry_name = self.entry_name(decl, stage)!;
+		foreach (taken : entry_names)
+		{
+			if (taken != entry_name) continue;
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"there is already an entry point called `%s` - the host tells them apart by name", entry_name));
+			return CODEGEN_ERROR~;
+		}
+		entry_names.push(entry_name);
+
+		self.emit_entry_point(decl, execution_model, entry_name)!;
 	}
 
-	if (!has_entry_point)
+	if (!entry_names.len())
 	{
 		self.fail(0, 0, "the shader has no entry points");
 		return CODEGEN_ERROR~;
