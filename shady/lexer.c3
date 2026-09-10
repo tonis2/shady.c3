@@ -22,7 +22,6 @@ enum TokenKind : char
 	// Keywords
 	FN,
 	STRUCT,
-	UNIFORM,
 	CONST,
 	RETURN,
 	IF,
@@ -36,8 +35,6 @@ enum TokenKind : char
 	FALSE,
 	// Reserved: parsed as keywords so using one as a name is a clear error
 	// rather than a confusing syntax error later.
-	BUFFER,
-	PUSH_CONSTANT,
 	IN,
 	OUT,
 	SWITCH,
@@ -207,7 +204,6 @@ fn TokenKind keyword_kind(String word) @local
 	{
 		case "fn":            return FN;
 		case "struct":        return STRUCT;
-		case "uniform":       return UNIFORM;
 		case "const":         return CONST;
 		case "return":        return RETURN;
 		case "if":            return IF;
@@ -219,8 +215,6 @@ fn TokenKind keyword_kind(String word) @local
 		case "discard":       return DISCARD;
 		case "true":          return TRUE;
 		case "false":         return FALSE;
-		case "buffer":        return BUFFER;
-		case "push_constant": return PUSH_CONSTANT;
 		case "in":            return IN;
 		case "out":           return OUT;
 		case "switch":        return SWITCH;

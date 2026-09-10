@@ -19,10 +19,14 @@ Source is UTF-8. Whitespace is insignificant except as a token separator.
 
 **Identifiers** match `[A-Za-z_][A-Za-z0-9_]*`.
 
-**Keywords**: `fn` `struct` `uniform` `const` `return` `if` `else` `while`
-`for` `break` `continue` `discard` `true` `false`.
-Reserved for later: `buffer` `push_constant` `in` `out` `switch` `case`
-`default` `do`.
+**Keywords**: `fn` `struct` `const` `return` `if` `else` `while` `for` `break`
+`continue` `discard` `true` `false`.
+Reserved for later: `in` `out` `switch` `case` `default` `do`.
+
+`uniform`, `buffer` and `push_constant` are *not* keywords — they used to be,
+and are now ordinary identifiers, because what a block is comes from an
+attribute on the struct (§3.2). The old spellings are recognised where they
+used to appear and rejected with a message saying what to write instead.
 
 Type names are *not* keywords. `float4` is an ordinary identifier that resolves
 to a builtin type, so a user struct may shadow one (and gets diagnosed rather
@@ -120,33 +124,70 @@ A function with no stage attribute is an ordinary function, inlined or emitted
 as an `OpFunction` and called. A function with a stage attribute is an entry
 point (§6).
 
-### 3.2 Resources
+### 3.2 Blocks
+
+A block is an ordinary `struct` with an attribute. The attribute decides the
+struct's layout, its storage class, and whether it takes a descriptor binding.
+
+| Attribute | What the struct becomes | Layout | Binding |
+|---|---|---|---|
+| *(none)* | an ordinary struct — locals, parameters, stage I/O | — | — |
+| `@uniform` | a uniform buffer | std140 | yes |
+| `@pushconstant` | the pipeline's push constants | std430 | no |
+| `@address` | the target of a device-address pointer (§10) | std430 | no |
+
+Attributes go between the struct's name and its body, as in C3:
+
 ```
-uniform Uniforms uniforms;              // set 0, binding 0
-texture2d tex;                          // set 0, binding 1
-sampler tex_sampler;                    // set 0, binding 2
+struct Uniforms @uniform
+{
+    float4x4 projection;
+    float4x4 view;
+}
+
+struct Vertex @address
+{
+    float3 position;
+    float4 color;
+}
+
+struct Push @pushconstant
+{
+    Vertex* vertices;
+    uint    count;
+}
+```
+
+A struct carries at most one of these; two is an error. A `@uniform` or
+`@pushconstant` struct gets `Block` and per-member `Offset` decorations.
+
+There is at most one `@pushconstant` block per shader, because Vulkan allows
+one push constant block per pipeline.
+
+### 3.3 Module-level variables
+
+```
+Uniforms  uniforms;                       // set 0, binding 0
+texture2d tex;                            // set 0, binding 1
+sampler   tex_sampler;                    // set 0, binding 2
+Push      pc;                             // no binding: push constants
 texture2d shadow_map @set(1) @binding(0);
 ```
 
-`uniform T name;` declares a uniform buffer whose block type is `T`. `T` must
-be a struct. The struct gets `Block`, and its members get `Offset` computed by
-the std140 rules (§7).
+A module-level variable is written `Type name;`. What kind of resource it is
+comes entirely from the type — there are no `uniform`, `buffer` or
+`push_constant` keywords.
+
+Only some types may be bound: an opaque type (`texture2d`, `sampler`), a
+`@uniform` struct, or a `@pushconstant` struct. A plain struct has no layout
+and an `@address` struct is reached through a pointer, so neither can be a
+variable.
 
 Bindings are assigned in declaration order within each set, starting at 0.
 An explicit `@set(n)` or `@binding(n)` pins that resource; auto-assignment
 skips numbers already taken by explicit ones. Mixing the two is allowed;
-a collision is an error rather than a silent overwrite.
-
-### 3.3 Buffers and push constants
-```
-buffer Vertex { float3 position; float4 color; }
-struct Push   { Vertex* vertices; uint count; }
-push_constant Push pc;
-```
-
-A `buffer` is a struct reached through a device address rather than bound as a
-descriptor; a `push_constant` block is the pipeline's push constants. Neither
-takes a set or a binding. Both are laid out std430. See §10.
+a collision is an error rather than a silent overwrite. A `@pushconstant`
+block takes no binding and does not consume one.
 
 ### 3.4 Constants
 ```
@@ -163,12 +204,19 @@ Compile-time constants. The initialiser must be a constant expression.
 | `@fragment` | function | Fragment entry point |
 | `@compute` | function | Compute entry point |
 | `@threads(x, y, z)` | `@compute` function | Workgroup size, required on compute |
+| `@uniform` | struct | A uniform buffer: std140, takes a binding |
+| `@pushconstant` | struct | The pipeline's push constants: std430, no binding |
+| `@address` | struct | Reached through a device address: std430, no binding |
 | `@position` | struct member | `BuiltIn Position` instead of a location |
 | `@location(n)` | struct member | Pin the location; others auto-assign around it |
 | `@builtin(name)` | struct member / parameter | A SPIR-V builtin (§6.3) |
-| `@set(n)` | resource | Descriptor set |
-| `@binding(n)` | resource | Binding within the set |
+| `@set(n)` | module-level variable | Descriptor set |
+| `@binding(n)` | module-level variable | Binding within the set |
 | `@flat` | struct member | `Flat` interpolation |
+
+A struct carries at most one of `@uniform`, `@pushconstant` and `@address`;
+two is an error. Attributes sit between a struct's name and its body, and
+after a function's signature, as in C3.
 
 Unknown attributes are an error, not a warning — a typo'd `@framgent` that
 silently produced no entry point would be a miserable thing to debug.
@@ -297,9 +345,9 @@ Two layouts are used, and which one applies depends on the block:
 
 | Block | Layout |
 |---|---|
-| `uniform` | std140 |
-| `push_constant` | std430 |
-| `buffer` (device address) | std430 |
+| `@uniform` | std140 |
+| `@pushconstant` | std430 |
+| `@address` (device address) | std430 |
 
 Both share the same base rules:
 
@@ -366,25 +414,28 @@ lowers with `OpSelectionMerge`.
 
 ## 10. Buffer device addresses
 
-A `buffer` declaration is a struct that is never bound as a descriptor. It is
-reached through a 64-bit GPU address the host hands in, usually as a push
-constant. This is Vulkan's `bufferDeviceAddress` feature.
+An `@address` struct is never bound as a descriptor. It is reached through a
+64-bit GPU address the host hands in, usually as a push constant. This is
+Vulkan's `bufferDeviceAddress` feature.
+
+It has nothing to do with a uniform buffer, and nothing to do with a storage
+buffer: it is a raw pointer target, what GLSL spells `buffer_reference`.
 
 ```
-buffer Vertex
+struct Vertex @address
 {
     float3 position;
     float4 color;
     float2 uv;
 }
 
-struct Push
+struct Push @pushconstant
 {
     Vertex* vertices;
     uint    count;
 }
 
-push_constant Push pc;
+Push pc;
 
 struct VertexIn
 {
@@ -404,16 +455,17 @@ fn FragmentIn vert(VertexIn input) @vertex
 
 ### 10.1 Pointers
 
-`T*` is a device address, and `T` must be a `buffer`. A pointer to a plain
-`struct` is an error: a plain struct has no layout and no address.
+`T*` is a device address, and `T` must be an `@address` struct. A pointer to
+anything else is an error: only an `@address` struct has a layout and an
+address.
 
 The pointer grammar is exactly one trailing `*`. There is no `&`, no pointer
 arithmetic beyond indexing, and no pointer-to-pointer.
 
 Pointers may appear as:
 
-- a member of a `struct` used as a `push_constant` or `uniform` block,
-- a member of a `buffer` (including a pointer to its own type),
+- a member of a `@pushconstant` or `@uniform` block,
+- a member of an `@address` struct (including a pointer to its own type),
 - a local variable.
 
 Two operations are defined on a pointer:
@@ -431,11 +483,11 @@ nothing real is lost.
 
 ### 10.2 Layout, and the contract with the host
 
-A `buffer` is laid out **std430**, not std140. The difference from a uniform
+An `@address` struct is laid out **std430**, not std140. The difference from a uniform
 block (section 7) is in two places: std430 does not round a struct's alignment
 up to 16, and does not round a matrix's column stride up to 16.
 
-The `buffer Vertex` above therefore lays out as:
+The `Vertex` above therefore lays out as:
 
 | Member | Type | Offset | Size |
 |---|---|---|---|
@@ -457,15 +509,15 @@ not.
 
 ### 10.3 Push constants
 
-`push_constant T name;` declares the pipeline's push constant block. `T` is a
-plain struct, laid out std430. A shader may have at most one.
+`struct T @pushconstant { ... }` marks the pipeline's push constant block,
+laid out std430; `T name;` declares it. A shader may have at most one.
 
 A push constant block is not a descriptor: it takes no set and no binding, and
 it does not consume one. `@set` or `@binding` on it is an error.
 
 ### 10.4 What the emitter produces
 
-Declaring a `buffer` changes the module header, not just its body:
+Declaring an `@address` struct changes the module header, not just its body:
 
 - `OpCapability PhysicalStorageBufferAddresses` and `OpCapability Int64`
 - `OpExtension "SPV_KHR_physical_storage_buffer"`

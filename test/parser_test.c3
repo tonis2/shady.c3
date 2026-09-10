@@ -31,13 +31,12 @@ struct FragmentIn
     float2 uv;
 }
 
-struct Uniforms
-{
+struct Uniforms @uniform {
     float4x4 projection;
     float4x4 view;
 }
 
-uniform Uniforms uniforms;
+Uniforms uniforms;
 texture2d tex;
 sampler tex_sampler;
 
@@ -76,13 +75,18 @@ fn void parses_the_cube_shader() @test
 	assert(shady::find_attribute(position.attributes, "position") != null, "@position lost");
 	assert(shady::find_attribute(fragment_in.struct_decl.members[1].attributes, "position") == null);
 
+	// A module-level variable is just `Type name;`. What kind of resource it
+	// is comes from the type, which the parser does not resolve.
 	shady::Decl* uniforms = ast.find("uniforms");
 	assert(uniforms.kind == shady::DeclKind.RESOURCE);
-	assert(uniforms.resource.is_uniform);
 	assert(uniforms.resource.type.name == "Uniforms");
 
+	// The block kind rides on the struct, not on the variable.
+	shady::Decl* uniforms_type = ast.find("Uniforms");
+	assert(shady::find_attribute(uniforms_type.attributes, "uniform") != null, "@uniform lost");
+
 	shady::Decl* tex = ast.find("tex");
-	assert(tex.kind == shady::DeclKind.RESOURCE && !tex.resource.is_uniform);
+	assert(tex.kind == shady::DeclKind.RESOURCE);
 	assert(tex.resource.type.name == "texture2d");
 
 	shady::Decl* vert = ast.find("vert");

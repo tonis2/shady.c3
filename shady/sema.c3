@@ -50,14 +50,62 @@ struct Type
 	uint           dim;     // TEXTURE only
 
 	<*
-	 A `buffer` struct: laid out std430 and only ever reached through a
-	 device address, never bound as a descriptor.
+	 What kind of block this struct is, from its `@uniform`, `@pushconstant`
+	 or `@address` attribute. NONE for an ordinary struct.
 	*>
-	bool is_buffer;
+	BlockKind block;
 
 	Id id;         // cached SPIR-V id, 0 until emitted
-	Id pointer_id; // is_buffer only: the PhysicalStorageBuffer pointer to it
+	Id pointer_id; // ADDRESS only: the PhysicalStorageBuffer pointer to it
 }
+
+<*
+ How a struct is used, which decides its layout, its storage class, and
+ whether it takes a descriptor binding (LANGUAGE.md section 3.3).
+
+ A struct carries at most one of these. It is a property of the type rather
+ than of the variable, because `Vertex*` has to know the pointee is
+ address-reachable before any variable of that type exists.
+*>
+enum BlockKind : char
+{
+	NONE,          // an ordinary struct: locals, parameters, stage I/O
+	UNIFORM,       // @uniform      - a descriptor, std140
+	PUSH_CONSTANT, // @pushconstant - the pipeline's push constants, std430
+	ADDRESS,       // @address      - reached by device address, std430
+}
+
+<*
+ Map an attribute name to its block kind. Returns false for anything else, so
+ the caller can leave unrelated attributes alone.
+*>
+fn bool block_kind_from_name(String name, BlockKind* out)
+{
+	switch (name)
+	{
+		case "uniform":      *out = UNIFORM;
+		case "pushconstant": *out = PUSH_CONSTANT;
+		case "address":      *out = ADDRESS;
+		default: return false;
+	}
+	return true;
+}
+
+fn String BlockKind.attribute(self)
+{
+	switch (self)
+	{
+		case UNIFORM:       return "@uniform";
+		case PUSH_CONSTANT: return "@pushconstant";
+		case ADDRESS:       return "@address";
+		default:            return "";
+	}
+}
+
+<*
+ std140 for uniform blocks, std430 for everything else (LANGUAGE.md section 7).
+*>
+fn Layout BlockKind.layout(self) => self == UNIFORM ? STD140 : STD430;
 
 alias TypePtrList = List{Type*};
 

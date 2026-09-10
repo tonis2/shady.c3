@@ -67,10 +67,18 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 			resource.binding = (uint)binding.args[0].number;
 		}
 
-		resource.is_uniform       = decl.resource.is_uniform;
-		resource.is_push_constant = decl.resource.is_push_constant;
+		// The type is already resolved: declare_structs ran first.
+		Type* type = self.types.find(decl.resource.type.name);
+		if (!type)
+		{
+			self.fail(decl.line, decl.column,
+				string::format(self.allocator, "unknown type `%s`", decl.resource.type.name));
+			return CODEGEN_ERROR~;
+		}
+		resource.type  = type;
+		resource.block = type.kind == STRUCT ? type.block : BlockKind.NONE;
 
-		if (resource.is_push_constant)
+		if (resource.block == PUSH_CONSTANT)
 		{
 			// A push constant block is not a descriptor. Vulkan allows exactly
 			// one per pipeline, so a second is an error rather than a binding
@@ -97,7 +105,7 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 	{
 		if (decl.kind != DeclKind.RESOURCE) continue;
 		Resource* resource = &self.resources[(sz)at++];
-		if (resource.is_push_constant || resource.binding != UNASSIGNED_BINDING) continue;
+		if (resource.block == PUSH_CONSTANT || resource.binding != UNASSIGNED_BINDING) continue;
 
 		uint candidate = 0;
 		while (self.binding_taken(resource.set, candidate)) candidate++;
@@ -107,10 +115,10 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 	// Third pass: reject duplicates, which explicit attributes can still create.
 	foreach (i, &a : self.resources)
 	{
-		if (a.is_push_constant) continue;
+		if (a.block == PUSH_CONSTANT) continue;
 		foreach (j, &b : self.resources)
 		{
-			if (j <= i || b.is_push_constant) continue;
+			if (j <= i || b.block == PUSH_CONSTANT) continue;
 			if (a.set == b.set && a.binding == b.binding)
 			{
 				self.fail(0, 0, string::format(self.allocator,
@@ -125,13 +133,37 @@ fn bool Codegen.binding_taken(&self, uint set, uint binding)
 {
 	foreach (&resource : self.resources)
 	{
-		if (resource.is_push_constant) continue;
+		if (resource.block == PUSH_CONSTANT) continue;
 		if (resource.set == set && resource.binding == binding) return true;
 	}
 	return false;
 }
 
 // --- Declarations ------------------------------------------------------------
+
+<*
+ Read a struct's `@uniform`, `@pushconstant` or `@address` attribute.
+
+ At most one: they choose the layout and the storage class, and a struct
+ cannot be two kinds of block at once.
+*>
+fn BlockKind? Codegen.block_kind(&self, Decl* decl)
+{
+	BlockKind found = NONE;
+	foreach (&attribute : decl.attributes)
+	{
+		BlockKind kind;
+		if (!block_kind_from_name(attribute.name, &kind)) continue;
+		if (found != NONE)
+		{
+			self.fail(attribute.line, attribute.column, string::format(self.allocator,
+				"`%s` is already %s, it cannot also be %s", decl.name, found.attribute(), kind.attribute()));
+			return CODEGEN_ERROR~;
+		}
+		found = kind;
+	}
+	return found;
+}
 
 <*
  Turn the AST's structs into types, so functions can refer to them regardless
@@ -148,17 +180,18 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 				string::format(self.allocator, "`%s` is already a type", decl.name));
 			return CODEGEN_ERROR~;
 		}
-		Type* type     = self.types.add(STRUCT, decl.name);
-		type.is_buffer = decl.struct_decl.is_buffer;
-		if (type.is_buffer) self.uses_device_addresses = true;
+		Type* type  = self.types.add(STRUCT, decl.name);
+		type.block  = self.block_kind(decl)!;
+		if (type.block == ADDRESS) self.uses_device_addresses = true;
 	}
 
-	// Every buffer struct's pointer type is declared - not defined - before any
-	// struct body is emitted. That is what lets a buffer hold a pointer to
-	// itself, or to a buffer declared further down.
+	// Every @address struct's pointer type is declared - not defined - before
+	// any struct body is emitted. That is what lets one hold a pointer to
+	// itself, or to a struct declared further down.
 	foreach (decl : ast.decls)
 	{
-		if (decl.kind != DeclKind.STRUCT || !decl.struct_decl.is_buffer) continue;
+		if (decl.kind != DeclKind.STRUCT) continue;
+		if (self.types.find(decl.name).block != ADDRESS) continue;
 		Type* type = self.types.find(decl.name);
 		type.pointer_id = self.mod.type_forward_pointer(STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER);
 		self.types.pointer_to(type);
@@ -182,10 +215,11 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 			}
 			if (source.type.is_pointer)
 			{
-				if (!member_type.is_buffer)
+				if (member_type.block != ADDRESS)
 				{
 					self.fail(source.line, source.column, string::format(self.allocator,
-						"`%s*` is not a device address - only a `buffer` type has one", member_type.name));
+						"`%s*` is not a device address - mark `%s` with @address to give it one",
+						member_type.name, member_type.name));
 					return CODEGEN_ERROR~;
 				}
 				member_type = self.types.pointer_to(member_type);
@@ -211,7 +245,7 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 		type.members = members;
 	}
 
-	// Now that every buffer struct's members are known, emit its type, lay it
+	// Now that every @address struct's members are known, emit its type, lay it
 	// out std430, decorate it Block, and close the forward pointer.
 	//
 	// ArrayStride records the element size on the pointer type. Indexing does
@@ -220,8 +254,9 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 	// from, and it costs four words.
 	foreach (decl : ast.decls)
 	{
-		if (decl.kind != DeclKind.STRUCT || !decl.struct_decl.is_buffer) continue;
+		if (decl.kind != DeclKind.STRUCT) continue;
 		Type* type = self.types.find(decl.name);
+		if (type.block != ADDRESS) continue;
 
 		uint size    = type.assign_offsets(STD430);
 		Id   type_id = self.type_id(type);
@@ -261,46 +296,43 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 		if (decl.kind != DeclKind.RESOURCE) continue;
 		Resource* resource = &self.resources[(sz)at++];
 
-		Type* type = self.types.find(decl.resource.type.name);
-		if (!type)
-		{
-			self.fail(decl.line, decl.column,
-				string::format(self.allocator, "unknown type `%s`", decl.resource.type.name));
-			return CODEGEN_ERROR~;
-		}
-		resource.type = type;
+		// assign_bindings resolved the type and its block kind already.
+		Type* type = resource.type;
 
 		uint storage;
-		if (decl.resource.is_uniform || decl.resource.is_push_constant)
+		switch (resource.block)
 		{
-			bool   is_push = decl.resource.is_push_constant;
-			Layout layout  = is_push ? STD430 : STD140;
+			case UNIFORM:
+			case PUSH_CONSTANT:
+				Layout layout = resource.block.layout();
+				storage = resource.block == BlockKind.UNIFORM
+					? STORAGE_CLASS_UNIFORM
+					: STORAGE_CLASS_PUSH_CONSTANT;
 
-			if (type.kind != STRUCT || type.is_buffer)
-			{
-				self.fail(decl.line, decl.column, is_push
-					? "a push constant block must name a struct type"
-					: "a uniform must name a struct type");
-				return CODEGEN_ERROR~;
-			}
-			storage = is_push ? STORAGE_CLASS_PUSH_CONSTANT : STORAGE_CLASS_UNIFORM;
+				// Block layout has to be decided before the type id is emitted,
+				// because the decorations hang off that id.
+				resource.size = type.assign_offsets(layout);
+				Id type_id    = self.type_id(type);
+				self.mod.decorate(type_id, DECORATION_BLOCK);
+				self.decorate_block_members(type_id, type, layout);
 
-			// Block layout has to be decided before the type id is emitted,
-			// because the decorations hang off that id.
-			resource.size = type.assign_offsets(layout);
-			Id type_id    = self.type_id(type);
-			self.mod.decorate(type_id, DECORATION_BLOCK);
-			self.decorate_block_members(type_id, type, layout);
-		}
-		else
-		{
-			if (type.kind != TEXTURE && type.kind != SAMPLER)
-			{
-				self.fail(decl.line, decl.column,
-					string::format(self.allocator, "`%s` cannot be a module-level resource", type.name));
+			case ADDRESS:
+				self.fail(decl.line, decl.column, string::format(self.allocator,
+					"`%s` is @address, so it is reached through a `%s*`, not bound as a variable",
+					type.name, type.name));
 				return CODEGEN_ERROR~;
-			}
-			storage = STORAGE_CLASS_UNIFORM_CONSTANT;
+
+			case NONE:
+				if (type.kind != TEXTURE && type.kind != SAMPLER)
+				{
+					self.fail(decl.line, decl.column, type.kind == STRUCT
+						? string::format(self.allocator,
+							"`%s` is a plain struct - mark it @uniform or @pushconstant to bind it", type.name)
+						: string::format(self.allocator,
+							"`%s` cannot be a module-level variable", type.name));
+					return CODEGEN_ERROR~;
+				}
+				storage = STORAGE_CLASS_UNIFORM_CONSTANT;
 		}
 
 		resource.storage = storage;

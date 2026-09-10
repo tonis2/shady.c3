@@ -16,19 +16,17 @@ import shady;
 const String OUT_DIR = "build/shady";
 
 const String PARTICLES = `
-buffer Particle
-{
+struct Particle @address {
     float4 position;
     float4 velocity;
 }
 
-struct Push
-{
+struct Push @pushconstant {
     Particle* particles;
     uint      count;
 }
 
-push_constant Push pc;
+Push pc;
 
 struct VertexIn
 {
@@ -89,13 +87,13 @@ fn void compiles_a_device_address_shader() @test
 fn void push_constants_take_no_binding() @test
 {
 	char[] spirv = build(`
-buffer Data { float4 value; }
+struct Data @address { float4 value; }
 
-struct Push { Data* data; }
-struct Uniforms { float4x4 mvp; }
+struct Push @pushconstant { Data* data; }
+struct Uniforms @uniform { float4x4 mvp; }
 
-push_constant Push pc;
-uniform Uniforms uniforms;
+Push pc;
+Uniforms uniforms;
 texture2d tex;
 
 struct Out { float4 position @position; }
@@ -120,8 +118,8 @@ fn void rejects_a_pointer_to_a_plain_struct() @test
 	shady::Diagnostic diagnostic;
 	char[]? spirv = shady::compile(`
 struct Plain { float4 value; }
-struct Push { Plain* p; }
-push_constant Push pc;
+struct Push @pushconstant { Plain* p; }
+Push pc;
 
 struct Out { float4 position @position; }
 fn Out vert() @vertex { Out o; o.position = pc.p[0].value; return o; }
@@ -144,10 +142,10 @@ fn void rejects_two_push_constant_blocks() @test
 {
 	shady::Diagnostic diagnostic;
 	char[]? spirv = shady::compile(`
-struct A { uint x; }
-struct B { uint y; }
-push_constant A a;
-push_constant B b;
+struct A @pushconstant { uint x; }
+struct B @pushconstant { uint y; }
+A a;
+B b;
 
 struct Out { float4 position @position; }
 fn Out vert() @vertex { Out o; o.position = float4(0.0, 0.0, 0.0, 1.0); return o; }

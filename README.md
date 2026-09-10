@@ -46,15 +46,15 @@ struct FragmentIn
     float2 uv;
 }
 
-struct Uniforms
+struct Uniforms @uniform
 {
     float4x4 projection;
     float4x4 view;
 }
 
-uniform Uniforms uniforms;
+Uniforms  uniforms;
 texture2d tex;
-sampler tex_sampler;
+sampler   tex_sampler;
 
 fn FragmentIn vert(VertexIn input) @vertex
 {
@@ -71,25 +71,33 @@ fn float4 frag(FragmentIn input) @fragment
 }
 ```
 
+A block is an ordinary struct plus an attribute — `@uniform`, `@pushconstant`
+or `@address` — which decides its layout, its storage class, and whether it
+takes a binding. A module-level variable is then just `Type name;`. There are
+no `uniform`, `buffer` or `push_constant` keywords.
+
 Descriptor sets and bindings are assigned in declaration order unless an
 explicit `@set`/`@binding` says otherwise; a collision is an error rather than
 a silent overwrite.
 
 ### Buffer device addresses
 
-A `buffer` is a struct reached through a 64-bit GPU address instead of a
+An `@address` struct is reached through a 64-bit GPU address instead of a
 descriptor — Vulkan's `bufferDeviceAddress`. It lets a vertex shader pull its
 own vertices, with no vertex input bindings or attributes at all.
 
+It is neither a uniform buffer nor a storage buffer: it is a raw pointer
+target, what GLSL spells `buffer_reference`.
+
 ```
-buffer Vertex
+struct Vertex @address
 {
     float3 position;
     float4 color;
 }
 
-struct Push { Vertex* vertices; }
-push_constant Push pc;
+struct Push @pushconstant { Vertex* vertices; }
+Push pc;
 
 struct VertexIn { uint index @builtin(vertex_index); }
 
@@ -104,8 +112,8 @@ fn FragmentIn vert(VertexIn input) @vertex
 }
 ```
 
-Declaring a `buffer` switches the module to the `PhysicalStorageBuffer64`
-addressing model and SPIR-V 1.3, lays the struct out std430, and puts an
+Declaring one switches the module to the `PhysicalStorageBuffer64` addressing
+model and SPIR-V 1.3, lays the struct out std430, and puts an
 `Aligned` operand on every access through the address. See
 [`LANGUAGE.md` §10](LANGUAGE.md), which also records why indexing lowers to
 explicit 64-bit arithmetic rather than to `OpPtrAccessChain`.

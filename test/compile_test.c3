@@ -25,13 +25,12 @@ struct FragmentIn
     float2 uv;
 }
 
-struct Uniforms
-{
+struct Uniforms @uniform {
     float4x4 projection;
     float4x4 view;
 }
 
-uniform Uniforms uniforms;
+Uniforms uniforms;
 texture2d tex;
 sampler tex_sampler;
 

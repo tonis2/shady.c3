@@ -42,15 +42,14 @@ struct Local
 
 struct Resource
 {
-	String name;
-	Type*  type;
-	Id     id;
-	bool   is_uniform;
-	bool   is_push_constant;
-	uint   storage;
-	uint   set;
-	uint   binding;
-	uint   size; // block size in bytes, for uniform and push constant blocks
+	String    name;
+	Type*     type;
+	Id        id;
+	uint      storage;
+	BlockKind block;   // NONE for an opaque type, else the struct's block kind
+	uint      set;
+	uint      binding;
+	uint      size;    // block size in bytes, for uniform and push constant blocks
 }
 
 <*
@@ -997,10 +996,11 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 			}
 			if (stmt.decl.type.is_pointer)
 			{
-				if (!type.is_buffer)
+				if (type.block != ADDRESS)
 				{
 					self.fail(stmt.line, stmt.column, string::format(self.allocator,
-						"`%s*` is not a device address - only a `buffer` type has one", type.name));
+						"`%s*` is not a device address - mark `%s` with @address to give it one",
+						type.name, type.name));
 					return CODEGEN_ERROR~;
 				}
 				type = self.types.pointer_to(type);

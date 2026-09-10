@@ -549,6 +549,36 @@ fn Stmt*? Parser.declaration_or_expression(&self)
 
 // --- Declarations ------------------------------------------------------------
 
+<*
+ Catch the pre-attribute spellings of block declarations.
+
+ `uniform T n;` and `push_constant T n;` are three identifiers in a row, and
+ `buffer T {` is two followed by a brace. Neither shape can be a valid
+ declaration, so recognising them costs nothing and turns a baffling error
+ into an instruction.
+*>
+fn void? Parser.reject_old_keyword(&self, Token token)
+{
+	String replacement;
+	switch (token.text)
+	{
+		case "uniform":
+			if (self.peek(1).kind != IDENT || self.peek(2).kind != IDENT) return;
+			replacement = "@uniform on the struct, then `T name;`";
+		case "push_constant":
+			if (self.peek(1).kind != IDENT || self.peek(2).kind != IDENT) return;
+			replacement = "@pushconstant on the struct, then `T name;`";
+		case "buffer":
+			if (self.peek(1).kind != IDENT || self.peek(2).kind != LBRACE) return;
+			replacement = "`struct T @address { ... }`";
+		default:
+			return;
+	}
+
+	self.fail(string::format(self.allocator, "`%s` is not a keyword any more - write %s", token.text, replacement));
+	return PARSE_ERROR~;
+}
+
 fn Decl*? Parser.declaration(&self)
 {
 	Token token = self.peek();
@@ -559,12 +589,12 @@ fn Decl*? Parser.declaration(&self)
 	switch (token.kind)
 	{
 		case STRUCT:
-		case BUFFER:
-			bool is_buffer = token.kind == BUFFER;
 			self.advance();
-			Token name = self.expect(IDENT, is_buffer ? "expected a buffer name" : "expected a struct name")!;
-			decl.kind       = DeclKind.STRUCT;
-			decl.name       = name.text;
+			Token name = self.expect(IDENT, "expected a struct name")!;
+			decl.kind = DeclKind.STRUCT;
+			decl.name = name.text;
+			// Attributes sit between the name and the body, as in C3:
+			// `struct Vertex @address { ... }`.
 			decl.attributes = self.attributes()!;
 			self.expect(LBRACE, "expected `{` opening the struct body")!;
 
@@ -586,7 +616,7 @@ fn Decl*? Parser.declaration(&self)
 				});
 			}
 			self.expect(RBRACE, "expected `}` closing the struct body")!;
-			decl.struct_decl = { .members = members.array_view(), .is_buffer = is_buffer };
+			decl.struct_decl = { .members = members.array_view() };
 			return decl;
 
 		case FN:
@@ -624,20 +654,6 @@ fn Decl*? Parser.declaration(&self)
 			decl.function   = { .return_type = return_type, .params = params.array_view(), .body = body };
 			return decl;
 
-		case UNIFORM:
-		case PUSH_CONSTANT:
-			bool is_push_constant = token.kind == PUSH_CONSTANT;
-			self.advance();
-			TypeRef type = self.type_ref()!;
-			Token   name = self.expect(IDENT,
-				is_push_constant ? "expected a name for the push constant block" : "expected a name for the uniform")!;
-			decl.kind       = DeclKind.RESOURCE;
-			decl.name       = name.text;
-			decl.attributes = self.attributes()!;
-			decl.resource   = { .type = type, .is_uniform = !is_push_constant, .is_push_constant = is_push_constant };
-			self.expect(SEMICOLON, "expected `;` after the block")!;
-			return decl;
-
 		case CONST:
 			self.advance();
 			TypeRef type = self.type_ref()!;
@@ -652,18 +668,26 @@ fn Decl*? Parser.declaration(&self)
 			return decl;
 
 		case IDENT:
-			// The remaining form is a resource: `texture2d tex @binding(1);`
+			// `uniform`, `push_constant` and `buffer` used to be keywords.
+			// They are ordinary identifiers now, so catch the old shapes here
+			// and say what to write instead - the alternative is a syntax
+			// error two tokens later that explains nothing.
+			self.reject_old_keyword(token)!;
+
+			// The remaining form is a module-level variable, whatever kind of
+			// resource its type turns out to be: `texture2d tex @binding(1);`,
+			// `Uniforms uniforms;`, `Push pc;`.
 			TypeRef type = self.type_ref()!;
 			Token   name = self.expect(IDENT, "expected a name for the resource")!;
 			decl.kind       = DeclKind.RESOURCE;
 			decl.name       = name.text;
 			decl.attributes = self.attributes()!;
-			decl.resource   = { .type = type, .is_uniform = false };
+			decl.resource   = { .type = type };
 			self.expect(SEMICOLON, "expected `;` after the resource")!;
 			return decl;
 
 		default:
-			self.fail("expected a declaration: `fn`, `struct`, `buffer`, `uniform`, `push_constant`, `const`, or a resource");
+			self.fail("expected a declaration: `fn`, `struct`, `const`, or a module-level variable");
 			return PARSE_ERROR~;
 	}
 }

@@ -271,14 +271,9 @@ enum DeclKind : char
 	CONSTANT,
 }
 
-<*
- `is_buffer` marks a `buffer` declaration: a struct laid out std430 that is
- only ever reached through a device address.
-*>
 struct DeclStruct
 {
 	Member[] members;
-	bool     is_buffer;
 }
 
 struct DeclFunction
@@ -289,15 +284,15 @@ struct DeclFunction
 }
 
 <*
- `is_uniform` distinguishes `uniform T name;` from `texture2d name;`, and
- `is_push_constant` marks `push_constant T name;` - a block with no descriptor
- binding at all.
+ A module-level variable: `Uniforms uniforms;`, `texture2d tex;`, `Push pc;`.
+
+ What kind of resource it is comes from the type, not from the declaration -
+ an opaque type is a descriptor of its own kind, and a struct is whatever its
+ `@uniform` or `@pushconstant` attribute says (LANGUAGE.md section 3.3).
 *>
 struct DeclResource
 {
 	TypeRef type;
-	bool    is_uniform;
-	bool    is_push_constant;
 }
 
 struct DeclConstant

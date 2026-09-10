@@ -12,7 +12,7 @@ struct VertexIn
     float2 uv;
 }
 
-uniform Uniforms uniforms;
+Uniforms uniforms;
 texture2d tex @set(0) @binding(1);
 
 fn FragmentIn vert(VertexIn input) @vertex
