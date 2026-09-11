@@ -1,0 +1,37 @@
+struct Uniforms @uniform
+{
+    float4x4 view_projection;
+}
+
+struct Push @pushconstant
+{
+    float4x4 model;
+    float4 tint;
+}
+
+Uniforms uniforms;
+Push push;
+
+struct VertexIn
+{
+    float3 position;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 tint;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    FragmentIn output;
+    output.position = uniforms.view_projection * push.model * float4(input.position, 1.0);
+    output.tint = push.tint;
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    return input.tint;
+}

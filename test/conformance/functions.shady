@@ -1,0 +1,62 @@
+struct Uniforms @uniform
+{
+    float4x4 view_projection;
+}
+
+Uniforms uniforms;
+
+struct VertexIn
+{
+    float3 position;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+struct Map
+{
+    int at;
+}
+
+fn Map map_at(int at)
+{
+    Map m;
+    m.at = at;
+    return m;
+}
+
+fn float4 Map.Sample(&self, float2 uv)
+{
+    return float4(uv, float(self.at), 1.0);
+}
+
+fn float4 Map.Sample(&self, float4 uv)
+{
+    return float4(uv.xy, float(self.at), 1.0);
+}
+
+fn float2 tint(float2 color)
+{
+    return tint(color, 0.5);
+}
+
+fn float2 tint(float2 color, float amount)
+{
+    return color * amount;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex(main)
+{
+    FragmentIn output;
+    output.position = uniforms.view_projection * float4(input.position, 1.0);
+    output.color = map_at(3).Sample(float2(0.25, 0.5));
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    return map_at(1).Sample(input.color) + float4(tint(input.color.xy), 0.0, 0.0);
+}

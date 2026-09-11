@@ -219,6 +219,20 @@ fn Id Function.binop(&self, uint opcode, Id type, Id left, Id right)
 
 fn Id Function.unop(&self, uint opcode, Id type, Id operand) => self.emit(opcode, type, operand);
 
+<*
+ Call a function. `function` is the id of an OpFunction, which is emitted
+ before this by Codegen.emit_function.
+*>
+fn Id Function.call(&self, Id result_type, Id function, Id[] args)
+{
+	@pool() {
+		Id[] operands = alloc::alloc_array(tmem, Id, 1 + args.len);
+		operands[0] = function;
+		if (args.len) operands[1..] = args[..];
+		return self.emit_slice(OP_FUNCTION_CALL, result_type, operands);
+	};
+}
+
 // --- Texturing ---------------------------------------------------------------
 
 <*

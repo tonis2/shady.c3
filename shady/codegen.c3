@@ -63,6 +63,29 @@ struct StageVar
 	bool  is_position;
 }
 
+<*
+ A non-entry function, with its signature resolved up front so a call to one
+ declared further down the file still has something to resolve against.
+*>
+struct FunctionSig
+{
+	Decl*   decl;
+	Type*   return_type;
+	// Effective parameters: the receiver first for a method, then what was
+	// written after it, so a call's operands line up with this list.
+	Type*[] params;
+	String[] names;
+	bool    has_receiver;
+	bool    receiver_ref;   // `&self` - the receiver arrives as a pointer
+	String  receiver_name;  // what the receiver is called in the body
+	Id      func_id;
+	bool    emitted;
+	bool    emitting; // set while the body is being emitted, to catch recursion
+}
+
+alias FunctionSigList = List{FunctionSig};
+alias ValueList       = List{Value};
+
 alias LocalList    = List{Local};
 alias ResourceList = List{Resource};
 alias StageVarList = List{StageVar};
@@ -78,6 +101,7 @@ struct Codegen
 
 	ResourceList resources;
 	LocalList    locals;
+	FunctionSigList functions;
 
 	Function*    func;
 	Type*        fn_return;
@@ -667,12 +691,434 @@ fn Id? Codegen.coerce(&self, Value value, Type* expected, Expr* expr)
 	return CODEGEN_ERROR~;
 }
 
+// --- User functions ----------------------------------------------------------
+
+fn Id[] Codegen.new_ids(&self, usz len)
+{
+	if (len == 0) return {};
+	return alloc::alloc_array(self.allocator, Id, (sz)len);
+}
+
+fn Type*[] Codegen.new_types(&self, usz len)
+{
+	if (len == 0) return {};
+	return alloc::alloc_array(self.allocator, Type*, (sz)len);
+}
+
+fn String[] Codegen.new_names(&self, usz len)
+{
+	if (len == 0) return {};
+	return alloc::alloc_array(self.allocator, String, (sz)len);
+}
+
+<*
+ Resolve every non-entry function's signature before any body is emitted.
+
+ A body may call a function declared after it, so the whole list is built first;
+ this is the function-level analogue of `declare_structs`.
+*>
+fn void? Codegen.declare_functions(&self, Ast* ast)
+{
+	foreach (decl : ast.decls)
+	{
+		if (decl.kind != DeclKind.FUNCTION) continue;
+		if (decl.attributes.find("vertex") || decl.attributes.find("fragment") || decl.attributes.find("compute")) continue;
+
+		Type* return_type = self.types.find(decl.function.return_type.name);
+		if (!return_type)
+		{
+			self.fail(decl.line, decl.column,
+				string::format(self.allocator, "unknown type `%s`", decl.function.return_type.name));
+			return CODEGEN_ERROR~;
+		}
+
+		Param[] written = decl.function.params;
+
+		Type*  receiver      = null;
+		bool   receiver_ref  = false;
+		String receiver_name = "";
+		usz    first         = 0; // where the ordinary parameters begin
+
+		if (decl.function.receiver.len)
+		{
+			receiver = self.types.find(decl.function.receiver);
+			if (!receiver || receiver.kind != STRUCT)
+			{
+				self.fail(decl.line, decl.column, string::format(self.allocator,
+					"`%s` is not a struct, so it cannot be a method receiver", decl.function.receiver));
+				return CODEGEN_ERROR~;
+			}
+			if (written.len == 0)
+			{
+				self.fail(decl.line, decl.column, string::format(self.allocator,
+					"`%s.%s` needs a receiver parameter", receiver.name, decl.name));
+				return CODEGEN_ERROR~;
+			}
+
+			if (written[0].is_self)
+			{
+				receiver_ref  = written[0].by_ref;
+				receiver_name = written[0].name;
+				first         = 1;
+			}
+			else
+			{
+				if (written[0].type.is_pointer || written[0].type.is_array)
+				{
+					self.fail(written[0].line, written[0].column,
+						"a method receiver is a value, or `&self` for a reference");
+					return CODEGEN_ERROR~;
+				}
+				Type* declared = self.types.find(written[0].type.name);
+				if (!declared || declared != receiver)
+				{
+					self.fail(written[0].line, written[0].column, string::format(self.allocator,
+						"the first parameter of `%s.%s` must be a %s", receiver.name, decl.name, receiver.name));
+					return CODEGEN_ERROR~;
+				}
+				receiver_name = written[0].name;
+				first         = 1;
+			}
+		}
+		else if (written.len && written[0].is_self)
+		{
+			self.fail(written[0].line, written[0].column,
+				"`self` needs a receiver type: write `fn R Type.name(&self, ...)`");
+			return CODEGEN_ERROR~;
+		}
+
+		foreach (i, &param : written)
+		{
+			if ((usz)i < first || !param.is_self) continue;
+			self.fail(param.line, param.column, "`self` must be the first parameter");
+			return CODEGEN_ERROR~;
+		}
+
+		usz rest  = written.len - first;
+		usz total = rest + (receiver ? (usz)1 : (usz)0);
+
+		Type*[]  params = self.new_types(total);
+		String[] names  = self.new_names(total);
+		usz at = 0;
+		if (receiver)
+		{
+			params[0] = receiver;
+			names[0]  = receiver_name;
+			at        = 1;
+		}
+
+		for (usz i = first; i < written.len; i++)
+		{
+			Type* type = self.types.find(written[i].type.name);
+			if (!type)
+			{
+				self.fail(written[i].line, written[i].column,
+					string::format(self.allocator, "unknown type `%s`", written[i].type.name));
+				return CODEGEN_ERROR~;
+			}
+			if (written[i].type.is_pointer)
+			{
+				if (type.block != ADDRESS)
+				{
+					self.fail(written[i].line, written[i].column, string::format(self.allocator,
+						"`%s*` is not a device address - mark `%s` with @address to give it one",
+						type.name, type.name));
+					return CODEGEN_ERROR~;
+				}
+				type = self.types.pointer_to(type);
+			}
+			params[at] = type;
+			names[at]  = written[i].name;
+			at++;
+		}
+
+		self.functions.push({
+			.decl          = decl,
+			.return_type   = return_type,
+			.params        = params,
+			.names         = names,
+			.has_receiver  = receiver != null,
+			.receiver_ref  = receiver_ref,
+			.receiver_name = receiver_name,
+		});
+	}
+}
+
+fn bool Codegen.has_function(&self, String name)
+{
+	foreach (&sig : self.functions) if (sig.decl.name == name) return true;
+	return false;
+}
+
+<*
+ Can an argument of `arg` be passed to a parameter of `param`?
+
+ The rules mirror `coerce`, so anything overload resolution accepts can also be
+ converted at the call site.
+*>
+fn bool Codegen.accepts(&self, Type* param, Type* arg)
+{
+	if (param == arg) return true;
+	if (param.kind == FLOAT && arg.kind == INT) return true;
+	if (param.kind == VECTOR && arg.is_scalar()) return true;
+	return false;
+}
+
+<*
+ Does `sig` accept these arguments, with `receiver` first when there is one?
+*>
+fn bool Codegen.matches(&self, FunctionSig* sig, Value* receiver, Type*[] arg_types)
+{
+	usz offset = 0;
+	if (receiver)
+	{
+		if (sig.params.len != arg_types.len + 1) return false;
+		if (!self.accepts(sig.params[0], receiver.type)) return false;
+		offset = 1;
+	}
+	else
+	{
+		// A `&self` method has no value receiver, so it cannot be called
+		// without one.
+		if (sig.has_receiver && sig.receiver_ref) return false;
+		if (sig.params.len != arg_types.len) return false;
+	}
+
+	foreach (i, arg_type : arg_types)
+	{
+		if (!self.accepts(sig.params[(usz)i + offset], arg_type)) return false;
+	}
+	return true;
+}
+
+<*
+ Pick the function `name` that these argument types call.
+
+ A member call prefers a declared method, then falls back to a free function
+ whose first parameter is the receiver. Overloading is by arity and argument
+ type; two candidates matching is an error rather than a first-wins guess.
+*>
+fn FunctionSig* Codegen.select_function(&self, String name, Value* receiver, Type*[] arg_types, Expr* expr)
+{
+	if (receiver)
+	{
+		FunctionSig* method = null;
+		foreach (&sig : self.functions)
+		{
+			if (sig.decl.name != name || !sig.has_receiver) continue;
+			if (!self.matches(sig, receiver, arg_types)) continue;
+
+			if (method)
+			{
+				self.fail(expr.line, expr.column, string::format(self.allocator,
+					"`%s` matches more than one overload with these arguments", name));
+				return null;
+			}
+			method = sig;
+		}
+		if (method) return method;
+	}
+
+	FunctionSig* found = null;
+	foreach (&sig : self.functions)
+	{
+		if (sig.decl.name != name) continue;
+		if (receiver && sig.has_receiver) continue; // methods were tried above
+		if (!self.matches(sig, receiver, arg_types)) continue;
+
+		if (found)
+		{
+			self.fail(expr.line, expr.column, string::format(self.allocator,
+				"`%s` matches more than one overload with these arguments", name));
+			return null;
+		}
+		found = sig;
+	}
+
+	if (!found)
+	{
+		self.fail(expr.line, expr.column,
+			string::format(self.allocator, "no `%s` takes these arguments", name));
+		return null;
+	}
+	return found;
+}
+
+<*
+ Emit one non-entry function, on first use.
+
+ Emitting callees here rather than in a pass of its own is what puts a
+ definition before its callers without a call graph: a body that calls `g`
+ emits `g` before it finishes itself. `emitting` catches the one case that
+ would otherwise recurse forever.
+*>
+fn void? Codegen.emit_function(&self, FunctionSig* sig)
+{
+	if (sig.emitted) return;
+	if (sig.emitting)
+	{
+		self.fail(sig.decl.line, sig.decl.column, string::format(self.allocator,
+			"`%s` calls itself - recursion is not supported", sig.decl.name));
+		return CODEGEN_ERROR~;
+	}
+	sig.emitting = true;
+
+	Decl* decl = sig.decl;
+
+	Id[] param_ids = self.new_ids(sig.params.len);
+	foreach (i, param : sig.params)
+	{
+		// A `&self` receiver arrives as a pointer, so the function type says so
+		// even though the parameter list reads as the receiver's type.
+		param_ids[i] = (sig.has_receiver && sig.receiver_ref && i == 0)
+			? self.pointer_to(STORAGE_CLASS_FUNCTION, param)
+			: self.type_id(param);
+	}
+	Id fn_type = self.mod.type_function(self.type_id(sig.return_type), param_ids);
+
+	Function function = self.mod.begin_function(self.type_id(sig.return_type), fn_type);
+	sig.func_id = function.id;
+
+	// Save the caller's context: locals are one list shared by every function
+	// being emitted, and `emit_return` reads `outputs` to tell an entry point's
+	// scatter-to-stage-I/O from a helper's plain return.
+	Function*     saved_func       = self.func;
+	Type*         saved_return     = self.fn_return;
+	bool          saved_terminated = self.terminated;
+	StageVarList  saved_inputs     = self.inputs;
+	StageVarList  saved_outputs    = self.outputs;
+	usz           saved_locals     = (usz)self.locals.len();
+
+	self.func       = &function;
+	self.fn_return  = sig.return_type;
+	self.terminated = false;
+	self.inputs     = {};
+	self.outputs    = {};
+
+	usz at = 0;
+	if (sig.has_receiver)
+	{
+		Type* receiver = sig.params[0];
+		if (sig.receiver_ref)
+		{
+			// The parameter already is a pointer into the caller's storage, so
+			// the receiver's members are reached through it directly.
+			Id pid = function.param(self.pointer_to(STORAGE_CLASS_FUNCTION, receiver));
+			self.locals.push({ .name = sig.receiver_name, .type = receiver, .pointer = pid });
+		}
+		else
+		{
+			Id pid     = function.param(self.type_id(receiver));
+			Id pointer = function.local(self.pointer_to(STORAGE_CLASS_FUNCTION, receiver));
+			function.store(pointer, pid);
+			self.locals.push({ .name = sig.receiver_name, .type = receiver, .pointer = pointer });
+		}
+		at = 1;
+	}
+
+	for (usz i = at; i < sig.params.len; i++)
+	{
+		Type* param = sig.params[i];
+		Id pid     = function.param(self.type_id(param));
+		Id pointer = function.local(self.pointer_to(STORAGE_CLASS_FUNCTION, param));
+		function.store(pointer, pid);
+		self.locals.push({ .name = sig.names[i], .type = param, .pointer = pointer });
+	}
+
+	self.statement(decl.function.body)!;
+
+	if (!self.terminated)
+	{
+		if (sig.return_type.kind != VOID)
+		{
+			self.fail(decl.line, decl.column,
+				string::format(self.allocator, "`%s` does not return a value on every path", decl.name));
+			return CODEGEN_ERROR~;
+		}
+		function.ret();
+	}
+
+	function.end();
+	self.mod.name(function.id, decl.name);
+
+	self.func       = saved_func;
+	self.fn_return  = saved_return;
+	self.terminated = saved_terminated;
+	self.inputs     = saved_inputs;
+	self.outputs    = saved_outputs;
+	self.locals.size = (sz)saved_locals;
+
+	sig.emitted  = true;
+	sig.emitting = false;
+}
+
+<*
+ Call a user function, with or without a receiver.
+
+ `receiver` non-null is a method call: `image.Sample(uv)` is `Sample(image, uv)`,
+ so a method is an ordinary function whose first parameter is the receiver.
+*>
+fn Value? Codegen.user_call(&self, Expr* expr, String name, Value* receiver)
+{
+	ValueList args;
+	args.init(self.allocator, expr.call.args.len + 1);
+	foreach (arg : expr.call.args) args.push(self.expression(arg)!);
+
+	Type*[] arg_types = self.new_types((usz)args.len());
+	foreach (i, value : args) arg_types[i] = value.type;
+
+	FunctionSig* sig = self.select_function(name, receiver, arg_types, expr);
+	if (!sig) return CODEGEN_ERROR~;
+
+	self.emit_function(sig)!;
+
+	usz  total     = (usz)args.len() + (receiver ? (usz)1 : (usz)0);
+	Id[] call_args = self.new_ids(total);
+	usz  at        = 0;
+	usz  offset    = 0;
+
+	if (receiver)
+	{
+		if (sig.has_receiver && sig.receiver_ref)
+		{
+			call_args[at++] = self.receiver_pointer(*receiver);
+		}
+		else
+		{
+			call_args[at++] = self.coerce(*receiver, sig.params[0], expr)!;
+		}
+		offset = 1;
+	}
+	foreach (i, value : args) call_args[at++] = self.coerce(value, sig.params[(usz)i + offset], expr)!;
+
+	Id result = self.func.call(self.type_id(sig.return_type), sig.func_id, call_args);
+	return (Value) { .type = sig.return_type, .id = result };
+}
+
+<*
+ The pointer a `&self` receiver is passed as.
+
+ A value already in Function storage is passed by its own address, so writes
+ through it would reach the caller. Anything else - a temporary, or a struct
+ reached through a device address - is copied into a Function local first,
+ which makes `&self` on those read-only for now.
+*>
+fn Id Codegen.receiver_pointer(&self, Value base)
+{
+	if (base.pointer != NO_ID && base.storage == STORAGE_CLASS_FUNCTION) return base.pointer;
+
+	Id id  = self.rvalue(base);
+	Id ptr = self.func.local(self.pointer_to(STORAGE_CLASS_FUNCTION, base.type));
+	self.func.store(ptr, id);
+	return ptr;
+}
+
 // --- Calls -------------------------------------------------------------------
 
 <*
- A call is one of three things, told apart by the callee rather than by a
+ A call is one of four things, told apart by the callee rather than by a
  keyword: a type name is a constructor, a member call on a texture is a sample,
- and a plain name is a builtin function.
+ a name declared as a function is a call, and anything else is a builtin.
 *>
 fn Value? Codegen.call_expression(&self, Expr* expr)
 {
@@ -682,6 +1128,7 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 	{
 		Value base = self.expression(callee.member.value)!;
 		if (base.type.kind == TEXTURE) return self.sample_expression(expr, base, callee.member.name);
+		if (self.has_function(callee.member.name)) return self.user_call(expr, callee.member.name, &base);
 
 		self.fail(expr.line, expr.column,
 			string::format(self.allocator, "`%s` is not callable on a %s", callee.member.name, base.type.name));
@@ -697,6 +1144,7 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 	String name = callee.ident.name;
 
 	if (Type* type = self.types.find(name)) return self.construct(expr, type);
+	if (self.has_function(name)) return self.user_call(expr, name, null);
 
 	return self.builtin_call(expr, name);
 }
@@ -1053,6 +1501,14 @@ fn void? Codegen.emit_return(&self, Stmt* stmt)
 {
 	if (!stmt.ret.value)
 	{
+		// An entry point is emitted as a void function whose value goes to the
+		// stage's outputs, so a bare `return;` is only wrong in a helper that
+		// promised a value.
+		if (self.outputs.len() == 0 && self.fn_return && self.fn_return.kind != VOID)
+		{
+			self.fail(stmt.line, stmt.column, "this function must return a value");
+			return CODEGEN_ERROR~;
+		}
 		self.func.ret();
 		self.terminated = true;
 		return;
@@ -1062,7 +1518,9 @@ fn void? Codegen.emit_return(&self, Stmt* stmt)
 
 	if (self.outputs.len() == 0)
 	{
-		self.func.ret_value(self.rvalue(value));
+		Id result = self.rvalue(value);
+		if (self.fn_return && self.fn_return.kind != VOID) result = self.coerce(value, self.fn_return, stmt.ret.value)!;
+		self.func.ret_value(result);
 		self.terminated = true;
 		return;
 	}

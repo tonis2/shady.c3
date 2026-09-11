@@ -261,6 +261,11 @@ struct Param
 	Attribute[] attributes;
 	uint        line;
 	uint        column;
+
+	// `fn R Map.sample(&self, ...)`: the receiver takes no written type, because
+	// the qualified name already says what it is.
+	bool        is_self;
+	bool        by_ref;
 }
 
 enum DeclKind : char
@@ -281,6 +286,11 @@ struct DeclFunction
 	TypeRef return_type;
 	Param[] params;
 	Stmt*   body;
+
+	// The receiver type of a method, as written before the dot in the function
+	// name: `fn R Map.sample(...)` has `receiver` "Map" and name "sample".
+	// Empty for an ordinary function.
+	String  receiver;
 }
 
 <*

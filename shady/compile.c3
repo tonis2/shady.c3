@@ -593,6 +593,7 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 	codegen.ast       = &ast;
 	codegen.resources.init(&arena, 8);
 	codegen.locals.init(&arena, 16);
+	codegen.functions.init(&arena, 8);
 	codegen.inputs.init(&arena, 8);
 	codegen.outputs.init(&arena, 8);
 	codegen.interface_ids.init(&arena, 16);
@@ -628,6 +629,7 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 fn void? Codegen.build(&self)
 {
 	self.declare_structs(self.ast)!;
+	self.declare_functions(self.ast)!;
 	self.assign_bindings(self.ast)!;
 	self.emit_resources(self.ast)!;
 
@@ -657,9 +659,9 @@ fn void? Codegen.build(&self)
 		}
 		else
 		{
-			self.fail(decl.line, decl.column,
-				"plain functions are not implemented yet - mark this @vertex, @fragment or @compute");
-			return CODEGEN_ERROR~;
+			// An ordinary function: declared by declare_functions and emitted
+			// on first call. Not an entry point, so nothing to do here.
+			continue;
 		}
 
 		String entry_name = self.entry_name(decl, stage)!;

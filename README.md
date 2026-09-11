@@ -134,12 +134,13 @@ explicit 64-bit arithmetic rather than to `OpPtrAccessChain`.
 Structs, uniform blocks with std140 layout, push constants and buffer device
 addresses with std430, textures and samplers, every vector and matrix product,
 mixed constructors like `float4(xyz, 1.0)`, swizzles, `if`/`while`/`for`
-lowered to structured control flow, ~30 GLSL.std.450 builtins, `discard`, and
-several entry points in one module.
+lowered to structured control flow, ~30 GLSL.std.450 builtins, `discard`,
+several entry points in one module, plain functions with overloading, and
+C3-style methods (`fn float4 Map.Sample(&self, float2 uv)`).
 
-Not yet: `break`/`continue`, plain non-entry-point functions, arrays, storage
-buffers. Compute entry points are wired but untested. Each of these fails with
-a position and a message rather than miscompiling.
+Not yet: `break`/`continue`, arrays, storage buffers, `out`/`inout` parameters.
+Compute entry points are wired but untested. Each of these fails with a
+position and a message rather than miscompiling.
 
 ## Using it
 

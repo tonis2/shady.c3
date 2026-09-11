@@ -1,0 +1,35 @@
+struct Uniforms @uniform
+{
+    float4x4 view_projection;
+}
+
+Uniforms uniforms;
+
+struct VertexIn
+{
+    float3 position;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex(main)
+{
+    FragmentIn output;
+    output.position = uniforms.view_projection * float4(input.position, 1.0);
+    output.color = float4(1.0, 0.5, 0.25, 1.0);
+    return output;
+}
+
+fn float4 shade_textured(FragmentIn input) @fragment(opaque)
+{
+    return input.color;
+}
+
+fn float4 shade_solid(FragmentIn input) @fragment
+{
+    return float4(0.2, 0.4, 0.8, 1.0);
+}

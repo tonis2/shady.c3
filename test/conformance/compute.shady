@@ -1,0 +1,25 @@
+struct Data @address
+{
+    float4 value;
+}
+
+struct Push @pushconstant
+{
+    Data* data;
+    uint count;
+}
+
+Push push;
+
+struct ComputeIn
+{
+    uint3 id @builtin(global_invocation_id);
+}
+
+fn void main(ComputeIn input) @compute @threads(64, 1, 1)
+{
+    if (input.id.x >= push.count) return;
+
+    Data* d = push.data;
+    float4 v = d[input.id.x].value;
+}

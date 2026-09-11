@@ -622,7 +622,18 @@ fn Decl*? Parser.declaration(&self)
 		case FN:
 			self.advance();
 			TypeRef return_type = self.type_ref()!;
-			Token   name        = self.expect(IDENT, "expected a function name")!;
+
+			// A method name is qualified by its receiver type, C3-style:
+			// `fn float4 Map.sample(...)`. The dot is the whole difference
+			// between a method and an ordinary function.
+			Token  first    = self.expect(IDENT, "expected a function name")!;
+			String receiver = "";
+			Token  name     = first;
+			if (self.match(DOT))
+			{
+				receiver = first.text;
+				name     = self.expect(IDENT, "expected a method name after `.`")!;
+			}
 			self.expect(LPAREN, "expected `(` after the function name")!;
 
 			ParamList params;
@@ -631,7 +642,29 @@ fn Decl*? Parser.declaration(&self)
 			{
 				do
 				{
-					Token   param_token = self.peek();
+					Token param_token = self.peek();
+
+					// `&self` or `self`: the receiver, whose type the qualified
+					// name already states.
+					bool by_ref = self.check(AMP)
+						&& self.peek(1).kind == IDENT && self.peek(1).text == "self";
+					bool bare_self = !by_ref && self.check(IDENT) && self.peek().text == "self"
+						&& (self.peek(1).kind == COMMA || self.peek(1).kind == RPAREN);
+
+					if (by_ref || bare_self)
+					{
+						Token self_token = self.advance();
+						if (by_ref) self.advance(); // the `self` after `&`
+						params.push({
+							.name    = "self",
+							.is_self = true,
+							.by_ref  = by_ref,
+							.line    = self_token.line,
+							.column  = self_token.column,
+						});
+						continue;
+					}
+
 					TypeRef type        = self.type_ref()!;
 					Token   param_name  = self.expect(IDENT, "expected a parameter name")!;
 					Attribute[] attributes = self.attributes()!;
@@ -651,7 +684,12 @@ fn Decl*? Parser.declaration(&self)
 			decl.name       = name.text;
 			decl.attributes = self.attributes()!;
 			Stmt* body      = self.block()!;
-			decl.function   = { .return_type = return_type, .params = params.array_view(), .body = body };
+			decl.function   = {
+				.return_type = return_type,
+				.params      = params.array_view(),
+				.body        = body,
+				.receiver    = receiver,
+			};
 			return decl;
 
 		case CONST:

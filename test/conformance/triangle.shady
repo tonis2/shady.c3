@@ -1,0 +1,34 @@
+struct Uniforms @uniform
+{
+    float4x4 projection;
+    float4x4 view;
+}
+
+struct VertexIn
+{
+    float3 position;
+    float2 uv;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float2 uv;
+}
+
+Uniforms uniforms;
+texture2d tex;
+sampler tex_sampler;
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    FragmentIn output;
+    output.position = uniforms.projection * uniforms.view * float4(input.position, 1.0);
+    output.uv = input.uv;
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    return tex.sample(tex_sampler, input.uv);
+}

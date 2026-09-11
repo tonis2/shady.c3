@@ -1,0 +1,38 @@
+struct Vertex @address
+{
+    float3 position;
+    float4 color;
+}
+
+struct Push @pushconstant
+{
+    Vertex* vertices;
+    float4x4 view_projection;
+}
+
+Push push;
+
+struct VertexIn
+{
+    uint index @builtin(vertex_index);
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    Vertex* v = push.vertices;
+    FragmentIn output;
+    output.position = push.view_projection * float4(v[input.index].position, 1.0);
+    output.color = v[input.index].color;
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    return input.color;
+}

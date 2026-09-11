@@ -120,9 +120,42 @@ fn float4 tint(float4 base, float amount)
     return base * amount;
 }
 ```
-A function with no stage attribute is an ordinary function, inlined or emitted
-as an `OpFunction` and called. A function with a stage attribute is an entry
-point (§6).
+A function with no stage attribute is an ordinary function, emitted as an
+`OpFunction` and called. A function with a stage attribute is an entry point
+(§6). A call may appear before the function it names.
+
+Functions may be **overloaded** by arity and parameter type. A call picks the
+one candidate whose parameters accept its arguments (exact type, or an integer
+literal where a float is wanted, or a scalar where a vector is wanted); a call
+that matches none, or more than one, is an error rather than a guess.
+
+A **method** is declared with a qualified name, C3-style:
+
+```
+fn float4 Map.Sample(&self, float2 uv)
+{
+    return tex.sample(s, uv);
+}
+```
+
+The name before the dot is the receiver type. The first parameter is the
+receiver: `&self` (a reference) or `self` (a copy) takes its type from the
+qualified name, or the type may be written out -
+`fn float4 Map.Sample(Map image, float2 uv)`. A call `image.Sample(uv)` passes
+the receiver as the first argument.
+
+`&self` arrives as a pointer into the caller's storage, so a write through it
+is visible to the caller when the receiver is addressable (a local, or a
+parameter). A temporary is copied into a local first, which makes `&self` on
+one read-only.
+
+A member call prefers a declared method over a free function spelled the same
+way; a bare call still reaches a by-value method, passing the receiver as its
+first argument. Methods overload like any other function, so two types may each
+have a method of the same name and the receiver type picks between them.
+
+Recursion is not supported: a function that reaches itself is an error, since a
+shader has no stack to recurse on.
 
 ### 3.2 Blocks
 
