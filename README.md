@@ -138,18 +138,26 @@ explicit 64-bit arithmetic rather than to `OpPtrAccessChain`.
 ## What works
 
 Structs, uniform blocks with std140 layout, push constants and buffer device
-addresses with std430, textures and samplers, every vector and matrix product,
+addresses with std430 or C3's scalar packing (`compile(..., scalar_layout:
+true)`), textures and samplers, every vector and matrix product,
 mixed constructors like `float4(xyz, 1.0)`, swizzles, `if`/`while`/`for`
 lowered to structured control flow with `break`/`continue`, ~35 GLSL.std.450
 builtins, `discard`, several entry points in one module, plain functions with
 overloading, C3-style methods (`fn float4 Map.Sample(&self, float2 uv)`),
 ternary, `++`/`--`, compound bitwise assignment, C-style casts, `out`/`inout`
-parameters, arrays with initialiser lists, and `mul`/`asuint`/`all`/`any`/
-`select`/`[unroll]`.
+parameters, arrays with initialiser lists, `mul`/`asuint`/`all`/`any`/
+`select`/`[unroll]`, device addresses to flat scalar/vector/matrix streams as
+well as structs, pointer parameters, locals and reassignment, reads and writes
+through an address, matrix add/subtract, `InterlockedAdd`, combined
+`Sampler2D`/`Sampler2DShadow` descriptors, runtime-sized descriptor arrays with
+`NonUniformResourceIndex`, the `Sample`/`SampleLevel`/`SampleGrad`/`SampleBias`/
+`SampleCmpLevelZero` variants, several descriptor sets in one module, and
+specialization constants (`const bool X @spec(0) = true;`) for one module
+serving several variants.
 
-Not yet: storage buffers and runtime-sized arrays. Compute entry points are
-wired but untested. Each of these fails with a position and a message rather
-than miscompiling.
+Not yet: storage buffers and runtime-sized arrays of memory (as opposed to of
+descriptors). Each of these fails with a position and a message rather than
+miscompiling.
 
 ## Using it
 

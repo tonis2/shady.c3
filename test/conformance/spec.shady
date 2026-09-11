@@ -1,0 +1,38 @@
+// Specialization constants: values chosen when the pipeline is created rather
+// than baked in, so one module serves several variants without recompiling.
+//
+// A boolean gates a whole pass, a uint bounds a loop, and a float scales a
+// kernel - the three shapes the variant policy calls for.
+
+const bool  SHADOWS      @spec(0) = true;
+const uint  PCF_TAPS     @spec(1) = 4u;
+const float SHADOW_SCALE @spec(2) = 1.0;
+
+Sampler2DShadow shadow_atlas @set(0) @binding(17);
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    float2 uv = input.color.xy;
+
+    // Folded away entirely when SHADOWS specializes to false.
+    float shadow = 1.0;
+    if (SHADOWS)
+    {
+        shadow = 0.0;
+        for (uint i = 0; i < PCF_TAPS; i++)
+        {
+            float offset = (float(i) - float(PCF_TAPS) * 0.5) / float(PCF_TAPS);
+            shadow += shadow_atlas.SampleCmpLevelZero(
+                uv + float2(offset * SHADOW_SCALE, 0.0), input.color.z);
+        }
+        shadow /= float(PCF_TAPS);
+    }
+
+    return input.color * shadow;
+}

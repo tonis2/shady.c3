@@ -1,0 +1,67 @@
+// Buffer device addresses pointing at flat streams, pointer parameters, a
+// pointer local chosen by a branch, a write through a device address and an
+// atomic add - the shapes three.c3's skin and cluster compute shaders use.
+//
+// Compiled with scalar packing, the way the engine compiles them.
+
+struct Vertex @address
+{
+    float3 position;
+    float3 normal;
+}
+
+struct Push @pushconstant
+{
+    float3*   positions;
+    float3*   normals;
+    uint4*    joints;
+    float4*   weights;
+    float4x4* palette;
+    float4x4* live;
+    Vertex*   output;
+    uint*     counter;
+    uint      count;
+}
+
+Push push;
+
+struct ComputeIn
+{
+    uint3 id @builtin(global_invocation_id);
+}
+
+fn float4x4 blend(float4x4* palette, uint base, uint4 joints, float4 weights)
+{
+    return weights.x * palette[base + joints.x]
+         + weights.y * palette[base + joints.y]
+         + weights.z * palette[base + joints.z]
+         + weights.w * palette[base + joints.w];
+}
+
+fn void main(ComputeIn input) @compute @threads(64, 1, 1)
+{
+    uint index = input.id.x;
+    if (index >= push.count) return;
+
+    float3 position = push.positions[index];
+    float3 normal   = push.normals[index];
+
+    // A pointer local chosen between two addresses, the skin pass's live/baked
+    // palette selection.
+    bool live = (push.counter[0] & 1u) != 0u;
+    float4x4* palette = live ? push.live : push.palette;
+
+    uint4  joints  = push.joints[index];
+    float4 weights = push.weights[index];
+    float4x4 pose  = blend(palette, 0u, joints, weights);
+
+    Vertex vertex;
+    vertex.position = mul(pose, float4(position, 1.0)).xyz;
+    vertex.normal   = mul((float3x3)pose, normal);
+
+    // The write, through a stream of structs an @address pointer names.
+    push.output[index] = vertex;
+
+    // The cluster pass's overflow counter.
+    InterlockedAdd(push.counter[0], 1u);
+}

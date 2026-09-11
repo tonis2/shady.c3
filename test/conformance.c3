@@ -29,23 +29,33 @@ const char[*] EMBED_FUNCTIONS    = $embed("conformance/functions.shady");
 const char[*] EMBED_OPERATORS    = $embed("conformance/operators.shady");
 const char[*] EMBED_ARRAYS       = $embed("conformance/arrays.shady");
 const char[*] EMBED_BUILTINS     = $embed("conformance/builtins.shady");
+const char[*] EMBED_SCALAR       = $embed("conformance/scalar_layout.shady");
+const char[*] EMBED_POINTERS     = $embed("conformance/pointers.shady");
+const char[*] EMBED_BINDLESS     = $embed("conformance/bindless.shady");
+const char[*] EMBED_SPEC         = $embed("conformance/spec.shady");
 
 struct Case
 {
 	String name;
 	String source;
+	// Compiled with C3's packing rather than std140/std430.
+	bool   scalar;
 }
 
 const Case[*] CORPUS = {
-	{ "triangle",     (String)EMBED_TRIANGLE[..] },
-	{ "pushconstant", (String)EMBED_PUSHCONSTANT[..] },
-	{ "bda",          (String)EMBED_BDA[..] },
-	{ "multi_entry",  (String)EMBED_MULTI_ENTRY[..] },
-	{ "compute",      (String)EMBED_COMPUTE[..] },
-	{ "functions",    (String)EMBED_FUNCTIONS[..] },
-	{ "operators",    (String)EMBED_OPERATORS[..] },
-	{ "arrays",       (String)EMBED_ARRAYS[..] },
-	{ "builtins",     (String)EMBED_BUILTINS[..] },
+	{ "triangle",     (String)EMBED_TRIANGLE[..],     false },
+	{ "pushconstant", (String)EMBED_PUSHCONSTANT[..], false },
+	{ "bda",          (String)EMBED_BDA[..],          false },
+	{ "multi_entry",  (String)EMBED_MULTI_ENTRY[..],  false },
+	{ "compute",      (String)EMBED_COMPUTE[..],      false },
+	{ "functions",    (String)EMBED_FUNCTIONS[..],    false },
+	{ "operators",    (String)EMBED_OPERATORS[..],    false },
+	{ "arrays",       (String)EMBED_ARRAYS[..],       false },
+	{ "builtins",     (String)EMBED_BUILTINS[..],     false },
+	{ "scalar",       (String)EMBED_SCALAR[..],       true  },
+	{ "pointers",     (String)EMBED_POINTERS[..],     true  },
+	{ "bindless",     (String)EMBED_BINDLESS[..],     false },
+	{ "spec",         (String)EMBED_SPEC[..],         false },
 };
 
 fn void the_conformance_corpus_compiles_and_validates() @test
@@ -70,7 +80,7 @@ fn void the_conformance_corpus_compiles_and_validates() @test
 fn bool conforms(Case entry) @private
 {
 	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(entry.source, &diagnostic);
+	char[]? spirv = shady::compile(entry.source, &diagnostic, scalar_layout: entry.scalar);
 	if (catch spirv)
 	{
 		io::printfn("FAIL %s: %s", entry.name, diagnostic.to_string(tmem));
@@ -89,7 +99,7 @@ fn bool conforms(Case entry) @private
 	String out_path = string::tformat("%s/%s.spv", OUT_DIR, entry.name);
 	file::save(out_path, spirv)!!;
 
-	if (!spirv_val(out_path)) return false;
+	if (!spirv_val(out_path, entry.scalar)) return false;
 
 	io::printfn("ok   %s (%d bytes)", entry.name, spirv.len);
 	return true;
@@ -98,13 +108,19 @@ fn bool conforms(Case entry) @private
 <*
  Runs `spirv-val` over one module.
 
+ A scalar-layout module needs `--scalar-block-layout` for the same reason the
+ engine needs `VK_EXT_scalar_block_layout`: a `float4` at offset 108 is legal
+ only under that feature, and the validator enforces it.
+
  A missing spirv-val skips rather than fails: the toolchain is a developer
  dependency, and a harness that cannot run should say so once instead of
  leaving the corpus unverified and calling it red.
 *>
-fn bool spirv_val(String path) @private
+fn bool spirv_val(String path, bool scalar) @private
 {
-	String[] command = { "spirv-val", "--target-env", "vulkan1.3", path };
+	String[] command = scalar
+		? (String[]) { "spirv-val", "--target-env", "vulkan1.3", "--scalar-block-layout", path }
+		: (String[]) { "spirv-val", "--target-env", "vulkan1.3", path };
 	process::Process? spawned = process::spawn(command);
 	if (catch spawned)
 	{

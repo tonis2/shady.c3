@@ -1,0 +1,97 @@
+// Scalar layout: this file is compiled twice by the suite, once with
+// `-force-glsl-scalar-layout`-equivalent packing and once with std140/std430, to
+// pin the offsets three.c3's wire structs depend on.
+//
+// The `Draw` mirror carries the shape of three.c3's `DrawRecord`, which begins
+// with ten `ulong` fields (`positions`..`morph`, 80 bytes) and then the members
+// checked here. Shady has no 64-bit scalar yet, so the prefix is twenty uints -
+// the same 80 bytes at the same offsets, which is all the offsets below need.
+//
+// Offsets are asserted in `test/layout_test.c3`; the only job of this file is
+// to be a shader whose `Draw` declarations are decorated.
+
+struct Draw @address
+{
+    uint   addresses[20];  // the ten ulongs of the real record
+    float4 base_color;
+    uint   flags;
+    uint   skin_stride;
+    uint   morph_targets;
+    float4 uv_transform;
+    float4 surface;
+    uint   uv_variant_count;
+    float4 uv_variants[8];
+    float4 emissive;
+    uint   texture_index[24];
+    float3x3 basis;
+    float3 taps[2];
+    uint   after_taps;
+}
+
+struct Push @pushconstant
+{
+    Draw* draw;
+    uint  count;
+}
+
+Push push;
+
+// three.c3's MeshPush: three 8-byte pointers, 24 bytes.
+struct MeshPush @address
+{
+    uint frame[2];
+    uint instances[2];
+    uint draw[2];
+}
+
+// three.c3's SkinnedVertex: two float3, 12 bytes each, 24 in all.
+struct SkinnedVertex @address
+{
+    float3 position;
+    float3 normal;
+}
+
+// three.c3's post push: a float4 then a float2, 24 bytes.
+struct PostPush @address
+{
+    float4 info;
+    float2 planes;
+}
+
+// A struct nested inside an @address struct: its members carry Offset too, and
+// the enclosing block's layout is what decides them.
+struct Inner
+{
+    float3 a;
+    float3 b;
+}
+
+struct Outer @address
+{
+    Inner  inner;
+    float4 tail;
+}
+
+// And an array of a struct, whose element struct is decorated through the
+// array's element type.
+struct Pair @address
+{
+    Inner items[2];
+}
+
+struct VertexIn
+{
+    uint index @builtin(vertex_index);
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    FragmentIn o;
+    o.position = float4(float(push.count) + float(push.draw[input.index].after_taps));
+    return o;
+}

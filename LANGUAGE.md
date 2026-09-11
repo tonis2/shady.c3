@@ -78,9 +78,17 @@ with `MatrixStride 16`.
 ```
 texture1d texture2d texture3d texturecube texture2d_array texturecube_array
 sampler
+
+Sampler2D Sampler2DShadow
 ```
-Opaque types may only appear as module-level resource declarations. They cannot
-be struct members, locals, parameters, or return types.
+`texture2d` plus `sampler` are the separate objects, paired only at the point of
+use. `Sampler2D` is one combined image-and-sampler descriptor, and
+`Sampler2DShadow` is the depth-comparison form of it.
+
+An opaque type may be an array: `Sampler2D three_textures[]` is a runtime-sized
+descriptor array, `Sampler2D four[4]` a fixed one. Either way an opaque type may
+only appear as a module-level resource - never as a struct member, local,
+parameter or return type.
 
 ### 2.4 Structs
 ```
@@ -222,7 +230,9 @@ A module-level variable is written `Type name;`. What kind of resource it is
 comes entirely from the type — there are no `uniform`, `buffer` or
 `push_constant` keywords.
 
-Only some types may be bound: an opaque type (`texture2d`, `sampler`), a
+Only some types may be bound: an opaque type (`texture2d`, `sampler`,
+`Sampler2D`, `Sampler2DShadow`) or an array of one - a descriptor array, `[]`
+for a runtime-sized one - a
 `@uniform` struct, or a `@pushconstant` struct. A plain struct has no layout
 and an `@address` struct is reached through a pointer, so neither can be a
 variable.
@@ -235,10 +245,24 @@ block takes no binding and does not consume one.
 
 ### 3.4 Constants
 ```
-const float PI = 3.14159;
-const float3 UP = float3(0.0, 1.0, 0.0);
+const float PI = 3.14159;              // an ordinary constant
+const bool  SHADOWS  @spec(0) = true;  // a specialization constant
+const uint  PCF_TAPS @spec(1) = 4u;
 ```
-Compile-time constants. The initialiser must be a constant expression.
+A module-level `const` is a scalar whose initialiser is a literal, and its name
+resolves wherever it is written. It lowers to an `OpConstant` - except with
+`@spec`: a `@spec(id)` constant lowers to an `OpSpecConstant`, or
+`OpSpecConstantTrue`/`False` for a bool, decorated with `SpecId`, so the host
+may replace its value when it creates the pipeline.
+
+That is how one module serves several variants without recompiling: a bool that
+folds a pass away, a uint that bounds a loop, a float that scales a kernel. A
+spec constant cannot add or remove a descriptor, change a varying, change an
+entry point or change a stage interface - those need a separate module. Spec
+ids must be unique within a module.
+
+Only scalars, because a spec constant has to be a single replaceable literal;
+a composite or an expression is not.
 
 ## 4. Attributes
 
@@ -259,6 +283,7 @@ Compile-time constants. The initialiser must be a constant expression.
 | `@builtin(name)` | struct member / parameter | A SPIR-V builtin (§6.4) |
 | `@set(n)` | module-level variable | Descriptor set |
 | `@binding(n)` | module-level variable | Binding within the set |
+| `@spec(n)` | module-level `const` | Specialization constant id (§3.4) |
 | `@flat` | struct member | `Flat` interpolation |
 
 A struct carries at most one of `@uniform`, `@pushconstant` and `@address`;
@@ -429,7 +454,7 @@ Read via `@builtin(name)` on an input struct member:
 
 ## 7. Block layout
 
-Two layouts are used, and which one applies depends on the block:
+Two layouts are used by default, and which one applies depends on the block:
 
 | Block | Layout |
 |---|---|
@@ -456,6 +481,31 @@ std140 then adds two roundings that std430 does not:
 So a `float2x2` is 16 bytes in std430 and 32 in std140, and a struct of three
 floats aligns to 4 in std430 and 16 in std140.
 
+A struct nested inside a block is laid out by that block, and its members carry
+`Offset` (and `MatrixStride`) decorations just as the block's own do. Because a
+struct is one type with one layout, the same struct may not be nested in two
+blocks that lay it out differently: a std140 uniform block and a std430 push
+block sharing one is an error, and each needs its own declaration.
+
+### 7.1 Scalar layout
+
+A compile may instead ask for C3's own packing with `scalar_layout: true`, the
+same thing Slang is given as `-force-glsl-scalar-layout`. It applies to every
+block kind, and it is what lets a struct generated from the C3 side line up with
+the wire format by construction:
+
+- every scalar is 4 bytes aligned 4, and a vector aligns as its component
+- `float3` is 12 bytes aligned 4
+- a matrix is its columns with no padding, so `float3x3` is 36 bytes with
+  `MatrixStride 12`
+- an array's stride is the element's size rounded to its alignment
+- a struct's alignment is its largest member's; nothing rounds to 16
+
+A scalar-layout module needs `VK_EXT_scalar_block_layout` (or Vulkan 1.2's
+`scalarBlockLayout` feature) on the device, because a `float4` may then sit at
+an offset std430 forbids. `spirv-val` needs `--scalar-block-layout` to accept
+one, which `test/conformance.c3` passes for the modules that ask for it.
+
 Offsets are computed by the compiler and emitted as `Offset` member
 decorations. **The host must match the layout** — nothing checks it at run
 time, and a mismatch renders garbage rather than failing. §10.2 works one
@@ -479,11 +529,31 @@ product spelled the HLSL way.
 shape), `any` `all` (a bool vector to a bool), `select(when_false, when_true,
 condition)`.
 
-**Texture** (method syntax on the texture): 
+**Device memory**: `InterlockedAdd(dest, value)` - an atomic add on a device
+address, yielding the value the destination held before. Device scope, relaxed
+ordering; anything stronger is a barrier rather than an increment.
+
+**Texture** (method syntax on the texture):
+
+A separate `texture2d` and `sampler` are paired at the point of use, and have
+two methods:
 ```
 tex.sample(tex_sampler, uv)          // OpImageSampleImplicitLod, fragment only
 tex.sample_lod(tex_sampler, uv, lod) // OpImageSampleExplicitLod
 ```
+A combined `Sampler2D` samples directly and has the whole set; the Slang
+spellings are accepted alongside the lowercase ones:
+```
+tex.Sample(uv)                           // implicit LOD, fragment only
+tex.SampleLevel(uv, lod)
+tex.SampleGrad(uv, gx, gy)
+tex.SampleBias(uv, bias)                 // fragment only
+shadow.SampleCmpLevelZero(uv, reference) // Sampler2DShadow, yields a float
+```
+An index into a runtime-sized descriptor array that is not uniform across the
+invocations of a wave goes through `NonUniformResourceIndex(index)`, which
+decorates the index so the driver does not hoist one descriptor for the whole
+wave.
 
 **Derivatives** (fragment only): `ddx` `ddy` `fwidth`
 
@@ -548,9 +618,9 @@ fn FragmentIn vert(VertexIn input) @vertex
 
 ### 10.1 Pointers
 
-`T*` is a device address, and `T` must be an `@address` struct. A pointer to
-anything else is an error: only an `@address` struct has a layout and an
-address.
+`T*` is a device address. `T` is an `@address` struct, or a scalar, vector or
+matrix - a mesh's streams are flat arrays of `float3`, `uint4` and `float4x4`,
+not arrays of structs. Any other pointee is an error.
 
 The pointer grammar is exactly one trailing `*`. There is no `&`, no pointer
 arithmetic beyond indexing, and no pointer-to-pointer.
@@ -559,14 +629,20 @@ Pointers may appear as:
 
 - a member of a `@pushconstant` or `@uniform` block,
 - a member of an `@address` struct (including a pointer to its own type),
-- a local variable.
+- a local variable or a parameter.
 
-Two operations are defined on a pointer:
+A pointer local may be reassigned, and a ternary chooses between two addresses:
+`float4x4* palette = live ? push.live : push.baked;`.
+
+Three operations are defined on a pointer:
 
 | Written | Means |
 |---|---|
-| `p[i]` | the `i`th element, striding by the pointee's std430 size |
+| `p[i]` | the `i`th element, striding by the pointee's size in the compile's layout |
+| `p[i] = v` | writes through the address |
 | `p.member` | reads through `p`, the way `->` does in C |
+
+`InterlockedAdd(p[i], v)` is an atomic add on device memory (§8).
 
 A local pointer declaration is `T* name = ...;`. The parser has no type table,
 so `T* name` and `a * b` are the same three tokens; it settles the ambiguity on
@@ -579,6 +655,11 @@ nothing real is lost.
 An `@address` struct is laid out **std430**, not std140. The difference from a uniform
 block (section 7) is in two places: std430 does not round a struct's alignment
 up to 16, and does not round a matrix's column stride up to 16.
+
+Under scalar layout (§7.1) the same struct packs tighter: nothing rounds to 16,
+so `float3` is 12 bytes aligned 4. Indexing strides by the element's size
+rounded up to its alignment under whichever layout is in force - 12 for a
+`float3` scalar-layout stream, 16 under std430.
 
 The `Vertex` above therefore lays out as:
 
@@ -595,10 +676,10 @@ garbage rather than failing.
 
 Every access through a device address carries an `Aligned` memory operand,
 because nothing else describes the memory to the hardware. The alignment stated
-is the accessed type's own std430 alignment, which holds as long as **the host
-aligns the buffer to the pointee's alignment**. A `VkBuffer`'s device address
-satisfies this in practice; a hand-computed address into the middle of one may
-not.
+is the accessed type's own alignment under the compile's layout, which holds as
+long as **the host aligns the buffer to the pointee's alignment**. A
+`VkBuffer`'s device address satisfies this in practice; a hand-computed address
+into the middle of one may not.
 
 ### 10.3 Push constants
 

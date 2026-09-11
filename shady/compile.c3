@@ -80,14 +80,9 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 			resource.binding = (uint)binding.args[0].number;
 		}
 
-		// The type is already resolved: declare_structs ran first.
-		Type* type = self.types.find(decl.resource.type.name);
-		if (!type)
-		{
-			self.fail(decl.line, decl.column,
-				string::format(self.allocator, "unknown type `%s`", decl.resource.type.name));
-			return CODEGEN_ERROR~;
-		}
+		// The type is resolved the way a local's is, because a resource may be
+		// an array - the bindless texture table is `Sampler2D three_textures[]`.
+		Type* type = self.resolve_type(decl.resource.type, decl.line, decl.column)!;
 		resource.type  = type;
 		resource.block = type.kind == STRUCT ? type.block : BlockKind.NONE;
 
@@ -219,7 +214,12 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 		StructMember[] members = alloc::alloc_array(self.allocator, StructMember, decl.struct_decl.members.len);
 		foreach (i, &source : decl.struct_decl.members)
 		{
-			Type* member_type = self.resolve_type(source.type, type.block.layout(), source.line, source.column)!;
+			Type* member_type = self.resolve_type(source.type, source.line, source.column)!;
+			if (member_type.kind == ARRAY && member_type.runtime)
+			{
+				self.fail(source.line, source.column, "a runtime-sized array cannot be a struct member");
+				return CODEGEN_ERROR~;
+			}
 			members[i] = {
 				.name        = source.name,
 				.type        = member_type,
@@ -242,7 +242,8 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 	}
 
 	// Now that every @address struct's members are known, emit its type, lay it
-	// out std430, decorate it Block, and close the forward pointer.
+	// out for the device-address layout, decorate it Block, and close the
+	// forward pointer.
 	//
 	// ArrayStride records the element size on the pointer type. Indexing does
 	// not depend on it - Codegen.offset_address computes the stride itself, and
@@ -254,10 +255,18 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 		Type* type = self.types.find(decl.name);
 		if (type.block != ADDRESS) continue;
 
-		uint size    = type.assign_offsets(STD430);
-		Id   type_id = self.type_id(type);
+		Layout layout = self.block_layout(ADDRESS);
+		uint?  size   = type.assign_offsets(layout);
+		if (catch size)
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"`%s` nests a struct another block lays out differently - give each block its own struct",
+				type.name));
+			return CODEGEN_ERROR~;
+		}
+		Id type_id = self.type_id(type);
 		self.mod.decorate(type_id, DECORATION_BLOCK);
-		self.decorate_block_members(type_id, type, STD430);
+		self.decorate_block_members(type_id, type, layout);
 
 		self.mod.define_forward_pointer(type.pointer_id, STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER, type_id);
 		self.mod.decorate(type.pointer_id, DECORATION_ARRAY_STRIDE, size);
@@ -265,18 +274,161 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 }
 
 <*
+ Emit the module-level `const`s and register them by name.
+
+ With `@spec(id)` a constant is a *specialization* constant: the value written
+ here is a default the host may replace when it creates the pipeline, which is
+ how one module serves several variants without recompiling. Without `@spec` it
+ is an ordinary constant.
+
+ Only scalars, and only literal initialisers: a spec constant has to be a single
+ SPIR-V literal to be replaceable, and anything else would need constant folding
+ first.
+*>
+fn void? Codegen.declare_constants(&self, Ast* ast)
+{
+	// A spec id is the host's handle on a value, so two constants sharing one is
+	// a mistake worth naming rather than letting the last one win.
+	UintList spec_ids;
+	spec_ids.init(self.allocator, 8);
+
+	foreach (decl : ast.decls)
+	{
+		if (decl.kind != DeclKind.CONSTANT) continue;
+
+		Type* type = self.types.find(decl.constant.type.name);
+		if (!type)
+		{
+			self.fail(decl.line, decl.column,
+				string::format(self.allocator, "unknown type `%s`", decl.constant.type.name));
+			return CODEGEN_ERROR~;
+		}
+		if (!type.is_scalar())
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"`%s` cannot be a constant; only bool, int, uint and float can", type.name));
+			return CODEGEN_ERROR~;
+		}
+
+		bool is_spec = false;
+		uint spec_id = 0;
+		if (Attribute* spec = decl.attributes.find("spec"))
+		{
+			if (spec.args.len != 1 || spec.args[0].is_name)
+			{
+				self.fail(spec.line, spec.column, "@spec takes one number");
+				return CODEGEN_ERROR~;
+			}
+			is_spec = true;
+			spec_id = (uint)spec.args[0].number;
+			foreach (existing : spec_ids)
+			{
+				if (existing == spec_id)
+				{
+					self.fail(spec.line, spec.column,
+						string::format(self.allocator, "spec id %d is already used", spec_id));
+					return CODEGEN_ERROR~;
+				}
+			}
+			spec_ids.push(spec_id);
+		}
+
+		Expr* value = decl.constant.value;
+		Id    id;
+
+		switch (type.kind)
+		{
+			case BOOL:
+				if (value.kind != ExprKind.BOOL_LITERAL)
+				{
+					self.fail(decl.line, decl.column, "a bool constant needs `true` or `false`");
+					return CODEGEN_ERROR~;
+				}
+				id = is_spec
+					? self.mod.spec_constant_bool(self.type_id(type), value.boolean.value, spec_id)
+					: (value.boolean.value
+						? self.mod.const_true(self.type_id(type))
+						: self.mod.const_false(self.type_id(type)));
+
+			case INT:
+				if (value.kind != ExprKind.INT_LITERAL)
+				{
+					self.fail(decl.line, decl.column, "an int constant needs an integer literal");
+					return CODEGEN_ERROR~;
+				}
+				id = is_spec
+					? self.mod.spec_constant_i32(self.type_id(type), (int)value.literal.value, spec_id)
+					: self.mod.const_i32(self.type_id(type), (int)value.literal.value);
+
+			case UINT:
+				if (value.kind != ExprKind.INT_LITERAL)
+				{
+					self.fail(decl.line, decl.column, "a uint constant needs an integer literal");
+					return CODEGEN_ERROR~;
+				}
+				id = is_spec
+					? self.mod.spec_constant_u32(self.type_id(type), (uint)value.literal.value, spec_id)
+					: self.mod.const_u32(self.type_id(type), (uint)value.literal.value);
+
+			case FLOAT:
+				if (value.kind != ExprKind.FLOAT_LITERAL && value.kind != ExprKind.INT_LITERAL)
+				{
+					self.fail(decl.line, decl.column, "a float constant needs a number");
+					return CODEGEN_ERROR~;
+				}
+				float number = value.kind == ExprKind.FLOAT_LITERAL
+					? (float)value.literal.value
+					: (float)((int)value.literal.value);
+				id = is_spec
+					? self.mod.spec_constant_f32(self.type_id(type), number, spec_id)
+					: self.mod.const_f32(self.type_id(type), number);
+
+			default:
+				self.fail(decl.line, decl.column, "only scalars can be constants");
+				return CODEGEN_ERROR~;
+		}
+
+		self.mod.name(id, decl.name);
+		self.constants.push({ .name = decl.name, .type = type, .id = id });
+	}
+}
+
+<*
  Offset, and for matrices ColMajor and MatrixStride, on every member of a
- block. The offsets must already have been assigned.
+ block. The offsets must already have been assigned by `assign_offsets`.
+
+ A struct nested inside the block gets the same treatment - its members carry
+ `Offset` too, and the enclosing block's layout is what decides them - and so
+ do arrays, whose stride is likewise the block's. The recursive call is guarded
+ because one struct may be nested twice inside a block, and its type id is
+ decorated once.
 *>
 fn void Codegen.decorate_block_members(&self, Id type_id, Type* type, Layout layout)
 {
+	if (type.members_decorated) return;
+	type.members_decorated = true;
+
 	foreach (i, &m : type.members)
 	{
-		self.mod.member_decorate(type_id, (uint)i, DECORATION_OFFSET, m.offset);
+		uint member = (uint)i;
+		self.mod.member_decorate(type_id, member, DECORATION_OFFSET, m.offset);
+
 		if (m.type.kind == MATRIX)
 		{
-			self.mod.member_decorate(type_id, (uint)i, DECORATION_COL_MAJOR);
-			self.mod.member_decorate(type_id, (uint)i, DECORATION_MATRIX_STRIDE, m.type.matrix_stride(layout));
+			self.mod.member_decorate(type_id, member, DECORATION_COL_MAJOR);
+			self.mod.member_decorate(type_id, member, DECORATION_MATRIX_STRIDE, m.type.matrix_stride(layout));
+		}
+
+		// Every array layer in the member's type, then the struct inside it.
+		Type* element = m.type;
+		while (element.kind == ARRAY)
+		{
+			self.mod.decorate(self.type_id(element), DECORATION_ARRAY_STRIDE, array_stride(element.element, layout));
+			element = element.element;
+		}
+		if (element.kind == STRUCT)
+		{
+			self.decorate_block_members(self.type_id(element), element, layout);
 		}
 	}
 }
@@ -300,14 +452,22 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 		{
 			case UNIFORM:
 			case PUSH_CONSTANT:
-				Layout layout = resource.block.layout();
+				Layout layout = self.block_layout(resource.block);
 				storage = resource.block == BlockKind.UNIFORM
 					? STORAGE_CLASS_UNIFORM
 					: STORAGE_CLASS_PUSH_CONSTANT;
 
 				// Block layout has to be decided before the type id is emitted,
 				// because the decorations hang off that id.
-				resource.size = type.assign_offsets(layout);
+				uint? size = type.assign_offsets(layout);
+				if (catch size)
+				{
+					self.fail(decl.line, decl.column, string::format(self.allocator,
+						"`%s` nests a struct another block lays out differently - give each block its own struct",
+						type.name));
+					return CODEGEN_ERROR~;
+				}
+				resource.size = size;
 				Id type_id    = self.type_id(type);
 				self.mod.decorate(type_id, DECORATION_BLOCK);
 				self.decorate_block_members(type_id, type, layout);
@@ -319,16 +479,30 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 				return CODEGEN_ERROR~;
 
 			case NONE:
-				if (type.kind != TEXTURE && type.kind != SAMPLER)
+			{
+				// An image, a sampler or a combined `Sampler2D` - or an array
+				// of one, which is the bindless texture table.
+				Type* element = type.kind == ARRAY ? type.element : type;
+				if (!element.is_opaque())
 				{
-					self.fail(decl.line, decl.column, type.kind == STRUCT
+					self.fail(decl.line, decl.column, element.kind == STRUCT
 						? string::format(self.allocator,
-							"`%s` is a plain struct - mark it @uniform or @pushconstant to bind it", type.name)
+							"`%s` is a plain struct - mark it @uniform or @pushconstant to bind it", element.name)
 						: string::format(self.allocator,
 							"`%s` cannot be a module-level variable", type.name));
 					return CODEGEN_ERROR~;
 				}
+
+				// A runtime-sized descriptor array needs the extension; a fixed
+				// one does not.
+				if (type.kind == ARRAY && type.runtime)
+				{
+					self.mod.capability(CAPABILITY_RUNTIME_DESCRIPTOR_ARRAY);
+					self.mod.extension("SPV_EXT_descriptor_indexing");
+				}
 				storage = STORAGE_CLASS_UNIFORM_CONSTANT;
+				break;
+			}
 		}
 
 		resource.storage = storage;
@@ -553,8 +727,12 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
  The result is owned by `allocator`. On failure the fault is accompanied by
  `diagnostic`, if one was passed in - the diagnostic's message is a copy on
  `allocator` and is the caller's to free.
+
+ @param scalar_layout : `Pack every block with C3's own rules - 4-byte scalars,
+ no rounding to 16 - rather than std140/std430. This is the mode that lines
+ generated structs up with three.c3's wire layout, and it is off by default.`
 *>
-fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator allocator = mem)
+fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator allocator = mem, bool scalar_layout = false)
 {
 	Diagnostic local_diagnostic;
 	if (!diagnostic) diagnostic = &local_diagnostic;
@@ -593,7 +771,9 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 	codegen.mod       = &mod;
 	codegen.types     = &types;
 	codegen.ast       = &ast;
+	codegen.scalar_layout = scalar_layout;
 	codegen.resources.init(&arena, 8);
+	codegen.constants.init(&arena, 8);
 	codegen.locals.init(&arena, 16);
 	codegen.functions.init(&arena, 8);
 	codegen.loops.init(&arena, 4);
@@ -636,6 +816,7 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 fn void? Codegen.build(&self)
 {
 	self.declare_structs(self.ast)!;
+	self.declare_constants(self.ast)!;
 	self.declare_functions(self.ast)!;
 	self.assign_bindings(self.ast)!;
 	self.emit_resources(self.ast)!;

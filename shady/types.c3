@@ -144,6 +144,37 @@ fn Id Module.const_true(&self, Id bool_type) => self.unique_typed(OP_CONSTANT_TR
 fn Id Module.const_false(&self, Id bool_type) => self.unique_typed(OP_CONSTANT_FALSE, bool_type);
 
 <*
+ A specialization constant: the value is chosen when the pipeline is created,
+ not baked in. Each is its own object - two with the same default but different
+ spec ids are two constants - so these are declared unshared and decorated with
+ `SpecId`. A 32-bit value is reinterpreted rather than converted, exactly as
+ `OpConstant` is here.
+*>
+fn Id Module.spec_constant_u32(&self, Id type, uint bits, uint spec_id)
+{
+	Id id = self.declare_typed(OP_SPEC_CONSTANT, type, bits);
+	self.decorate(id, DECORATION_SPEC_ID, spec_id);
+	return id;
+}
+
+fn Id Module.spec_constant_i32(&self, Id type, int value, uint spec_id)
+{
+	return self.spec_constant_u32(type, bitcast(value, uint), spec_id);
+}
+
+fn Id Module.spec_constant_f32(&self, Id type, float value, uint spec_id)
+{
+	return self.spec_constant_u32(type, bitcast(value, uint), spec_id);
+}
+
+fn Id Module.spec_constant_bool(&self, Id type, bool value, uint spec_id)
+{
+	Id id = self.declare_typed(value ? OP_SPEC_CONSTANT_TRUE : OP_SPEC_CONSTANT_FALSE, type);
+	self.decorate(id, DECORATION_SPEC_ID, spec_id);
+	return id;
+}
+
+<*
  A vector, matrix, array or struct constant built from constant components.
 *>
 fn Id Module.const_composite(&self, Id type, Id[] components)

@@ -114,9 +114,17 @@ fn TypeRef? Parser.type_ref(&self)
 
 	if (self.match(LBRACKET))
 	{
-		Token size = self.expect(INTEGER, "expected an array length")!;
-		type.is_array   = true;
-		type.array_size = (uint)size.number;
+		type.is_array = true;
+		if (self.check(RBRACKET))
+		{
+			// `T[]` - no length, a runtime-sized array.
+			type.array_size = 0;
+		}
+		else
+		{
+			Token size = self.expect(INTEGER, "expected an array length")!;
+			type.array_size = (uint)size.number;
+		}
 		self.expect(RBRACKET, "expected `]` after the array length")!;
 	}
 
@@ -126,15 +134,23 @@ fn TypeRef? Parser.type_ref(&self)
 }
 
 <*
- An array length written after the declarator's name: `float2 taps[4]`. The
- type-first form `float2[4] taps` is handled by type_ref.
+ An array length written after the declarator's name: `float2 taps[4]`, or `[]`
+ for a runtime-sized array. The type-first form `float2[4] taps` is handled by
+ type_ref.
 *>
 fn void? Parser.declarator_array(&self, TypeRef* type)
 {
 	if (!self.match(LBRACKET)) return;
-	Token size = self.expect(INTEGER, "expected an array length")!;
-	type.is_array   = true;
-	type.array_size = (uint)size.number;
+	type.is_array = true;
+	if (self.check(RBRACKET))
+	{
+		type.array_size = 0;
+	}
+	else
+	{
+		Token size = self.expect(INTEGER, "expected an array length")!;
+		type.array_size = (uint)size.number;
+	}
 	self.expect(RBRACKET, "expected `]` after the array length")!;
 }
 
@@ -917,6 +933,7 @@ fn Decl*? Parser.declaration(&self)
 			// `Uniforms uniforms;`, `Push pc;`.
 			TypeRef type = self.type_ref()!;
 			Token   name = self.expect(IDENT, "expected a name for the resource")!;
+			self.declarator_array(&type)!;
 			decl.kind       = DeclKind.RESOURCE;
 			decl.name       = name.text;
 			decl.attributes = self.attributes()!;

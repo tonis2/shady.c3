@@ -39,14 +39,14 @@ fn String fragment(String body)
  compile. An empty return means success; a test that expected a refusal checks
  that the string is not empty, and can quote it when it is.
 *>
-fn String compile_error(String source)
+fn String compile_error(String source, bool scalar_layout = false)
 {
 	shady::Diagnostic diagnostic;
 	String error = "";
 
 	mem::@assert_leak()
 	{
-		char[]? maybe = shady::compile(source, &diagnostic);
+		char[]? maybe = shady::compile(source, &diagnostic, scalar_layout: scalar_layout);
 		if (catch maybe)
 		{
 			error = diagnostic.to_string(tmem);
@@ -65,14 +65,14 @@ fn String compile_error(String source)
  The SPIR-V for a shader that must compile. Owned by the caller.
 
  Use this only when the test needs the words themselves - the entry-point
- names, the header version, a file to hand to `spirv-val`. When the test only
- cares whether the shader compiled, use `compile_error`, which frees it here
- and so can check the compiler for leaks.
+ names, the header version, a capability, a file to hand to `spirv-val`. When
+ the test only cares whether the shader compiled, use `compile_error`, which
+ frees it here and so can check the compiler for leaks.
 *>
-fn char[] build(String source)
+fn char[] build(String source, bool scalar_layout = false)
 {
 	shady::Diagnostic diagnostic;
-	char[]? maybe = shady::compile(source, &diagnostic);
+	char[]? maybe = shady::compile(source, &diagnostic, scalar_layout: scalar_layout);
 	if (catch maybe)
 	{
 		io::printfn("shady: %s", diagnostic.to_string(tmem));
@@ -80,4 +80,79 @@ fn char[] build(String source)
 		unreachable("the shader should compile");
 	}
 	return maybe;
+}
+
+// --- Reading the module ------------------------------------------------------
+
+<*
+ Whether the module contains an instruction with this opcode. That is how a
+ structural claim - "this lowered to an atomic", "this is a spec constant" - is
+ checked without a disassembler.
+*>
+fn bool has_opcode(char[] spirv, uint opcode)
+{
+	uint* words = (uint*)spirv.ptr;
+	usz   count = (usz)spirv.len / 4;
+	usz   i     = 5; // the five-word header
+	while (i < count)
+	{
+		uint word = words[i];
+		if ((word & 0xffff) == opcode) return true;
+		i += (usz)(word >> 16);
+	}
+	return false;
+}
+
+fn bool has_capability(char[] spirv, uint capability)
+{
+	uint* words = (uint*)spirv.ptr;
+	usz   count = (usz)spirv.len / 4;
+	usz   i     = 5;
+	while (i < count)
+	{
+		uint word   = words[i];
+		uint opcode = word & 0xffff;
+		usz  len    = (usz)(word >> 16);
+		if (opcode == shady::OP_CAPABILITY && words[i + 1] == capability) return true;
+		i += len;
+	}
+	return false;
+}
+
+<*
+ Whether any `OpDecorate` carries this decoration and this first operand.
+*>
+fn bool has_decoration_value(char[] spirv, uint decoration, uint value)
+{
+	uint* words = (uint*)spirv.ptr;
+	usz   count = (usz)spirv.len / 4;
+	usz   i     = 5;
+	while (i < count)
+	{
+		uint word   = words[i];
+		uint opcode = word & 0xffff;
+		usz  len    = (usz)(word >> 16);
+		if (opcode == shady::OP_DECORATE && words[i + 2] == decoration && words[i + 3] == value) return true;
+		i += len;
+	}
+	return false;
+}
+
+<*
+ Whether any `OpDecorate` carries this decoration, whatever its operand.
+*>
+fn bool has_decoration(char[] spirv, uint decoration)
+{
+	uint* words = (uint*)spirv.ptr;
+	usz   count = (usz)spirv.len / 4;
+	usz   i     = 5;
+	while (i < count)
+	{
+		uint word   = words[i];
+		uint opcode = word & 0xffff;
+		usz  len    = (usz)(word >> 16);
+		if (opcode == shady::OP_DECORATE && words[i + 2] == decoration) return true;
+		i += len;
+	}
+	return false;
 }

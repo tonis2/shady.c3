@@ -9,6 +9,13 @@ module shady;
 
 import std::collections::list;
 
+<*
+ Raised when one struct is nested in two blocks that lay it out differently.
+ The type is interned by name, so the second layout would overwrite the first
+ and half the fields would be read at the wrong offset.
+*>
+faultdef LAYOUT_CONFLICT;
+
 enum TypeKind : char
 {
 	VOID,
@@ -22,6 +29,7 @@ enum TypeKind : char
 	STRUCT,
 	TEXTURE,
 	SAMPLER,
+	SAMPLED_IMAGE, // a combined image and sampler, `Sampler2D`
 	POINTER, // a buffer device address; `element` is the pointee
 }
 
@@ -48,7 +56,15 @@ struct Type
 	uint  count;   // vector components, or matrix columns
 
 	StructMember[] members; // STRUCT only
-	uint           dim;     // TEXTURE only
+	uint           dim;     // TEXTURE and SAMPLED_IMAGE: the OpTypeImage dimension
+
+	// SAMPLED_IMAGE only: the OpTypeImage Depth operand, 1 for a comparison
+	// sampler such as Sampler2DShadow.
+	uint depth;
+
+	// ARRAY only: no declared length, so it is an OpTypeRuntimeArray. Legal as
+	// a module-level resource and nowhere else.
+	bool runtime;
 
 	<*
 	 What kind of block this struct is, from its `@uniform`, `@pushconstant`
@@ -60,10 +76,18 @@ struct Type
 	Id pointer_id; // ADDRESS only: the PhysicalStorageBuffer pointer to it
 
 	<*
-	 ARRAY only: the distance between elements, which is the element's size
-	 rounded up to its alignment, and under std140 rounded up to 16 again.
+	 Set once `assign_offsets` has run, with the layout it ran under. A struct
+	 nested in two differently laid-out blocks is an error rather than one
+	 layout silently winning.
 	*>
-	uint stride;
+	bool   laid_out;
+	Layout layout;
+
+	<*
+	 Set once this struct's members have been decorated as part of a block, so
+	 a struct nested by two members of the same block is decorated once.
+	*>
+	bool members_decorated;
 }
 
 <*
@@ -151,15 +175,14 @@ fn Type* TypeTable.find(&self, String name)
 }
 
 <*
- An array of `count` elements. Not interned, like a struct: the stride belongs
- to this declaration and depends on the layout it sits in.
+ An array of `count` elements. Not interned, like a struct: an array declaration
+ is one place, and its stride depends on the block it ends up in, so it is
+ computed from the layout at the point the size or the decoration is needed.
 *>
-fn Type* TypeTable.array_of(&self, Type* element, uint count, Layout layout)
+fn Type* TypeTable.array_of(&self, Type* element, uint count)
 {
 	String name = string::format(self.allocator, "%s[%d]", element.name, count);
-	Type*  type = self.add(ARRAY, name, element, count);
-	type.stride = array_stride(element, layout);
-	return type;
+	return self.add(ARRAY, name, element, count);
 }
 
 fn uint array_stride(Type* element, Layout layout)
@@ -215,12 +238,22 @@ fn void TypeTable.init(&self, Allocator allocator)
 	self.add(TEXTURE, "texture3d", float_vectors[3], 0, DIM_3D);
 	self.add(TEXTURE, "texturecube", float_vectors[3], 0, DIM_CUBE);
 	self.add(SAMPLER, "sampler");
+
+	self.add(SAMPLED_IMAGE, "Sampler2D", float_vectors[3], 0, DIM_2D);
+	Type* shadow_2d = self.add(SAMPLED_IMAGE, "Sampler2DShadow", float_vectors[3], 0, DIM_2D);
+	shadow_2d.depth = 1;
 }
 
 // --- Queries -----------------------------------------------------------------
 
 fn bool Type.is_scalar(&self) => self.kind == BOOL || self.kind == INT || self.kind == UINT || self.kind == FLOAT;
 fn bool Type.is_numeric(&self) => self.kind == INT || self.kind == UINT || self.kind == FLOAT;
+
+<*
+ A type that is a descriptor and not memory: an image, a sampler, or a combined
+ image-and-sampler.
+*>
+fn bool Type.is_opaque(&self) => self.kind == TEXTURE || self.kind == SAMPLER || self.kind == SAMPLED_IMAGE;
 
 <*
  Component count for scalars and vectors; 1 for a scalar. Meaningless for
@@ -259,6 +292,20 @@ fn usz Type.member_index(&self, String name)
 	return (usz)-1;
 }
 
+<*
+ The STRUCT this type is or wraps in arrays, or null. A nested struct is laid
+ out and decorated by the block that contains it.
+*>
+fn Type* Type.struct_element(&self)
+{
+	Type* type = self;
+	while (type.kind == ARRAY)
+	{
+		type = type.element;
+	}
+	return type.kind == STRUCT ? type : null;
+}
+
 // --- Block layout ------------------------------------------------------------
 
 <*
@@ -273,6 +320,10 @@ enum Layout : char
 {
 	STD140,
 	STD430,
+	// C3's own packing, the `-force-glsl-scalar-layout` Slang is given today:
+	// every scalar is 4-byte aligned and nothing rounds up to 16. This is the
+	// mode the generator uses to match three.c3's wire structs by construction.
+	SCALAR,
 }
 
 <*
@@ -290,7 +341,9 @@ fn uint Type.align(&self, Layout layout)
 		case FLOAT:
 			return 4;
 		case VECTOR:
-			return self.count == 2 ? 8 : 16;
+			// A vector aligns as its component under scalar layout; std140 and
+			// std430 round a 3-vector up to 16.
+			return layout == SCALAR ? self.element.align(layout) : (self.count == 2 ? 8 : 16);
 		case MATRIX:
 			// An array of column vectors, so the column's alignment.
 			return self.element.align(layout);
@@ -313,8 +366,15 @@ fn uint Type.align(&self, Layout layout)
 
 <*
  The stride between the columns of a matrix, i.e. its MatrixStride decoration.
+
+ Scalar layout packs a column tightly (`float3x3` is three 12-byte columns, 36
+ bytes); std140 and std430 stride by the column's alignment instead.
 *>
-fn uint Type.matrix_stride(&self, Layout layout) => self.element.align(layout);
+fn uint Type.matrix_stride(&self, Layout layout)
+{
+	if (layout == SCALAR) return 4 * self.element.count;
+	return self.element.align(layout);
+}
 
 fn uint Type.size(&self, Layout layout)
 {
@@ -330,7 +390,7 @@ fn uint Type.size(&self, Layout layout)
 		case MATRIX:
 			return self.matrix_stride(layout) * self.count;
 		case ARRAY:
-			return self.stride * self.count;
+			return array_stride(self.element, layout) * self.count;
 		case POINTER:
 			return 8;
 		case STRUCT:
@@ -349,11 +409,19 @@ fn uint Type.size(&self, Layout layout)
 fn uint round_up(uint value, uint multiple) => (value + multiple - 1) / multiple * multiple;
 
 <*
- Assign a block's member offsets, in place. Returns the block's total size,
- which is what a push constant range needs.
+ Assign a block's member offsets, in place, and recurse into any struct nested
+ inside it - a nested struct's members carry `Offset` decorations too, and the
+ enclosing block decides their layout.
+
+ Returns the block's total size, which is what a push constant range needs, or
+ LAYOUT_CONFLICT when a nested struct is already laid out for another block.
 *>
-fn uint Type.assign_offsets(&self, Layout layout)
+fn uint? Type.assign_offsets(&self, Layout layout)
 {
+	if (self.laid_out && self.layout != layout) return LAYOUT_CONFLICT~;
+	self.laid_out = true;
+	self.layout   = layout;
+
 	uint offset = 0;
 	foreach (&m : self.members)
 	{
@@ -361,6 +429,15 @@ fn uint Type.assign_offsets(&self, Layout layout)
 		m.offset = offset;
 		offset  += m.type.size(layout);
 	}
+
+	foreach (&m : self.members)
+	{
+		Type* nested = m.type.struct_element();
+		if (!nested) continue;
+		uint? nested_size = nested.assign_offsets(layout);
+		if (catch nested_size) return LAYOUT_CONFLICT~;
+	}
+
 	return round_up(offset, self.align(layout));
 }
 

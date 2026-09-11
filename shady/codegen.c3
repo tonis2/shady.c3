@@ -92,7 +92,20 @@ alias LocalList    = List{Local};
 alias ResourceList = List{Resource};
 alias StageVarList = List{StageVar};
 alias IdListC      = List{Id};
+alias UintList     = List{uint};
 alias StringList   = List{String};
+
+<*
+ A module-level `const`, with the `SpecId` it was given or no spec id when it was
+ not. Its id resolves wherever its name is written.
+*>
+struct Constant
+{
+	String name;
+	Type*  type;
+	Id     id;
+}
+alias ConstantList = List{Constant};
 
 struct Codegen
 {
@@ -102,6 +115,7 @@ struct Codegen
 	Allocator  allocator;
 
 	ResourceList resources;
+	ConstantList constants;
 	LocalList    locals;
 	FunctionSigList functions;
 	LoopList     loops;
@@ -122,10 +136,24 @@ struct Codegen
 	*>
 	bool uses_device_addresses;
 
+	<*
+	 Lay every block out with C3's packing instead of std140/std430. Off by
+	 default, so the std140/std430 rules stay the documented behavior unless a
+	 compile asks for scalar.
+	*>
+	bool scalar_layout;
+
 	String error;
 	uint   error_line;
 	uint   error_column;
 }
+
+<*
+ Which layout a block gets: the kind's own unless this compile asked for
+ scalar, which overrides every kind the same way `-force-glsl-scalar-layout`
+ does.
+*>
+fn Layout Codegen.block_layout(&self, BlockKind kind) => self.scalar_layout ? SCALAR : kind.layout();
 
 fn void Codegen.fail(&self, uint line, uint column, String message)
 {
@@ -157,6 +185,15 @@ fn Resource* Codegen.find_resource(&self, String name)
 	return null;
 }
 
+fn Constant* Codegen.find_constant(&self, String name)
+{
+	foreach (&constant : self.constants)
+	{
+		if (constant.name == name) return constant;
+	}
+	return null;
+}
+
 // --- SPIR-V types ------------------------------------------------------------
 
 <*
@@ -177,16 +214,38 @@ fn Id Codegen.type_id(&self, Type* type)
 		case MATRIX:  type.id = self.mod.type_matrix(self.type_id(type.element), type.count);
 		case ARRAY:
 		{
-			Id length = self.mod.const_u32(self.type_id(self.types.find("uint")), type.count);
-			type.id = self.mod.type_array(self.type_id(type.element), length);
-			self.mod.decorate(type.id, DECORATION_ARRAY_STRIDE, type.stride);
+			if (type.runtime)
+			{
+				type.id = self.mod.type_runtime_array(self.type_id(type.element));
+			}
+			else
+			{
+				Id length = self.mod.const_u32(self.type_id(self.types.find("uint")), type.count);
+				type.id = self.mod.type_array(self.type_id(type.element), length);
+			}
+			// The ArrayStride is a property of the block the array sits in, so
+			// it is decorated by decorate_block_members, not here.
 			self.mod.name(type.id, type.name);
 		}
 		case SAMPLER: type.id = self.mod.type_sampler();
+		case SAMPLED_IMAGE:
+			type.id = self.mod.type_sampled_image(
+				self.mod.type_image(self.type_id(type.element.element), type.dim, type.depth));
 		case POINTER:
-			// Buffer structs pre-declare their pointer type with
-			// OpTypeForwardPointer, so it exists before this is reached.
-			type.id = type.element.pointer_id;
+			// A buffer struct pre-declares its pointer type with
+			// OpTypeForwardPointer, so it exists before this is reached. A
+			// pointer to a scalar, vector or matrix is created here instead,
+			// striding by the pointee's size for the same reason a buffer's is.
+			if (type.element.pointer_id != NO_ID)
+			{
+				type.id = type.element.pointer_id;
+			}
+			else
+			{
+				type.id = self.mod.type_pointer(STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER, self.type_id(type.element));
+				self.mod.decorate(type.id, DECORATION_ARRAY_STRIDE,
+					array_stride(type.element, self.block_layout(ADDRESS)));
+			}
 		case TEXTURE: type.id = self.mod.type_image(self.type_id(type.element.element), type.dim);
 		case STRUCT:
 			@pool() {
@@ -208,10 +267,10 @@ fn Id Codegen.pointer_to(&self, uint storage_class, Type* type)
 
 <*
  A written type, resolved: an array wraps its element, and `T*` wraps an
- `@address` struct. `layout` decides an array's stride, so it must be the layout
- of the place the type sits - a block's, or the default for a local.
+ `@address` struct or a scalar, vector or matrix. An array's stride is not
+ decided here - the block that contains it lays it out later.
 *>
-fn Type*? Codegen.resolve_type(&self, TypeRef ref, Layout layout, uint line, uint column)
+fn Type*? Codegen.resolve_type(&self, TypeRef ref, uint line, uint column)
 {
 	Type* type = self.types.find(ref.name);
 	if (!type)
@@ -227,16 +286,33 @@ fn Type*? Codegen.resolve_type(&self, TypeRef ref, Layout layout, uint line, uin
 			self.fail(line, column, "an array of device-address pointers is not supported");
 			return CODEGEN_ERROR~;
 		}
-		return self.types.array_of(type, ref.array_size, layout);
+		Type* array = self.types.array_of(type, ref.array_size);
+		// A length of zero is `T[]`: a runtime-sized array, which is only legal
+		// as a module-level resource.
+		array.runtime = ref.array_size == 0;
+		return array;
 	}
 
 	if (ref.is_pointer)
 	{
-		if (type.block != ADDRESS)
+		// A device address may point at an @address struct, or at a plain
+		// scalar, vector or matrix: a mesh's streams are flat arrays of float3,
+		// uint4 and float4x4, not arrays of structs.
+		bool addressable = type.kind == VECTOR || type.kind == MATRIX || type.is_scalar()
+			|| (type.kind == STRUCT && type.block == ADDRESS);
+		if (!addressable)
 		{
-			self.fail(line, column, string::format(self.allocator,
-				"`%s*` is not a device address - mark `%s` with @address to give it one",
-				type.name, type.name));
+			if (type.kind == STRUCT)
+			{
+				self.fail(line, column, string::format(self.allocator,
+					"`%s*` is not a device address - mark `%s` with @address to give it one",
+					type.name, type.name));
+			}
+			else
+			{
+				self.fail(line, column, string::format(self.allocator,
+					"`%s*` cannot be a device address", type.name));
+			}
 			return CODEGEN_ERROR~;
 		}
 		return self.types.pointer_to(type);
@@ -280,7 +356,7 @@ fn Id Codegen.rvalue(&self, Value value)
 fn uint Codegen.access_alignment(&self, Value value)
 {
 	if (value.storage != STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER) return 0;
-	return value.type.align(STD430);
+	return value.type.align(self.block_layout(ADDRESS));
 }
 
 <*
@@ -316,7 +392,9 @@ fn Value? Codegen.offset_address(&self, Value base, Value index, Expr* expr)
 		wide = self.func.unop(OP_U_CONVERT, ulong_t, self.rvalue(index));
 	}
 
-	Id stride  = self.mod.const_u64(ulong_t, element.size(STD430));
+	// The element's strided size, not its bare size: under std430 a float3
+	// occupies 12 bytes but the next element starts at 16.
+	Id stride  = self.mod.const_u64(ulong_t, array_stride(element, self.block_layout(ADDRESS)));
 	Id address = self.func.unop(OP_CONVERT_PTR_TO_U, ulong_t, self.rvalue(base));
 	Id offset  = self.func.binop(OP_I_MUL, ulong_t, wide, stride);
 	Id target  = self.func.binop(OP_I_ADD, ulong_t, address, offset);
@@ -366,6 +444,10 @@ fn Value? Codegen.expression(&self, Expr* expr)
 			if (Local* local = self.find_local(expr.ident.name))
 			{
 				return (Value) { .type = local.type, .pointer = local.pointer, .storage = STORAGE_CLASS_FUNCTION };
+			}
+			if (Constant* constant = self.find_constant(expr.ident.name))
+			{
+				return (Value) { .type = constant.type, .id = constant.id };
 			}
 			if (Resource* resource = self.find_resource(expr.ident.name))
 			{
@@ -612,6 +694,10 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 fn Value? Codegen.conditional_expression(&self, Expr* expr)
 {
 	Value condition = self.expression(expr.conditional.condition)!;
+	// Materialise the test before the merge: SPIR-V requires the merge to be
+	// immediately followed by the branch, and loading a bool local is an
+	// instruction like any other.
+	Id    test = self.rvalue(condition);
 
 	Id then_label  = self.func.new_label();
 	Id else_label  = self.func.new_label();
@@ -621,7 +707,7 @@ fn Value? Codegen.conditional_expression(&self, Expr* expr)
 	Type* result  = null;
 
 	self.func.selection_merge(merge_label);
-	self.func.branch_conditional(self.rvalue(condition), then_label, else_label);
+	self.func.branch_conditional(test, then_label, else_label);
 
 	self.func.label(then_label);
 	self.terminated = false;
@@ -784,6 +870,29 @@ fn Value? Codegen.binary_expression(&self, Expr* expr)
 }
 
 <*
+ Add or subtract two whole matrices, a column at a time.
+
+ SPIR-V's `OpFAdd` and `OpFSub` take scalars and vectors only, so a matrices'
+ worth of them would be a miscompile the validator catches - as it caught this
+ one. `OpCompositeExtract`/`Construct` is how the columns come apart and go
+ back together.
+*>
+fn Id Codegen.matrix_add(&self, Id left, Id right, Type* matrix, bool subtract)
+{
+	Id column_type = self.type_id(matrix.element);
+	@pool() {
+		Id[] columns = alloc::alloc_array(tmem, Id, (sz)matrix.count);
+		for (usz i = 0; i < (usz)matrix.count; i++)
+		{
+			Id a = self.func.composite_extract(column_type, left, (uint)i);
+			Id b = self.func.composite_extract(column_type, right, (uint)i);
+			columns[i] = self.func.binop(subtract ? OP_F_SUB : OP_F_ADD, column_type, a, b);
+		}
+		return self.func.composite_construct(self.type_id(matrix), columns);
+	};
+}
+
+<*
  The type an operator produces. Comparisons yield bool; matrix products follow
  the column-vector convention.
 *>
@@ -811,6 +920,7 @@ fn Type* Codegen.result_type(&self, TokenKind op, Type* left, Type* right)
 	if (left.kind == MATRIX && right.kind == VECTOR) return right;  // OpMatrixTimesVector
 	if (left.kind == MATRIX && right.kind == MATRIX) return left;
 	if (left.kind == MATRIX && right.is_scalar())    return left;
+	if (left.is_scalar() && right.kind == MATRIX)    return right;  // OpMatrixTimesScalar
 	if (left.is_scalar() && right.kind == VECTOR)    return right;
 	return left;
 }
@@ -848,10 +958,23 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 		{
 			return self.func.binop(OP_MATRIX_TIMES_SCALAR, self.type_id(lt), left_id, right_id);
 		}
+		if (lt.is_scalar() && rt.kind == MATRIX)
+		{
+			// `OpMatrixTimesScalar` takes the matrix first, whichever side the
+			// scalar was written on.
+			return self.func.binop(OP_MATRIX_TIMES_SCALAR, self.type_id(rt), right_id, left_id);
+		}
 		if (lt.kind == VECTOR && rt.is_scalar())
 		{
 			return self.func.binop(OP_VECTOR_TIMES_SCALAR, self.type_id(lt), left_id, right_id);
 		}
+	}
+
+	// SPIR-V has no matrix add or subtract, so they are done a column at a
+	// time - which is also the only place the column type is assumed.
+	if ((op == PLUS || op == MINUS) && lt.kind == MATRIX && rt.kind == MATRIX)
+	{
+		return self.matrix_add(left_id, right_id, lt, op == MINUS);
 	}
 
 	// Broadcast a scalar against a vector for the component-wise operators.
@@ -921,6 +1044,13 @@ fn Id? Codegen.coerce(&self, Value value, Type* expected, Expr* expr)
 	if (expected.kind == FLOAT && value.type.kind == INT)
 	{
 		return self.func.unop(OP_CONVERT_S_TO_F, self.type_id(expected), self.rvalue(value));
+	}
+	// int and uint are both 32 bits, so moving between them is a reinterpretation
+	// and not a conversion - which is why `uint i = 0;` is allowed, as in C.
+	if ((expected.kind == UINT && value.type.kind == INT)
+		|| (expected.kind == INT && value.type.kind == UINT))
+	{
+		return self.func.unop(OP_BITCAST, self.type_id(expected), self.rvalue(value));
 	}
 	if (expected.kind == VECTOR && value.type.is_scalar())
 	{
@@ -1076,7 +1206,7 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 					"an array parameter is not supported - pass a device-address pointer");
 				return CODEGEN_ERROR~;
 			}
-			Type* type = self.resolve_type(written[i].type, STD430, written[i].line, written[i].column)!;
+			Type* type = self.resolve_type(written[i].type, written[i].line, written[i].column)!;
 			params[at] = type;
 			names[at]  = written[i].name;
 			refs[at]   = written[i].by_ref;
@@ -1406,7 +1536,10 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 	if (callee.kind == MEMBER)
 	{
 		Value base = self.expression(callee.member.value)!;
-		if (base.type.kind == TEXTURE) return self.sample_expression(expr, base, callee.member.name);
+		if (base.type.kind == TEXTURE || base.type.kind == SAMPLED_IMAGE)
+		{
+			return self.sample_expression(expr, base, callee.member.name);
+		}
 		if (self.has_function(callee.member.name)) return self.user_call(expr, callee.member.name, &base);
 
 		self.fail(expr.line, expr.column,
@@ -1427,8 +1560,79 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 
 	if (name == "mul") return self.mul_call(expr);
 	if (name == "select") return self.select_call(expr);
+	if (name == "InterlockedAdd") return self.atomic_add_call(expr);
+	if (name == "NonUniformResourceIndex") return self.non_uniform_call(expr);
 
 	return self.builtin_call(expr, name);
+}
+
+<*
+ `NonUniformResourceIndex(i)`: the index is not the same across the invocations
+ of a wave, so the descriptor it selects may differ lane by lane. It decorates
+ the index and yields it unchanged.
+
+ The decoration is what tells the driver not to hoist one descriptor for the
+ whole wave, which is exactly the mistake a material body reading a map inside
+ a branch would otherwise invite.
+*>
+fn Value? Codegen.non_uniform_call(&self, Expr* expr)
+{
+	if (expr.call.args.len != 1)
+	{
+		self.fail(expr.line, expr.column, "`NonUniformResourceIndex` takes one index");
+		return CODEGEN_ERROR~;
+	}
+	Value index = self.expression(expr.call.args[0])!;
+	if (!index.type.is_numeric() || index.type.kind == FLOAT)
+	{
+		self.fail(expr.line, expr.column, "`NonUniformResourceIndex` needs an integer index");
+		return CODEGEN_ERROR~;
+	}
+
+	Id id = self.rvalue(index);
+	self.mod.decorate(id, DECORATION_NON_UNIFORM);
+	self.mod.capability(CAPABILITY_SHADER_NON_UNIFORM);
+	self.mod.extension("SPV_EXT_descriptor_indexing");
+	return (Value) { .type = index.type, .id = id };
+}
+
+<*
+ `InterlockedAdd(dest, value)`: an atomic add on device memory, yielding the
+ value the destination held before. HLSL's name, because that is what a ported
+ body writes; the result may be ignored.
+
+ Device scope and relaxed ordering: a counter shared between workgroups needs
+ the read-modify-write to be atomic, not ordered against other memory, and
+ Vulkan forbids `SequentiallyConsistent` outright. Anything stronger belongs to
+ a barrier rather than the increment.
+*>
+fn Value? Codegen.atomic_add_call(&self, Expr* expr)
+{
+	if (expr.call.args.len != 2)
+	{
+		self.fail(expr.line, expr.column, "`InterlockedAdd` takes a destination and a value");
+		return CODEGEN_ERROR~;
+	}
+	Value dest  = self.expression(expr.call.args[0])!;
+	Value value = self.expression(expr.call.args[1])!;
+
+	if (dest.pointer == NO_ID)
+	{
+		self.fail(expr.line, expr.column, "the destination of `InterlockedAdd` must be a variable");
+		return CODEGEN_ERROR~;
+	}
+	if (dest.type.kind != UINT || value.type.kind != UINT)
+	{
+		self.fail(expr.line, expr.column, "`InterlockedAdd` works on 32-bit uints");
+		return CODEGEN_ERROR~;
+	}
+
+	Type* uint_t    = self.types.find("uint");
+	Id    scope     = self.mod.const_u32(self.type_id(uint_t), 1); // Device
+	Id    semantics = self.mod.const_u32(self.type_id(uint_t), 0); // Relaxed
+	Id    result    = self.func.emit(OP_ATOMIC_I_ADD, self.type_id(uint_t),
+		dest.pointer, scope, semantics, self.rvalue(value));
+	return (Value) { .type = uint_t, .id = result };
 }
 
 <*
@@ -1598,18 +1802,131 @@ fn Id Codegen.convert_scalar(&self, Id id, Type* from, Type* to)
 }
 
 <*
- `tex.sample(sampler, uv)` - the image and sampler are separate objects, paired
- into a sampled image only at the point of use.
+ The canonical name of a sampling method, accepting the Slang spelling a ported
+ body writes as well as the lowercase one. Empty for anything else.
 *>
-fn Value? Codegen.sample_expression(&self, Expr* expr, Value texture, String method)
+fn String sample_method_name(String written)
 {
-	bool explicit_lod = method == "sample_lod";
-	if (!explicit_lod && method != "sample")
+	switch (written)
+	{
+		case "sample":
+		case "Sample":                return "sample";
+		case "sample_lod":
+		case "SampleLevel":           return "sample_lod";
+		case "sample_grad":
+		case "SampleGrad":            return "sample_grad";
+		case "sample_bias":
+		case "SampleBias":            return "sample_bias";
+		case "sample_cmp_level_zero":
+		case "SampleCmpLevelZero":    return "sample_cmp_level_zero";
+		default:                      return "";
+	}
+}
+
+<*
+ `tex.sample(...)` and its variants.
+
+ Two shapes. An image and a sampler kept as separate objects (`texture2d` plus
+ `sampler`) are paired only at the point of use, and have `sample` and
+ `sample_lod`. A combined `Sampler2D` is one descriptor that samples directly,
+ and carries the whole set - the gradient, bias and comparison variants are
+ what the material path spends.
+*>
+fn Value? Codegen.sample_expression(&self, Expr* expr, Value texture, String written)
+{
+	String method = sample_method_name(written);
+	if (method.len == 0)
+	{
+		self.fail(expr.line, expr.column,
+			string::format(self.allocator, "a texture has no method `%s`", written));
+		return CODEGEN_ERROR~;
+	}
+
+	if (texture.type.kind == TEXTURE) return self.separate_sample_expression(expr, texture, method);
+
+	Type* float4  = self.types.find("float4");
+	Type* float_t = self.types.find("float");
+	bool  depth   = texture.type.depth != 0;
+
+	usz wanted;
+	if (method == "sample")
+	{
+		wanted = 1;
+	}
+	else if (method == "sample_grad")
+	{
+		wanted = 3;
+	}
+	else
+	{
+		wanted = 2;
+	}
+
+	if (expr.call.args.len != wanted)
+	{
+		self.fail(expr.line, expr.column,
+			string::format(self.allocator, "`%s` takes %d arguments", written, wanted));
+		return CODEGEN_ERROR~;
+	}
+	if (method == "sample_cmp_level_zero" && !depth)
+	{
+		self.fail(expr.line, expr.column,
+			"`sample_cmp_level_zero` needs a comparison sampler such as Sampler2DShadow");
+		return CODEGEN_ERROR~;
+	}
+
+	Id image = self.func.load(self.type_id(texture.type), texture.pointer);
+	Id coord = self.rvalue(self.expression(expr.call.args[0])!);
+
+	Id    result;
+	Type* result_type = float4;
+
+	if (method == "sample")
+	{
+		result = self.func.image_sample(self.type_id(float4), image, coord);
+	}
+	else if (method == "sample_lod")
+	{
+		Value lod = self.expression(expr.call.args[1])!;
+		result = self.func.image_sample_lod(self.type_id(float4), image, coord, self.rvalue(lod));
+	}
+	else if (method == "sample_grad")
+	{
+		Value gx = self.expression(expr.call.args[1])!;
+		Value gy = self.expression(expr.call.args[2])!;
+		result = self.func.emit(OP_IMAGE_SAMPLE_EXPLICIT_LOD, self.type_id(float4), image, coord,
+			IMAGE_OPERAND_GRAD, self.rvalue(gx), self.rvalue(gy));
+	}
+	else if (method == "sample_bias")
+	{
+		Value bias = self.expression(expr.call.args[1])!;
+		result = self.func.emit(OP_IMAGE_SAMPLE_IMPLICIT_LOD, self.type_id(float4), image, coord,
+			IMAGE_OPERAND_BIAS, self.rvalue(bias));
+	}
+	else // sample_cmp_level_zero
+	{
+		Value dref = self.expression(expr.call.args[1])!;
+		result = self.func.emit(OP_IMAGE_SAMPLE_DREF_EXPLICIT_LOD, self.type_id(float_t), image, coord,
+			self.rvalue(dref), IMAGE_OPERAND_LOD, self.const_float(0.0));
+		result_type = float_t;
+	}
+
+	return (Value) { .type = result_type, .id = result };
+}
+
+<*
+ The separate image-and-sampler shape: `tex.sample(sampler, uv)` and
+ `tex.sample_lod(sampler, uv, lod)`.
+*>
+fn Value? Codegen.separate_sample_expression(&self, Expr* expr, Value texture, String method)
+{
+	if (method != "sample" && method != "sample_lod")
 	{
 		self.fail(expr.line, expr.column,
 			string::format(self.allocator, "a texture has no method `%s`", method));
 		return CODEGEN_ERROR~;
 	}
+	bool explicit_lod = method == "sample_lod";
 
 	usz wanted = explicit_lod ? 3 : 2;
 	if (expr.call.args.len != wanted)
@@ -1838,7 +2155,12 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 			self.locals.size = (sz)scope;
 
 		case DECL:
-			Type* type = self.resolve_type(stmt.decl.type, STD430, stmt.line, stmt.column)!;
+			Type* type = self.resolve_type(stmt.decl.type, stmt.line, stmt.column)!;
+			if (type.kind == ARRAY && type.runtime)
+			{
+				self.fail(stmt.line, stmt.column, "a runtime-sized array is only a module-level resource");
+				return CODEGEN_ERROR~;
+			}
 			Id pointer = self.func.local(self.pointer_to(STORAGE_CLASS_FUNCTION, type));
 			self.mod.name(pointer, stmt.decl.name);
 			if (stmt.decl.value)
@@ -1953,13 +2275,14 @@ fn void? Codegen.emit_return(&self, Stmt* stmt)
 fn void? Codegen.emit_if(&self, Stmt* stmt)
 {
 	Value condition = self.expression(stmt.if_stmt.condition)!;
+	Id    test      = self.rvalue(condition);
 
 	Id then_label  = self.func.new_label();
 	Id else_label  = stmt.if_stmt.else_branch ? self.func.new_label() : NO_ID;
 	Id merge_label = self.func.new_label();
 
 	self.func.selection_merge(merge_label);
-	self.func.branch_conditional(self.rvalue(condition), then_label, else_label != NO_ID ? else_label : merge_label);
+	self.func.branch_conditional(test, then_label, else_label != NO_ID ? else_label : merge_label);
 
 	self.func.label(then_label);
 	self.terminated = false;

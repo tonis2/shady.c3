@@ -1,0 +1,80 @@
+// The bindless texture table, a comparison sampler, and the sample variants the
+// material path spends - the shapes surface.slang defines, in shady's spelling.
+//
+// `Sampler2D` is a combined image and sampler: one descriptor that samples
+// directly, rather than the separate `texture2d` + `sampler` pair. `[]` makes
+// it runtime-sized, and `NonUniformResourceIndex` says the index differs lane to
+// lane - two invocations of one quad may be shading different materials.
+
+struct Push @pushconstant
+{
+    uint texture_index[24];
+}
+Push push;
+
+Sampler2D       three_textures[] @set(1) @binding(0);
+Sampler2DShadow shadow_atlas     @set(0) @binding(17);
+Sampler2D       environment_map  @set(0) @binding(18);
+Sampler2D       ltc_lut          @set(0) @binding(19);
+
+struct Map
+{
+    // The row of `push.texture_index` this map was named by.
+    uint at;
+}
+
+fn Map map_at(uint at)
+{
+    Map m;
+    m.at = at;
+    return m;
+}
+
+fn uint Map.slot(&self)
+{
+    return push.texture_index[self.at];
+}
+
+fn float4 Map.Sample(&self, float2 uv)
+{
+    return three_textures[NonUniformResourceIndex(self.slot())].Sample(uv);
+}
+
+fn float4 Map.SampleGrad(&self, float2 uv, float2 gx, float2 gy)
+{
+    return three_textures[NonUniformResourceIndex(self.slot())].SampleGrad(uv, gx, gy);
+}
+
+fn float4 Map.SampleLevel(&self, float2 uv, float lod)
+{
+    return three_textures[NonUniformResourceIndex(self.slot())].SampleLevel(uv, lod);
+}
+
+fn float4 Map.SampleBias(&self, float2 uv, float bias)
+{
+    return three_textures[NonUniformResourceIndex(self.slot())].SampleBias(uv, bias);
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    Map base   = map_at(0u);
+    Map normal = map_at(1u);
+
+    float2 uv = input.color.xy;
+    float4 albedo  = base.Sample(uv);
+    float4 detail  = normal.SampleBias(uv, 0.0);
+    float4 blurred = base.SampleLevel(uv, 2.0);
+    float4 grads   = base.SampleGrad(uv, float2(1.0, 0.0), float2(0.0, 1.0));
+
+    float  shadow = shadow_atlas.SampleCmpLevelZero(uv, input.color.z);
+    float3 sky    = environment_map.SampleLevel(uv, 0.0).rgb;
+    float4 ltc    = ltc_lut.SampleLevel(uv, 0.0);
+
+    return albedo + detail + blurred + grads + ltc + float4(sky * shadow, 0.0);
+}

@@ -53,6 +53,9 @@ const uint OP_CONSTANT_TRUE             = 41;
 const uint OP_CONSTANT_FALSE            = 42;
 const uint OP_CONSTANT                  = 43;
 const uint OP_CONSTANT_COMPOSITE        = 44;
+const uint OP_SPEC_CONSTANT_TRUE        = 48;
+const uint OP_SPEC_CONSTANT_FALSE       = 49;
+const uint OP_SPEC_CONSTANT             = 50;
 
 const uint OP_FUNCTION                  = 54;
 const uint OP_FUNCTION_PARAMETER        = 55;
@@ -74,6 +77,7 @@ const uint OP_COMPOSITE_EXTRACT         = 81;
 const uint OP_SAMPLED_IMAGE             = 86;
 const uint OP_IMAGE_SAMPLE_IMPLICIT_LOD = 87;
 const uint OP_IMAGE_SAMPLE_EXPLICIT_LOD = 88;
+const uint OP_IMAGE_SAMPLE_DREF_EXPLICIT_LOD = 90;
 
 const uint OP_CONVERT_F_TO_U            = 109;
 const uint OP_CONVERT_F_TO_S            = 110;
@@ -87,6 +91,7 @@ const uint OP_BITCAST                   = 124;
 const uint OP_ANY                       = 154;
 const uint OP_ALL                       = 155;
 const uint OP_SELECT                    = 169;
+const uint OP_ATOMIC_I_ADD              = 234;
 
 const uint OP_S_NEGATE                  = 126;
 const uint OP_F_NEGATE                  = 127;
@@ -183,6 +188,7 @@ const uint DECORATION_BUILTIN        = 11;
 const uint DECORATION_FLAT           = 14;
 const uint DECORATION_LOCATION       = 30;
 const uint DECORATION_BINDING        = 33;
+const uint DECORATION_SPEC_ID        = 1;
 const uint DECORATION_DESCRIPTOR_SET = 34;
 const uint DECORATION_OFFSET         = 35;
 
@@ -206,6 +212,17 @@ const uint DIM_3D   = 2;
 const uint DIM_CUBE = 3;
 
 const uint IMAGE_FORMAT_UNKNOWN = 0;
+
+// Image operand bits, on an explicit or implicit sample instruction.
+const uint IMAGE_OPERAND_BIAS = 1;
+const uint IMAGE_OPERAND_LOD  = 2;
+const uint IMAGE_OPERAND_GRAD = 4;
+
+// Descriptor indexing: a runtime-sized descriptor array needs the extension and
+// RuntimeDescriptorArray, a non-uniform index into one needs ShaderNonUniform.
+const uint CAPABILITY_RUNTIME_DESCRIPTOR_ARRAY = 5302;
+const uint CAPABILITY_SHADER_NON_UNIFORM       = 5301;
+const uint DECORATION_NON_UNIFORM              = 5300;
 
 // "Sampled" operand of OpTypeImage: 1 = used with a sampler, 2 = storage image.
 const uint IMAGE_SAMPLED_WITH_SAMPLER = 1;
