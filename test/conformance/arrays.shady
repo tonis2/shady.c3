@@ -1,0 +1,52 @@
+struct Uniforms @uniform
+{
+    float4x4 view_projection;
+}
+
+Uniforms uniforms;
+
+struct VertexIn
+{
+    float3 position;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+struct Palette
+{
+    float4 colors[4];
+}
+
+fn float4 swatch(Palette p, int i)
+{
+    return p.colors[i];
+}
+
+fn FragmentIn vert(VertexIn input) @vertex(main)
+{
+    FragmentIn output;
+    output.position = uniforms.view_projection * float4(input.position, 1.0);
+    output.color = float4(1.0);
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    const float2 taps[4] = {
+        float2(0.0, 0.0), float2(1.0, 0.0), float2(0.0, 1.0), float2(1.0, 1.0)
+    };
+
+    Palette palette;
+    palette.colors[0] = float4(1.0, 0.0, 0.0, 1.0);
+    palette.colors[1] = float4(0.0, 1.0, 0.0, 1.0);
+    palette.colors[2] = float4(0.0, 0.0, 1.0, 1.0);
+    palette.colors[3] = float4(0.0, 0.0, 0.0, 1.0);
+
+    int i = int(input.color.x * 3.0);
+    float2 uv = taps[i];
+    return swatch(palette, i) + float4(uv, 0.0, 1.0);
+}

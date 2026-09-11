@@ -10,6 +10,7 @@
 *>
 module conformance;
 
+import std::core::test;
 import std::io;
 import std::io::file;
 import std::io::path;
@@ -25,6 +26,9 @@ const char[*] EMBED_BDA          = $embed("conformance/bda.shady");
 const char[*] EMBED_MULTI_ENTRY  = $embed("conformance/multi_entry.shady");
 const char[*] EMBED_COMPUTE      = $embed("conformance/compute.shady");
 const char[*] EMBED_FUNCTIONS    = $embed("conformance/functions.shady");
+const char[*] EMBED_OPERATORS    = $embed("conformance/operators.shady");
+const char[*] EMBED_ARRAYS       = $embed("conformance/arrays.shady");
+const char[*] EMBED_BUILTINS     = $embed("conformance/builtins.shady");
 
 struct Case
 {
@@ -39,6 +43,9 @@ const Case[*] CORPUS = {
 	{ "multi_entry",  (String)EMBED_MULTI_ENTRY[..] },
 	{ "compute",      (String)EMBED_COMPUTE[..] },
 	{ "functions",    (String)EMBED_FUNCTIONS[..] },
+	{ "operators",    (String)EMBED_OPERATORS[..] },
+	{ "arrays",       (String)EMBED_ARRAYS[..] },
+	{ "builtins",     (String)EMBED_BUILTINS[..] },
 };
 
 fn void the_conformance_corpus_compiles_and_validates() @test
@@ -51,7 +58,8 @@ fn void the_conformance_corpus_compiles_and_validates() @test
 		if (!conforms(entry)) failures++;
 	}
 
-	assert(failures == 0, "conformance shaders failed; see the output above");
+	test::@check(failures == 0, "%d of %d corpus shaders failed; see the output above",
+		failures, CORPUS.len);
 }
 
 <*
@@ -65,16 +73,11 @@ fn bool conforms(Case entry) @private
 	char[]? spirv = shady::compile(entry.source, &diagnostic);
 	if (catch spirv)
 	{
-		io::printfn(
-			"FAIL %s: %s:%d:%d: %s",
-			entry.name,
-			entry.name,
-			diagnostic.line,
-			diagnostic.column,
-			diagnostic.message
-		);
+		io::printfn("FAIL %s: %s", entry.name, diagnostic.to_string(tmem));
+		diagnostic.free();
 		return false;
 	}
+	diagnostic.free();
 	defer free(spirv);
 
 	if (spirv.len < 4 || ((uint*)spirv.ptr)[0] != SPIRV_MAGIC)

@@ -55,12 +55,17 @@ fn bool Parser.match(&self, TokenKind kind)
 	return true;
 }
 
+<*
+ Record the first error. Later ones are usually noise from the same cause.
+
+ The message outlives the parse: the parser's arena is gone by the time a
+ caller reads this, so it is copied to the heap and the caller frees it.
+*>
 fn void Parser.fail(&self, String message)
 {
-	// Keep the first error: later ones are usually noise from the same cause.
 	if (self.error.len) return;
 	Token token       = self.peek();
-	self.error        = message;
+	self.error        = message.copy(mem);
 	self.error_line   = token.line;
 	self.error_column = token.column;
 }
@@ -115,9 +120,22 @@ fn TypeRef? Parser.type_ref(&self)
 		self.expect(RBRACKET, "expected `]` after the array length")!;
 	}
 
-	if (self.match(STAR)) type.is_pointer = true;
+		if (self.match(STAR)) type.is_pointer = true;
 
 	return type;
+}
+
+<*
+ An array length written after the declarator's name: `float2 taps[4]`. The
+ type-first form `float2[4] taps` is handled by type_ref.
+*>
+fn void? Parser.declarator_array(&self, TypeRef* type)
+{
+	if (!self.match(LBRACKET)) return;
+	Token size = self.expect(INTEGER, "expected an array length")!;
+	type.is_array   = true;
+	type.array_size = (uint)size.number;
+	self.expect(RBRACKET, "expected `]` after the array length")!;
 }
 
 <*
@@ -180,7 +198,7 @@ fn Expr*? Parser.expression(&self) => self.assignment();
 
 fn Expr*? Parser.assignment(&self)
 {
-	Expr* left = self.logical_or()!;
+	Expr* left = self.ternary()!;
 
 	TokenKind op = self.peek().kind;
 	switch (op)
@@ -191,6 +209,11 @@ fn Expr*? Parser.assignment(&self)
 		case STAR_EQ:
 		case SLASH_EQ:
 		case PERCENT_EQ:
+		case AMP_EQ:
+		case PIPE_EQ:
+		case CARET_EQ:
+		case SHL_EQ:
+		case SHR_EQ:
 			Token token = self.advance();
 			// Right-associative, so recurse rather than loop.
 			Expr* value = self.assignment()!;
@@ -200,6 +223,27 @@ fn Expr*? Parser.assignment(&self)
 		default:
 			return left;
 	}
+}
+
+<*
+ `condition ? then_value : else_value`, between assignment and logical or.
+
+ The middle is a full expression and the third arm recurses, so `a ? b : c ? d : e`
+ groups to the right the way it reads.
+*>
+fn Expr*? Parser.ternary(&self)
+{
+	Expr* condition = self.logical_or()!;
+	if (!self.check(QUESTION)) return condition;
+
+	Token token = self.advance();
+	Expr* then_value = self.expression()!;
+	self.expect(COLON, "expected `:` in a conditional expression")!;
+	Expr* else_value = self.ternary()!;
+
+	Expr* node = self.new_expr(CONDITIONAL, token);
+	node.conditional = { .condition = condition, .then_value = then_value, .else_value = else_value };
+	return node;
 }
 
 alias BinaryParseFn = fn Expr*?(Parser*);
@@ -273,6 +317,16 @@ fn Expr*? Parser.multiplicative(&self) => self.binary_level(&Parser.unary, (Toke
 fn Expr*? Parser.unary(&self)
 {
 	TokenKind op = self.peek().kind;
+
+	if (op == PLUS_PLUS || op == MINUS_MINUS)
+	{
+		Token token  = self.advance();
+		Expr* target = self.unary()!;
+		Expr* node   = self.new_expr(UPDATE, token);
+		node.update = { .op = op, .target = target, .prefix = true };
+		return node;
+	}
+
 	if (op == MINUS || op == BANG || op == PLUS)
 	{
 		Token token   = self.advance();
@@ -334,7 +388,51 @@ fn Expr*? Parser.postfix(&self)
 			continue;
 		}
 
+		if (self.check(PLUS_PLUS) || self.check(MINUS_MINUS))
+		{
+			Token token = self.advance();
+			Expr* node  = self.new_expr(UPDATE, token);
+			node.update = { .op = token.kind, .target = value, .prefix = false };
+			value = node;
+			continue;
+		}
+
 		return value;
+	}
+}
+
+<*
+ The type names a C-style cast may name. Restricting casts to these is what
+ keeps `(x) - y` an ordinary subtraction: the parser has no type table, so
+ `(name)` is a cast only when `name` could not be a variable of a cast's kind.
+*>
+fn bool is_builtin_type_name(String name) @local
+{
+	switch (name)
+	{
+		case "void":
+		case "bool":
+		case "int":
+		case "uint":
+		case "float":
+		case "float2":
+		case "float3":
+		case "float4":
+		case "int2":
+		case "int3":
+		case "int4":
+		case "uint2":
+		case "uint3":
+		case "uint4":
+		case "bool2":
+		case "bool3":
+		case "bool4":
+		case "float2x2": case "float2x3": case "float2x4":
+		case "float3x2": case "float3x3": case "float3x4":
+		case "float4x2": case "float4x3": case "float4x4":
+			return true;
+		default:
+			return false;
 	}
 }
 
@@ -370,6 +468,25 @@ fn Expr*? Parser.primary(&self)
 			return node;
 
 		case LPAREN:
+			// `(type)value`, but only when the name is a type: `(x) - y` must
+			// stay a subtraction.
+			if (self.peek(1).kind == IDENT && is_builtin_type_name(self.peek(1).text)
+				&& self.peek(2).kind == RPAREN)
+			{
+				self.advance(); // the `(`
+				TypeRef type = self.type_ref()!;
+				self.expect(RPAREN, "expected `)` closing the cast")!;
+				if (type.is_pointer || type.is_array)
+				{
+					self.fail("a cast names a scalar, vector or matrix type");
+					return PARSE_ERROR~;
+				}
+				Expr* operand = self.unary()!;
+				Expr* node    = self.new_expr(CAST, token);
+				node.cast_expr = { .type = type, .value = operand };
+				return node;
+			}
+
 			self.advance();
 			Expr* inner = self.expression()!;
 			self.expect(RPAREN, "expected `)` closing the expression")!;
@@ -513,6 +630,35 @@ fn Stmt*? Parser.statement(&self)
 			self.expect(SEMICOLON, "expected `;` after `discard`")!;
 			return self.new_stmt(DISCARD, token);
 
+		case CONST:
+			self.advance();
+			TypeRef type = self.type_ref()!;
+			Token   name = self.expect(IDENT, "expected a name for the constant")!;
+			self.declarator_array(&type)!;
+			Expr* value = null;
+			if (self.match(EQ))
+			{
+				if (self.check(LBRACE))
+				{
+					value = self.initializer()!;
+				}
+				else
+				{
+					value = self.expression()!;
+				}
+			}
+			self.expect(SEMICOLON, "expected `;` after the constant")!;
+			Stmt* node = self.new_stmt(DECL, token);
+			node.decl = { .type = type, .name = name.text, .value = value };
+			return node;
+
+		case LBRACKET:
+			// A loop attribute, `[unroll]`. Accepted and ignored.
+			self.advance();
+			self.expect(IDENT, "expected an attribute name after `[`")!;
+			self.expect(RBRACKET, "expected `]` after the attribute")!;
+			return self.statement()!;
+
 		default:
 			return self.declaration_or_expression();
 	}
@@ -529,9 +675,20 @@ fn Stmt*? Parser.declaration_or_expression(&self)
 	{
 		TypeRef type = self.type_ref()!;
 		Token   name = self.expect(IDENT, "expected a variable name")!;
+		self.declarator_array(&type)!;
 
 		Expr* value = null;
-		if (self.match(EQ)) value = self.expression()!;
+		if (self.match(EQ))
+		{
+			if (self.check(LBRACE))
+			{
+				value = self.initializer()!;
+			}
+			else
+			{
+				value = self.expression()!;
+			}
+		}
 		self.expect(SEMICOLON, "expected `;` after the declaration")!;
 
 		Stmt* node = self.new_stmt(DECL, token);
@@ -544,6 +701,39 @@ fn Stmt*? Parser.declaration_or_expression(&self)
 
 	Stmt* node = self.new_stmt(EXPR, token);
 	node.expr  = { .value = value };
+	return node;
+}
+
+<*
+ `{ a, b, c }`: an array initialiser. An element may itself be an initialiser
+ list, so an array of arrays works.
+*>
+fn Expr*? Parser.initializer(&self)
+{
+	Token brace = self.expect(LBRACE, "expected `{`")!;
+
+	ExprPtrList elements;
+	elements.init(self.allocator, 4);
+
+	if (!self.check(RBRACE))
+	{
+		do
+		{
+			if (self.check(LBRACE))
+			{
+				elements.push(self.initializer()!);
+			}
+			else
+			{
+				elements.push(self.expression()!);
+			}
+		}
+		while (self.match(COMMA));
+	}
+	self.expect(RBRACE, "expected `}` closing the initialiser")!;
+
+	Expr* node = self.new_expr(INITIALIZER, brace);
+	node.initializer = { .elements = elements.array_view() };
 	return node;
 }
 
@@ -605,6 +795,7 @@ fn Decl*? Parser.declaration(&self)
 				Token   member_token = self.peek();
 				TypeRef type         = self.type_ref()!;
 				Token   member_name  = self.expect(IDENT, "expected a member name")!;
+				self.declarator_array(&type)!;
 				Attribute[] attributes = self.attributes()!;
 				self.expect(SEMICOLON, "expected `;` after the member")!;
 				members.push({
@@ -665,13 +856,22 @@ fn Decl*? Parser.declaration(&self)
 						continue;
 					}
 
+					// `out` / `inout`: a by-reference parameter. Both arrive as a
+					// pointer; `out` is the one that need not be initialised.
+					bool is_out = self.check(OUT)
+						|| (self.check(IDENT) && self.peek().text == "inout");
+					if (is_out) self.advance();
+
 					TypeRef type        = self.type_ref()!;
 					Token   param_name  = self.expect(IDENT, "expected a parameter name")!;
+					self.declarator_array(&type)!;
 					Attribute[] attributes = self.attributes()!;
 					params.push({
 						.type       = type,
 						.name       = param_name.text,
 						.attributes = attributes,
+						.by_ref     = is_out,
+						.is_out     = is_out,
 						.line       = param_token.line,
 						.column     = param_token.column,
 					});
@@ -755,9 +955,12 @@ fn Ast? parse(String source, Parser* parser = null)
 	bool ok = false;
 	defer if (!ok) ast.arena.free();
 
-	parser.tokens    = tokens.array_view();
-	parser.at        = 0;
-	parser.allocator = &ast.arena;
+	parser.tokens      = tokens.array_view();
+	parser.at          = 0;
+	parser.allocator   = &ast.arena;
+	parser.error       = "";
+	parser.error_line  = 0;
+	parser.error_column = 0;
 
 	DeclPtrList decls;
 	decls.init(&ast.arena, 16);

@@ -74,6 +74,10 @@ enum ExprKind : char
 	CALL,
 	MEMBER,
 	INDEX,
+	CONDITIONAL,
+	CAST,
+	UPDATE,
+	INITIALIZER,
 }
 
 struct ExprLiteral
@@ -140,6 +144,47 @@ struct ExprIndex
 	Expr* index;
 }
 
+<*
+ `condition ? then_value : else_value`, evaluated as a branch rather than a
+ select so a side-effecting arm only runs when it is taken.
+*>
+struct ExprConditional
+{
+	Expr* condition;
+	Expr* then_value;
+	Expr* else_value;
+}
+
+<*
+ A C-style cast: `(float)x`, `(uint3)v`, `(float3x3)pose`. Distinct from a
+ constructor because a cast may narrow - `(float3x3)` drops a matrix's fourth
+ column and row.
+*>
+struct ExprCast
+{
+	TypeRef type;
+	Expr*   value;
+}
+
+<*
+ `++x`, `x++`, `--x`, `x--`. `prefix` decides whether the expression's value is
+ the updated one or the old one.
+*>
+struct ExprUpdate
+{
+	TokenKind op;
+	Expr*     target;
+	bool      prefix;
+}
+
+<*
+ `{ a, b, c }`, an array initialiser.
+*>
+struct ExprInitializer
+{
+	Expr*[] elements;
+}
+
 struct Expr
 {
 	ExprKind kind;
@@ -157,6 +202,10 @@ struct Expr
 		ExprCall    call;
 		ExprMember  member;
 		ExprIndex   index;
+		ExprConditional conditional;
+		ExprCast    cast_expr;
+		ExprUpdate  update;
+		ExprInitializer initializer;
 	}
 }
 
@@ -266,6 +315,9 @@ struct Param
 	// the qualified name already says what it is.
 	bool        is_self;
 	bool        by_ref;
+
+	// `out` / `inout`: a by-reference parameter that is not the receiver.
+	bool        is_out;
 }
 
 enum DeclKind : char

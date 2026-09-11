@@ -1,0 +1,61 @@
+struct Uniforms @uniform
+{
+    float4x4 view_projection;
+}
+
+Uniforms uniforms;
+
+struct VertexIn
+{
+    float3 position;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+fn void spread(out float3 a, inout float3 b)
+{
+    a = b * 2.0;
+    b = b + float3(1.0, 1.0, 1.0);
+}
+
+fn FragmentIn vert(VertexIn input) @vertex(main)
+{
+    FragmentIn output;
+    output.position = uniforms.view_projection * float4(input.position, 1.0);
+    output.color = float4(1.0);
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    float4x4 m = uniforms.view_projection;
+    float3x3 small = (float3x3)m;
+
+    int count = 0;
+    float total = 0.0;
+    for (int k = 0; k < 8; k++)
+    {
+        if (k == 2) continue;
+        if (k == 6) break;
+        total += float(k);
+        count++;
+    }
+
+    uint bits = 1u;
+    bits |= 2u;
+    bits ^= 4u;
+    bits <<= 2;
+    bits >>= 1;
+    bits &= 31u;
+
+    float3 a;
+    float3 b = input.color.xyz;
+    spread(a, b);
+
+    float pick = input.color.x > 0.5 ? total : float(bits);
+    return float4(small[0], pick) + float4(a, 1.0) - float4(float(count));
+}

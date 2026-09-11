@@ -1,0 +1,49 @@
+struct Uniforms @uniform
+{
+    float4x4 view_projection;
+}
+
+Uniforms uniforms;
+
+struct VertexIn
+{
+    float3 position;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex(main)
+{
+    FragmentIn output;
+    output.position = uniforms.view_projection * float4(input.position, 1.0);
+    output.color = float4(1.0);
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    float4x4 m = uniforms.view_projection;
+    float4x4 squared = mul(m, m);
+    float4 clip = mul(m, float4(input.color.xyz, 1.0));
+
+    bool2 low  = input.color.xy <= float2(0.0);
+    bool2 high = input.color.xy >= float2(1.0);
+    float edge = any(low) || all(high) ? 1.0 : 0.0;
+
+    uint bits = asuint(input.color.x);
+    float3 blended = lerp(float3(0.0), input.color.xyz, 0.25);
+    float scaled = rsqrt(dot(blended, blended) + 1.0);
+
+    float total = 0.0;
+    [unroll] for (int k = 0; k < 4; k++)
+    {
+        total += float(k);
+    }
+
+    float4 chosen = select(float4(0.0), squared[0], edge > 0.5);
+    return chosen + clip + float4(blended * scaled, total + float(bits & 255u));
+}

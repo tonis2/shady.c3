@@ -9,6 +9,7 @@
 *>
 module shady_test;
 
+import std::core::test;
 import std::io;
 import std::io::path;
 import shady;
@@ -154,9 +155,11 @@ fn void build_triangle_module() @test
 	char[] spirv = mod.build(mem);
 	defer free(spirv);
 
-	assert(spirv.len % 4 == 0, "SPIR-V must be a whole number of words");
-	assert(((uint*)spirv.ptr)[0] == shady::MAGIC, "bad magic");
-	assert(((uint*)spirv.ptr)[3] == mod.next_id, "bound must be the next unused id");
+	test::@check(spirv.len % 4 == 0, "SPIR-V must be a whole number of words, got %d bytes", spirv.len);
+	test::@check(((uint*)spirv.ptr)[0] == shady::MAGIC, "the header should start with the SPIR-V magic");
+	test::@check(((uint*)spirv.ptr)[3] == mod.next_id,
+		"the bound should be the next unused id: header says %d, module says %d",
+		((uint*)spirv.ptr)[3], mod.next_id);
 
 	path::mkdir(OUT_DIR, recursive: true)!!;
 	file::save(string::tformat("%s/cube.spirv", OUT_DIR), spirv)!!;

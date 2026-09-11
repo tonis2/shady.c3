@@ -18,6 +18,7 @@ enum TypeKind : char
 	FLOAT,
 	VECTOR,
 	MATRIX,
+	ARRAY,
 	STRUCT,
 	TEXTURE,
 	SAMPLER,
@@ -57,6 +58,12 @@ struct Type
 
 	Id id;         // cached SPIR-V id, 0 until emitted
 	Id pointer_id; // ADDRESS only: the PhysicalStorageBuffer pointer to it
+
+	<*
+	 ARRAY only: the distance between elements, which is the element's size
+	 rounded up to its alignment, and under std140 rounded up to 16 again.
+	*>
+	uint stride;
 }
 
 <*
@@ -141,6 +148,24 @@ fn Type* TypeTable.find(&self, String name)
 		if (type.name == name) return type;
 	}
 	return null;
+}
+
+<*
+ An array of `count` elements. Not interned, like a struct: the stride belongs
+ to this declaration and depends on the layout it sits in.
+*>
+fn Type* TypeTable.array_of(&self, Type* element, uint count, Layout layout)
+{
+	String name = string::format(self.allocator, "%s[%d]", element.name, count);
+	Type*  type = self.add(ARRAY, name, element, count);
+	type.stride = array_stride(element, layout);
+	return type;
+}
+
+fn uint array_stride(Type* element, Layout layout)
+{
+	uint stride = round_up(element.size(layout), element.align(layout));
+	return layout == STD140 ? round_up(stride, 16) : stride;
 }
 
 <*
@@ -269,6 +294,8 @@ fn uint Type.align(&self, Layout layout)
 		case MATRIX:
 			// An array of column vectors, so the column's alignment.
 			return self.element.align(layout);
+		case ARRAY:
+			return self.element.align(layout);
 		case POINTER:
 			return 8; // a 64-bit device address
 		case STRUCT:
@@ -302,6 +329,8 @@ fn uint Type.size(&self, Layout layout)
 			return 4 * self.count;
 		case MATRIX:
 			return self.matrix_stride(layout) * self.count;
+		case ARRAY:
+			return self.stride * self.count;
 		case POINTER:
 			return 8;
 		case STRUCT:

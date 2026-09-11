@@ -53,6 +53,8 @@ enum TokenKind : char
 	COMMA,
 	DOT,
 	AT,
+	QUESTION,
+	COLON,
 
 	// Operators
 	PLUS,
@@ -60,11 +62,18 @@ enum TokenKind : char
 	STAR,
 	SLASH,
 	PERCENT,
+	PLUS_PLUS,
+	MINUS_MINUS,
 	PLUS_EQ,
 	MINUS_EQ,
 	STAR_EQ,
 	SLASH_EQ,
 	PERCENT_EQ,
+	AMP_EQ,
+	PIPE_EQ,
+	CARET_EQ,
+	SHL_EQ,
+	SHR_EQ,
 	EQ,
 	EQ_EQ,
 	BANG,
@@ -415,18 +424,24 @@ fn Token? Lexer.next(&self)
 		case ',': kind = COMMA;
 		case '.': kind = DOT;
 		case '@': kind = AT;
-		case '^': kind = CARET;
-		case '+': kind = self.take('=') ? PLUS_EQ : PLUS;
-		case '-': kind = self.take('=') ? MINUS_EQ : MINUS;
+		case '?': kind = QUESTION;
+		case ':': kind = COLON;
+		case '^': kind = self.take('=') ? CARET_EQ : CARET;
+		case '+': kind = self.take('+') ? PLUS_PLUS : (self.take('=') ? PLUS_EQ : PLUS);
+		case '-': kind = self.take('-') ? MINUS_MINUS : (self.take('=') ? MINUS_EQ : MINUS);
 		case '*': kind = self.take('=') ? STAR_EQ : STAR;
 		case '/': kind = self.take('=') ? SLASH_EQ : SLASH;
 		case '%': kind = self.take('=') ? PERCENT_EQ : PERCENT;
 		case '=': kind = self.take('=') ? EQ_EQ : EQ;
 		case '!': kind = self.take('=') ? BANG_EQ : BANG;
-		case '<': kind = self.take('<') ? SHL : (self.take('=') ? LT_EQ : LT);
-		case '>': kind = self.take('>') ? SHR : (self.take('=') ? GT_EQ : GT);
-		case '&': kind = self.take('&') ? AMP_AMP : AMP;
-		case '|': kind = self.take('|') ? PIPE_PIPE : PIPE;
+		case '<':
+			if (self.take('<')) { kind = self.take('=') ? SHL_EQ : SHL; }
+			else { kind = self.take('=') ? LT_EQ : LT; }
+		case '>':
+			if (self.take('>')) { kind = self.take('=') ? SHR_EQ : SHR; }
+			else { kind = self.take('=') ? GT_EQ : GT; }
+		case '&': kind = self.take('&') ? AMP_AMP : (self.take('=') ? AMP_EQ : AMP);
+		case '|': kind = self.take('|') ? PIPE_PIPE : (self.take('=') ? PIPE_EQ : PIPE);
 		default:
 			self.error        = "unexpected character";
 			self.error_line   = start_line;

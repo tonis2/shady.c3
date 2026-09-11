@@ -8,8 +8,9 @@
 *>
 module entry_point_test;
 
+import std::core::test;
 import std::io;
-import shady;
+import shady_support;
 
 const String VARIANTS = `
 struct Uniforms @uniform { float4x4 mvp; }
@@ -47,36 +48,12 @@ fn float4 shade_solid(FragmentIn input) @fragment
 }
 `;
 
-fn char[] build(String source)
-{
-	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(source, &diagnostic);
-	if (catch spirv)
-	{
-		io::printfn("shady error at %d:%d - %s", diagnostic.line, diagnostic.column, diagnostic.message);
-		unreachable("the shader should compile");
-	}
-	return spirv;
-}
-
-fn String rejection(String source)
-{
-	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(source, &diagnostic);
-	if (try spirv)
-	{
-		free(spirv);
-		return "";
-	}
-	return diagnostic.message;
-}
-
 <*
  Four entry points, two of each stage, in one module.
 *>
 fn void one_module_holds_many_stages() @test
 {
-	char[] spirv = build(VARIANTS);
+	char[] spirv = shady_support::build(VARIANTS);
 	defer free(spirv);
 
 	file::save("build/shady/variants.spirv", spirv)!!;
@@ -89,20 +66,20 @@ fn void one_module_holds_many_stages() @test
 *>
 fn void the_attribute_argument_names_the_entry_point() @test
 {
-	char[] spirv = build(VARIANTS);
+	char[] spirv = shady_support::build(VARIANTS);
 	defer free(spirv);
 
 	// OpEntryPoint carries the name as an inline UTF-8 literal, so it is in
 	// the words verbatim. Searching the bytes avoids a disassembler here.
 	String words = (String)spirv;
-	assert(words.contains("main"), "@vertex(main) should publish `main`");
-	assert(words.contains("opaque"), "@fragment(opaque) should publish `opaque`");
-	assert(words.contains("stage_in_shadow"), "a bare @vertex should publish the function name");
-	assert(words.contains("shade_solid"), "a bare @fragment should publish the function name");
+	test::@check(words.contains("main"), "@vertex(main) should publish `main`");
+	test::@check(words.contains("opaque"), "@fragment(opaque) should publish `opaque`");
+	test::@check(words.contains("stage_in_shadow"), "a bare @vertex should publish the function name");
+	test::@check(words.contains("shade_solid"), "a bare @fragment should publish the function name");
 
 	// The function keeps its own name for debug info, separately from the
 	// name the entry point is published under.
-	assert(words.contains("stage_in"), "OpName should keep the function's name");
+	test::@check(words.contains("stage_in"), "OpName should keep the function's name");
 }
 
 <*
@@ -110,24 +87,28 @@ fn void the_attribute_argument_names_the_entry_point() @test
 *>
 fn void rejects_a_duplicate_entry_point_name() @test
 {
-	String message = rejection(`
+	String error = shady_support::compile_error(
+		`
 struct VertexIn   { float3 position; }
 struct FragmentIn { float4 position @position; }
 fn FragmentIn v(VertexIn i) @vertex { FragmentIn o; o.position = float4(i.position, 1.0); return o; }
 fn float4 a(FragmentIn i) @fragment(shade) { return float4(1.0, 1.0, 1.0, 1.0); }
 fn float4 b(FragmentIn i) @fragment(shade) { return float4(0.0, 0.0, 0.0, 1.0); }
-`);
-	io::printfn("shady: %s", message);
-	assert(message.contains("already an entry point"), "the message should say the name is taken");
+`
+	);
+
+	test::@check(error.contains("already an entry point"), "the message should say the name is taken; got '%s'", error);
 }
 
 fn void rejects_a_stage_argument_that_is_not_a_name() @test
 {
-	String message = rejection(`
+	String error = shady_support::compile_error(
+		`
 struct VertexIn   { float3 position; }
 struct FragmentIn { float4 position @position; }
 fn FragmentIn v(VertexIn i) @vertex(1) { FragmentIn o; o.position = float4(i.position, 1.0); return o; }
-`);
-	io::printfn("shady: %s", message);
-	assert(message.contains("one name"), "the message should say what the argument must be");
+`
+	);
+
+	test::@check(error.contains("one name"), "the message should say what the argument must be; got '%s'", error);
 }

@@ -9,9 +9,11 @@
 *>
 module bda_test;
 
+import std::core::test;
 import std::io;
 import std::io::path;
 import shady;
+import shady_support;
 
 const String OUT_DIR = "build/shady";
 
@@ -55,25 +57,14 @@ fn float4 frag(FragmentIn input) @fragment
 }
 `;
 
-fn char[] build(String source)
-{
-	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(source, &diagnostic);
-	if (catch spirv)
-	{
-		io::printfn("shady error at %d:%d - %s", diagnostic.line, diagnostic.column, diagnostic.message);
-		unreachable("the shader should compile");
-	}
-	return spirv;
-}
-
 fn void compiles_a_device_address_shader() @test
 {
-	char[] spirv = build(PARTICLES);
+	char[] spirv = shady_support::build(PARTICLES);
 	defer free(spirv);
 
 	// SPIR-V 1.3: buffer device addresses were an extension before 1.5.
-	assert(((uint*)spirv.ptr)[1] == shady::VERSION_1_3, "device addresses need SPIR-V 1.3");
+	test::@check(((uint*)spirv.ptr)[1] == shady::VERSION_1_3,
+		"device addresses need SPIR-V 1.3, got version %d", ((uint*)spirv.ptr)[1]);
 
 	path::mkdir(OUT_DIR, recursive: true)!!;
 	file::save(string::tformat("%s/bda.spirv", OUT_DIR), spirv)!!;
@@ -86,7 +77,7 @@ fn void compiles_a_device_address_shader() @test
 *>
 fn void push_constants_take_no_binding() @test
 {
-	char[] spirv = build(`
+	char[] spirv = shady_support::build(`
 struct Data @address { float4 value; }
 
 struct Push @pushconstant { Data* data; }
@@ -106,7 +97,8 @@ fn Out vert() @vertex
 }
 `);
 	defer free(spirv);
-	assert(spirv.len > 0);
+
+	test::@check(spirv.len > 0, "a push constant beside a uniform block should compile to something");
 }
 
 <*
@@ -115,23 +107,17 @@ fn Out vert() @vertex
 *>
 fn void rejects_a_pointer_to_a_plain_struct() @test
 {
-	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(`
+	String error = shady_support::compile_error(`
 struct Plain { float4 value; }
 struct Push @pushconstant { Plain* p; }
 Push pc;
 
 struct Out { float4 position @position; }
 fn Out vert() @vertex { Out o; o.position = pc.p[0].value; return o; }
-`, &diagnostic);
+`);
 
-	if (try spirv)
-	{
-		free(spirv);
-		unreachable("a pointer to a non-buffer struct should not compile");
-	}
-	assert(diagnostic.message.len > 0, "the error should say something");
-	io::printfn("shady: rejected `Plain*` - %s", diagnostic.message);
+	test::@check(error.contains("device address"),
+		"the message should say the struct needs an address; got '%s'", error);
 }
 
 <*
@@ -140,8 +126,7 @@ fn Out vert() @vertex { Out o; o.position = pc.p[0].value; return o; }
 *>
 fn void rejects_two_push_constant_blocks() @test
 {
-	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(`
+	String error = shady_support::compile_error(`
 struct A @pushconstant { uint x; }
 struct B @pushconstant { uint y; }
 A a;
@@ -149,12 +134,7 @@ B b;
 
 struct Out { float4 position @position; }
 fn Out vert() @vertex { Out o; o.position = float4(0.0, 0.0, 0.0, 1.0); return o; }
-`, &diagnostic);
+`);
 
-	if (try spirv)
-	{
-		free(spirv);
-		unreachable("two push constant blocks should not compile");
-	}
-	io::printfn("shady: rejected a second push_constant block - %s", diagnostic.message);
+	test::@check(error.len > 0, "two push constant blocks should be refused; got '%s'", error);
 }

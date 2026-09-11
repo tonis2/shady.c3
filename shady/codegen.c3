@@ -75,6 +75,8 @@ struct FunctionSig
 	// written after it, so a call's operands line up with this list.
 	Type*[] params;
 	String[] names;
+	bool[]  refs;   // by-reference parameters (out / inout); the receiver is separate
+	bool[]  outs;   // the subset that need not be initialised
 	bool    has_receiver;
 	bool    receiver_ref;   // `&self` - the receiver arrives as a pointer
 	String  receiver_name;  // what the receiver is called in the body
@@ -102,6 +104,7 @@ struct Codegen
 	ResourceList resources;
 	LocalList    locals;
 	FunctionSigList functions;
+	LoopList     loops;
 
 	Function*    func;
 	Type*        fn_return;
@@ -172,6 +175,13 @@ fn Id Codegen.type_id(&self, Type* type)
 		case FLOAT:   type.id = self.mod.type_float(32);
 		case VECTOR:  type.id = self.mod.type_vector(self.type_id(type.element), type.count);
 		case MATRIX:  type.id = self.mod.type_matrix(self.type_id(type.element), type.count);
+		case ARRAY:
+		{
+			Id length = self.mod.const_u32(self.type_id(self.types.find("uint")), type.count);
+			type.id = self.mod.type_array(self.type_id(type.element), length);
+			self.mod.decorate(type.id, DECORATION_ARRAY_STRIDE, type.stride);
+			self.mod.name(type.id, type.name);
+		}
 		case SAMPLER: type.id = self.mod.type_sampler();
 		case POINTER:
 			// Buffer structs pre-declare their pointer type with
@@ -194,6 +204,45 @@ fn Id Codegen.type_id(&self, Type* type)
 fn Id Codegen.pointer_to(&self, uint storage_class, Type* type)
 {
 	return self.mod.type_pointer(storage_class, self.type_id(type));
+}
+
+<*
+ A written type, resolved: an array wraps its element, and `T*` wraps an
+ `@address` struct. `layout` decides an array's stride, so it must be the layout
+ of the place the type sits - a block's, or the default for a local.
+*>
+fn Type*? Codegen.resolve_type(&self, TypeRef ref, Layout layout, uint line, uint column)
+{
+	Type* type = self.types.find(ref.name);
+	if (!type)
+	{
+		self.fail(line, column, string::format(self.allocator, "unknown type `%s`", ref.name));
+		return CODEGEN_ERROR~;
+	}
+
+	if (ref.is_array)
+	{
+		if (ref.is_pointer)
+		{
+			self.fail(line, column, "an array of device-address pointers is not supported");
+			return CODEGEN_ERROR~;
+		}
+		return self.types.array_of(type, ref.array_size, layout);
+	}
+
+	if (ref.is_pointer)
+	{
+		if (type.block != ADDRESS)
+		{
+			self.fail(line, column, string::format(self.allocator,
+				"`%s*` is not a device address - mark `%s` with @address to give it one",
+				type.name, type.name));
+			return CODEGEN_ERROR~;
+		}
+		return self.types.pointer_to(type);
+	}
+
+	return type;
 }
 
 // --- Constants ---------------------------------------------------------------
@@ -333,6 +382,19 @@ fn Value? Codegen.expression(&self, Expr* expr)
 		case INDEX:
 			return self.index_expression(expr);
 
+		case CONDITIONAL:
+			return self.conditional_expression(expr);
+
+		case CAST:
+			return self.cast_expression(expr);
+
+		case UPDATE:
+			return self.update_expression(expr);
+
+		case INITIALIZER:
+			self.fail(expr.line, expr.column, "an initialiser is only valid in a declaration");
+			return CODEGEN_ERROR~;
+
 		case CALL:
 			return self.call_expression(expr);
 
@@ -462,9 +524,9 @@ fn Value? Codegen.index_expression(&self, Expr* expr)
 		return self.offset_address(base, index, expr);
 	}
 
-	if (base.type.kind != VECTOR && base.type.kind != MATRIX)
+	if (base.type.kind != VECTOR && base.type.kind != MATRIX && base.type.kind != ARRAY)
 	{
-		self.fail(expr.line, expr.column, "only vectors, matrices and device addresses can be indexed");
+		self.fail(expr.line, expr.column, "only vectors, matrices, arrays and device addresses can be indexed");
 		return CODEGEN_ERROR~;
 	}
 
@@ -526,6 +588,11 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 			case MINUS_EQ:   op = MINUS;
 			case STAR_EQ:    op = STAR;
 			case SLASH_EQ:   op = SLASH;
+			case AMP_EQ:     op = AMP;
+			case PIPE_EQ:    op = PIPE;
+			case CARET_EQ:   op = CARET;
+			case SHL_EQ:     op = SHL;
+			case SHR_EQ:     op = SHR;
 			default:         op = PERCENT;
 		}
 		Value current = { .type = target.type, .id = self.rvalue(target) };
@@ -534,6 +601,176 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 
 	self.func.store(target.pointer, id, self.access_alignment(target));
 	return (Value) { .type = target.type, .id = id };
+}
+
+<*
+ `condition ? then : else`, lowered to a real branch so only the taken arm runs.
+
+ The result is written to a local in each arm and read back at the merge, which
+ is also why a ternary is addressable.
+*>
+fn Value? Codegen.conditional_expression(&self, Expr* expr)
+{
+	Value condition = self.expression(expr.conditional.condition)!;
+
+	Id then_label  = self.func.new_label();
+	Id else_label  = self.func.new_label();
+	Id merge_label = self.func.new_label();
+
+	Id    pointer = NO_ID;
+	Type* result  = null;
+
+	self.func.selection_merge(merge_label);
+	self.func.branch_conditional(self.rvalue(condition), then_label, else_label);
+
+	self.func.label(then_label);
+	self.terminated = false;
+	Value then_value = self.expression(expr.conditional.then_value)!;
+	result  = then_value.type;
+	pointer = self.func.local(self.pointer_to(STORAGE_CLASS_FUNCTION, result));
+	self.func.store(pointer, self.coerce(then_value, result, expr.conditional.then_value)!);
+	if (!self.terminated) self.func.branch(merge_label);
+
+	self.func.label(else_label);
+	self.terminated = false;
+	Value else_value = self.expression(expr.conditional.else_value)!;
+	self.func.store(pointer, self.coerce(else_value, result, expr.conditional.else_value)!);
+	if (!self.terminated) self.func.branch(merge_label);
+
+	self.func.label(merge_label);
+	self.terminated = false;
+	return (Value) { .type = result, .pointer = pointer, .storage = STORAGE_CLASS_FUNCTION };
+}
+
+<*
+ A C-style cast. Unlike a constructor, a cast may narrow: `(float3x3)mat4`
+ drops the fourth column and the fourth row.
+*>
+fn Value? Codegen.cast_expression(&self, Expr* expr)
+{
+	Type* target = self.types.find(expr.cast_expr.type.name);
+	if (!target)
+	{
+		self.fail(expr.line, expr.column,
+			string::format(self.allocator, "unknown type `%s`", expr.cast_expr.type.name));
+		return CODEGEN_ERROR~;
+	}
+	Value value = self.expression(expr.cast_expr.value)!;
+	return self.cast_value(value, target, expr);
+}
+
+fn Value? Codegen.cast_value(&self, Value value, Type* target, Expr* expr)
+{
+	Type* from = value.type;
+	if (from == target) return value;
+	Id id = self.rvalue(value);
+
+	if (from.is_scalar() && target.is_scalar())
+	{
+		return (Value) { .type = target, .id = self.convert_scalar(id, from, target) };
+	}
+
+	if (target.kind == VECTOR && from.is_scalar())
+	{
+		Id component = self.convert_scalar(id, from, target.element);
+		return (Value) { .type = target, .id = self.splat(target, component) };
+	}
+
+	if (target.is_scalar() && from.kind == VECTOR)
+	{
+		Id first = self.func.composite_extract(self.type_id(from.element), id, 0);
+		return (Value) { .type = target, .id = self.convert_scalar(first, from.element, target) };
+	}
+
+	if (target.kind == VECTOR && from.kind == VECTOR)
+	{
+		uint count = target.count < from.count ? target.count : from.count;
+		Id[] components = self.new_ids(count);
+		for (uint i = 0; i < count; i++)
+		{
+			Id component = self.func.composite_extract(self.type_id(from.element), id, i);
+			components[i] = self.convert_scalar(component, from.element, target.element);
+		}
+		return (Value) { .type = target, .id = self.func.composite_construct(self.type_id(target), components) };
+	}
+
+	if (target.kind == MATRIX && from.kind == MATRIX)
+	{
+		uint columns = target.count < from.count ? target.count : from.count;
+		Id[] result = self.new_ids(columns);
+		for (uint i = 0; i < columns; i++)
+		{
+			Id column = self.func.composite_extract(self.type_id(from.element), id, i);
+			result[i] = self.cast_column(column, from.element, target.element);
+		}
+		return (Value) { .type = target, .id = self.func.composite_construct(self.type_id(target), result) };
+	}
+
+	self.fail(expr.line, expr.column,
+		string::format(self.allocator, "cannot cast a %s to a %s", from.name, target.name));
+	return CODEGEN_ERROR~;
+}
+
+<*
+ One column of a matrix cast: convert components, keep or drop the tail.
+*>
+fn Id Codegen.cast_column(&self, Id column, Type* from, Type* to)
+{
+	if (from == to) return column;
+
+	uint count = to.count < from.count ? to.count : from.count;
+	Id[] components = self.new_ids(count);
+	for (uint i = 0; i < count; i++)
+	{
+		Id component = self.func.composite_extract(self.type_id(from.element), column, i);
+		components[i] = self.convert_scalar(component, from.element, to.element);
+	}
+	return self.func.composite_construct(self.type_id(to), components);
+}
+
+<*
+ `++x` / `x++` / `--x` / `x--`. The target is updated in place; `prefix`
+ decides whether the expression's value is the new one or the old one.
+*>
+fn Value? Codegen.update_expression(&self, Expr* expr)
+{
+	Value target = self.expression(expr.update.target)!;
+	if (target.pointer == NO_ID)
+	{
+		self.fail(expr.line, expr.column, "cannot update this expression");
+		return CODEGEN_ERROR~;
+	}
+
+	Id    old = self.rvalue(target);
+	Value one = { .type = target.type, .id = self.one_like(target.type) };
+	Value now = { .type = target.type, .id = old };
+
+	TokenKind op = expr.update.op == PLUS_PLUS ? PLUS : MINUS;
+	Id updated = self.arithmetic(op, now, one, expr)!;
+	self.func.store(target.pointer, updated, self.access_alignment(target));
+
+	return (Value) { .type = target.type, .id = expr.update.prefix ? updated : old };
+}
+
+fn Id Codegen.one_like(&self, Type* type)
+{
+	Type* scalar = type.scalar();
+	Id one;
+	if (scalar.kind == FLOAT)
+	{
+		one = self.const_float(1.0);
+	}
+	else if (scalar.kind == UINT)
+	{
+		one = self.mod.const_u32(self.type_id(scalar), 1);
+	}
+	else
+	{
+		one = self.const_int(1);
+	}
+
+	if (type.kind == VECTOR) return self.splat(type, one);
+	return one;
 }
 
 fn Value? Codegen.binary_expression(&self, Expr* expr)
@@ -562,7 +799,11 @@ fn Type* Codegen.result_type(&self, TokenKind op, Type* left, Type* right)
 		case GT_EQ:
 		case AMP_AMP:
 		case PIPE_PIPE:
-			return self.types.find("bool");
+			// A comparison of vectors yields a bool vector of the same shape;
+			// SPIR-V requires the result and operands to match.
+			return left.kind == VECTOR
+				? self.vector_of(self.types.find("bool"), left.count)
+				: self.types.find("bool");
 		default:
 			break;
 	}
@@ -711,6 +952,12 @@ fn String[] Codegen.new_names(&self, usz len)
 	return alloc::alloc_array(self.allocator, String, (sz)len);
 }
 
+fn bool[] Codegen.new_bools(&self, usz len)
+{
+	if (len == 0) return {};
+	return alloc::alloc_array(self.allocator, bool, (sz)len);
+}
+
 <*
  Resolve every non-entry function's signature before any body is emitted.
 
@@ -729,6 +976,11 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 		{
 			self.fail(decl.line, decl.column,
 				string::format(self.allocator, "unknown type `%s`", decl.function.return_type.name));
+			return CODEGEN_ERROR~;
+		}
+		if (decl.function.return_type.is_array || decl.function.return_type.is_pointer)
+		{
+			self.fail(decl.line, decl.column, "a function cannot return an array or a pointer");
 			return CODEGEN_ERROR~;
 		}
 
@@ -799,6 +1051,8 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 
 		Type*[]  params = self.new_types(total);
 		String[] names  = self.new_names(total);
+		bool[]   refs   = self.new_bools(total);
+		bool[]   outs   = self.new_bools(total);
 		usz at = 0;
 		if (receiver)
 		{
@@ -809,26 +1063,24 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 
 		for (usz i = first; i < written.len; i++)
 		{
-			Type* type = self.types.find(written[i].type.name);
-			if (!type)
+			if (written[i].by_ref && written[i].type.is_pointer)
 			{
 				self.fail(written[i].line, written[i].column,
-					string::format(self.allocator, "unknown type `%s`", written[i].type.name));
+					"a parameter is either `out`/`inout` or a device-address pointer, not both");
 				return CODEGEN_ERROR~;
 			}
-			if (written[i].type.is_pointer)
+
+			if (written[i].type.is_array)
 			{
-				if (type.block != ADDRESS)
-				{
-					self.fail(written[i].line, written[i].column, string::format(self.allocator,
-						"`%s*` is not a device address - mark `%s` with @address to give it one",
-						type.name, type.name));
-					return CODEGEN_ERROR~;
-				}
-				type = self.types.pointer_to(type);
+				self.fail(written[i].line, written[i].column,
+					"an array parameter is not supported - pass a device-address pointer");
+				return CODEGEN_ERROR~;
 			}
+			Type* type = self.resolve_type(written[i].type, STD430, written[i].line, written[i].column)!;
 			params[at] = type;
 			names[at]  = written[i].name;
+			refs[at]   = written[i].by_ref;
+			outs[at]   = written[i].is_out;
 			at++;
 		}
 
@@ -837,6 +1089,8 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 			.return_type   = return_type,
 			.params        = params,
 			.names         = names,
+			.refs          = refs,
+			.outs          = outs,
 			.has_receiver  = receiver != null,
 			.receiver_ref  = receiver_ref,
 			.receiver_name = receiver_name,
@@ -968,9 +1222,8 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 	Id[] param_ids = self.new_ids(sig.params.len);
 	foreach (i, param : sig.params)
 	{
-		// A `&self` receiver arrives as a pointer, so the function type says so
-		// even though the parameter list reads as the receiver's type.
-		param_ids[i] = (sig.has_receiver && sig.receiver_ref && i == 0)
+		bool by_ref = (sig.has_receiver && sig.receiver_ref && i == 0) || sig.refs[i];
+		param_ids[i] = by_ref
 			? self.pointer_to(STORAGE_CLASS_FUNCTION, param)
 			: self.type_id(param);
 	}
@@ -1019,10 +1272,20 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 	for (usz i = at; i < sig.params.len; i++)
 	{
 		Type* param = sig.params[i];
-		Id pid     = function.param(self.type_id(param));
-		Id pointer = function.local(self.pointer_to(STORAGE_CLASS_FUNCTION, param));
-		function.store(pointer, pid);
-		self.locals.push({ .name = sig.names[i], .type = param, .pointer = pointer });
+		if (sig.refs[i])
+		{
+			// An `out`/`inout` parameter already is a pointer into the caller's
+			// storage, so the name is bound straight to it.
+			Id pid = function.param(self.pointer_to(STORAGE_CLASS_FUNCTION, param));
+			self.locals.push({ .name = sig.names[i], .type = param, .pointer = pid });
+		}
+		else
+		{
+			Id pid     = function.param(self.type_id(param));
+			Id pointer = function.local(self.pointer_to(STORAGE_CLASS_FUNCTION, param));
+			function.store(pointer, pid);
+			self.locals.push({ .name = sig.names[i], .type = param, .pointer = pointer });
+		}
 	}
 
 	self.statement(decl.function.body)!;
@@ -1089,7 +1352,23 @@ fn Value? Codegen.user_call(&self, Expr* expr, String name, Value* receiver)
 		}
 		offset = 1;
 	}
-	foreach (i, value : args) call_args[at++] = self.coerce(value, sig.params[(usz)i + offset], expr)!;
+	foreach (i, value : args)
+	{
+		usz index = (usz)i + offset;
+		if (sig.refs[index])
+		{
+			if (value.pointer == NO_ID || value.storage != STORAGE_CLASS_FUNCTION)
+			{
+				self.fail(expr.line, expr.column, "an out or inout argument must be a variable");
+				return CODEGEN_ERROR~;
+			}
+			call_args[at++] = value.pointer;
+		}
+		else
+		{
+			call_args[at++] = self.coerce(value, sig.params[index], expr)!;
+		}
+	}
 
 	Id result = self.func.call(self.type_id(sig.return_type), sig.func_id, call_args);
 	return (Value) { .type = sig.return_type, .id = result };
@@ -1146,7 +1425,58 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 	if (Type* type = self.types.find(name)) return self.construct(expr, type);
 	if (self.has_function(name)) return self.user_call(expr, name, null);
 
+	if (name == "mul") return self.mul_call(expr);
+	if (name == "select") return self.select_call(expr);
+
 	return self.builtin_call(expr, name);
+}
+
+<*
+ `mul(a, b)`: the matrix products spelled the way HLSL and Slang spell them.
+ It is `a * b` with the same operand rules, kept because the alternative is
+ rewriting every matrix product in a ported body.
+*>
+fn Value? Codegen.mul_call(&self, Expr* expr)
+{
+	if (expr.call.args.len != 2)
+	{
+		self.fail(expr.line, expr.column, "`mul` takes two arguments");
+		return CODEGEN_ERROR~;
+	}
+	Value left  = self.expression(expr.call.args[0])!;
+	Value right = self.expression(expr.call.args[1])!;
+	Id    id    = self.arithmetic(STAR, left, right, expr)!;
+	return (Value) { .type = self.result_type(STAR, left.type, right.type), .id = id };
+}
+
+<*
+ `select(when_false, when_true, condition)` - `condition ? when_true : when_false`,
+ the same order as HLSL's `select`.
+*>
+fn Value? Codegen.select_call(&self, Expr* expr)
+{
+	if (expr.call.args.len != 3)
+	{
+		self.fail(expr.line, expr.column, "`select` takes three arguments");
+		return CODEGEN_ERROR~;
+	}
+	Value when_false = self.expression(expr.call.args[0])!;
+	Value when_true  = self.expression(expr.call.args[1])!;
+	Value condition  = self.expression(expr.call.args[2])!;
+
+	Type* result       = when_true.type;
+	Id    condition_id = self.rvalue(condition);
+
+	// OpSelect wants a condition of the same shape as its result, so a scalar
+	// bool against a vector is broadcast.
+	if (result.kind == VECTOR && condition.type.is_scalar())
+	{
+		condition_id = self.splat(self.vector_of(self.types.find("bool"), result.count), condition_id);
+	}
+
+	Id id = self.func.emit(OP_SELECT, self.type_id(result),
+		condition_id, self.rvalue(when_true), self.rvalue(when_false));
+	return (Value) { .type = result, .id = id };
 }
 
 <*
@@ -1259,6 +1589,11 @@ fn Id Codegen.convert_scalar(&self, Id id, Type* from, Type* to)
 	{
 		return self.func.unop(to.kind == UINT ? OP_CONVERT_F_TO_U : OP_CONVERT_F_TO_S, self.type_id(to), id);
 	}
+	// int and uint are both 32 bits, so the bits move unchanged.
+	if (to.kind != FLOAT && from.kind != FLOAT && to != from && to.is_scalar() && from.is_scalar())
+	{
+		return self.func.unop(OP_BITCAST, self.type_id(to), id);
+	}
 	return id;
 }
 
@@ -1320,8 +1655,10 @@ fn Value? Codegen.sample_expression(&self, Expr* expr, Value texture, String met
 *>
 fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 {
-	IdListC args;
+	IdListC    args;
+	TypePtrList arg_types;
 	args.init(self.allocator, 4);
+	arg_types.init(self.allocator, 4);
 	Type* first = null;
 
 	foreach (arg : expr.call.args)
@@ -1329,6 +1666,7 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 		Value value = self.expression(arg)!;
 		if (!first) first = value.type;
 		args.push(self.rvalue(value));
+		arg_types.push(value.type);
 	}
 
 	if (!first)
@@ -1348,12 +1686,36 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 			// A floatCxR transposes to floatRxC.
 			Type* result = self.types.find(string::format(self.allocator, "float%dx%d", first.element.count, first.count));
 			return (Value) { .type = result, .id = self.func.unop(OP_TRANSPOSE, self.type_id(result), args[0]) };
+		case "asuint":
+		case "asint":
+		case "asfloat":
+		{
+			String name_of = name == "asuint" ? "uint" : (name == "asint" ? "int" : "float");
+			Type*  scalar  = self.types.find(name_of);
+			Type*  result  = first.components() > 1 ? self.vector_of(scalar, first.components()) : scalar;
+			return (Value) { .type = result, .id = self.func.unop(OP_BITCAST, self.type_id(result), args[0]) };
+		}
+		case "any":
+		case "all":
+		{
+			Type* bool_t = self.types.find("bool");
+			uint  opcode = name == "any" ? OP_ANY : OP_ALL;
+			return (Value) { .type = bool_t, .id = self.func.unop(opcode, self.type_id(bool_t), args[0]) };
+		}
 		default:
 			break;
 	}
 
 	uint  instruction;
 	Type* result = first;
+
+	// A GLSL.std.450 instruction wants every operand the same type as its
+	// result, so a vector operation with a scalar argument takes the vector's
+	// shape - `mix(a, b, 0.5)` is the common case.
+	foreach (type : arg_types)
+	{
+		if (type.kind == VECTOR) { result = type; break; }
+	}
 
 	switch (name)
 	{
@@ -1380,6 +1742,9 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 		case "max":         instruction = GLSL_FMAX;
 		case "clamp":       instruction = GLSL_FCLAMP;
 		case "mix":         instruction = GLSL_FMIX;
+		case "lerp":        instruction = GLSL_FMIX;
+		case "inversesqrt": instruction = GLSL_INVERSE_SQRT;
+		case "rsqrt":       instruction = GLSL_INVERSE_SQRT;
 		case "step":        instruction = GLSL_STEP;
 		case "smoothstep":  instruction = GLSL_SMOOTHSTEP;
 		case "normalize":   instruction = GLSL_NORMALIZE;
@@ -1399,6 +1764,14 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 			return CODEGEN_ERROR~;
 	}
 
+	if (result.kind == VECTOR)
+	{
+		foreach (i, type : arg_types)
+		{
+			if (type.is_scalar()) args[i] = self.splat(result, args[i]);
+		}
+	}
+
 	return (Value) { .type = result, .id = self.ext_inst(instruction, result, args.array_view()) };
 }
 
@@ -1415,11 +1788,40 @@ fn Id Codegen.ext_inst(&self, uint instruction, Type* result, Id[] args)
 
 // --- Statements --------------------------------------------------------------
 
+<*
+ Write an initialiser list into an array local, element by element.
+
+ Element-wise rather than one composite constant, so an element may be any
+ expression and the array is addressable from the moment it exists.
+*>
+fn void? Codegen.store_initializer(&self, Id pointer, Type* type, Expr* expr)
+{
+	if ((usz)type.count != expr.initializer.elements.len)
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"a %s initialiser needs %d elements, got %d",
+			type.name, type.count, expr.initializer.elements.len));
+		return CODEGEN_ERROR~;
+	}
+
+	foreach (i, element : expr.initializer.elements)
+	{
+		Id slot = self.func.access_chain(
+			self.pointer_to(STORAGE_CLASS_FUNCTION, type.element),
+			pointer,
+			(Id[]) { self.const_int((int)i) });
+		Value value = self.expression(element)!;
+		self.func.store(slot, self.coerce(value, type.element, element)!);
+	}
+}
+
 struct LoopContext
 {
 	Id merge;
 	Id continue_target;
 }
+
+alias LoopList = List{LoopContext};
 
 fn void? Codegen.statement(&self, Stmt* stmt)
 {
@@ -1436,30 +1838,20 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 			self.locals.size = (sz)scope;
 
 		case DECL:
-			Type* type = self.types.find(stmt.decl.type.name);
-			if (!type)
-			{
-				self.fail(stmt.line, stmt.column,
-					string::format(self.allocator, "unknown type `%s`", stmt.decl.type.name));
-				return CODEGEN_ERROR~;
-			}
-			if (stmt.decl.type.is_pointer)
-			{
-				if (type.block != ADDRESS)
-				{
-					self.fail(stmt.line, stmt.column, string::format(self.allocator,
-						"`%s*` is not a device address - mark `%s` with @address to give it one",
-						type.name, type.name));
-					return CODEGEN_ERROR~;
-				}
-				type = self.types.pointer_to(type);
-			}
+			Type* type = self.resolve_type(stmt.decl.type, STD430, stmt.line, stmt.column)!;
 			Id pointer = self.func.local(self.pointer_to(STORAGE_CLASS_FUNCTION, type));
 			self.mod.name(pointer, stmt.decl.name);
 			if (stmt.decl.value)
 			{
-				Value value = self.expression(stmt.decl.value)!;
-				self.func.store(pointer, self.coerce(value, type, stmt.decl.value)!);
+				if (type.kind == ARRAY && stmt.decl.value.kind == INITIALIZER)
+				{
+					self.store_initializer(pointer, type, stmt.decl.value)!;
+				}
+				else
+				{
+					Value value = self.expression(stmt.decl.value)!;
+					self.func.store(pointer, self.coerce(value, type, stmt.decl.value)!);
+				}
 			}
 			self.locals.push({ .name = stmt.decl.name, .type = type, .pointer = pointer });
 
@@ -1487,9 +1879,22 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 			self.terminated = true;
 
 		case BREAK:
+			if (!self.loops.len())
+			{
+				self.fail(stmt.line, stmt.column, "`break` is not inside a loop");
+				return CODEGEN_ERROR~;
+			}
+			self.func.branch(self.loops[self.loops.len() - 1].merge);
+			self.terminated = true;
+
 		case CONTINUE:
-			self.fail(stmt.line, stmt.column, "break and continue are not implemented yet");
-			return CODEGEN_ERROR~;
+			if (!self.loops.len())
+			{
+				self.fail(stmt.line, stmt.column, "`continue` is not inside a loop");
+				return CODEGEN_ERROR~;
+			}
+			self.func.branch(self.loops[self.loops.len() - 1].continue_target);
+			self.terminated = true;
 	}
 }
 
@@ -1605,7 +2010,9 @@ fn void? Codegen.emit_loop(&self, uint line, uint column, Stmt* unused, Expr* co
 
 	self.func.label(body_label);
 	self.terminated = false;
+	self.loops.push({ .merge = merge_label, .continue_target = continue_label });
 	self.statement(body)!;
+	self.loops.size = (sz)(self.loops.len() - 1);
 	if (!self.terminated) self.func.branch(continue_label);
 
 	self.func.label(continue_label);

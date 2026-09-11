@@ -4,9 +4,11 @@
 *>
 module compile_test;
 
+import std::core::test;
 import std::io;
 import std::io::path;
 import shady;
+import shady_support;
 
 const String OUT_DIR = "build/shady";
 
@@ -49,25 +51,14 @@ fn float4 frag(FragmentIn input) @fragment
 }
 `;
 
-fn char[] build(String source)
-{
-	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(source, &diagnostic);
-	if (catch spirv)
-	{
-		io::printfn("shady error at %d:%d - %s", diagnostic.line, diagnostic.column, diagnostic.message);
-		unreachable("the shader should compile");
-	}
-	return spirv;
-}
-
 fn void compiles_the_cube_shader() @test
 {
-	char[] spirv = build(CUBE);
+	char[] spirv = shady_support::build(CUBE);
 	defer free(spirv);
 
-	assert(spirv.len % 4 == 0);
-	assert(((uint*)spirv.ptr)[0] == shady::MAGIC, "bad magic");
+	test::@check(spirv.len % 4 == 0, "SPIR-V must be a whole number of words, got %d bytes", spirv.len);
+	test::@check(((uint*)spirv.ptr)[0] == shady::MAGIC,
+		"the header should start with the SPIR-V magic; got %x", ((uint*)spirv.ptr)[0]);
 
 	path::mkdir(OUT_DIR, recursive: true)!!;
 	file::save(string::tformat("%s/compiled.spirv", OUT_DIR), spirv)!!;
@@ -81,25 +72,22 @@ fn void compiles_the_cube_shader() @test
 *>
 fn void reports_unknown_names() @test
 {
-	shady::Diagnostic diagnostic;
-	if (catch shady::compile(`
-fn float4 frag(VertexIn input) @fragment
+	String error = shady_support::compile_error(`
+struct VertexIn   { float3 position; }
+struct FragmentIn { float4 position @position; float4 color; }
+fn float4 frag(FragmentIn input) @fragment
 {
     return nonesuch;
 }
-`, &diagnostic))
-	{
-		io::printfn("shady: %s", diagnostic.to_string(tmem));
-		assert(diagnostic.message.len > 0, "a diagnostic should be filled in");
-		return;
-	}
-	assert(false, "an unknown name should fail");
+`);
+
+	test::@check(error.contains("unknown name `nonesuch`"),
+		"the diagnostic should name the unknown identifier; got '%s'", error);
 }
 
 fn void reports_bad_swizzle() @test
 {
-	shady::Diagnostic diagnostic;
-	if (catch shady::compile(`
+	String error = shady_support::compile_error(`
 struct Out { float4 position @position; }
 fn Out vert(Out input) @vertex
 {
@@ -107,24 +95,18 @@ fn Out vert(Out input) @vertex
     output.position = input.position.xg;
     return output;
 }
-`, &diagnostic))
-	{
-		io::printfn("shady: %s", diagnostic.to_string(tmem));
-		return;
-	}
-	assert(false, "mixing xyzw with rgba should fail");
+`);
+
+	test::@check(error.len > 0, "mixing xyzw with rgba should fail; got '%s'", error);
 }
 
 fn void vertex_stage_needs_a_position() @test
 {
-	shady::Diagnostic diagnostic;
-	if (catch shady::compile(`
+	String error = shady_support::compile_error(`
 struct Out { float4 color; }
 fn Out vert(Out input) @vertex { Out output; output.color = input.color; return output; }
-`, &diagnostic))
-	{
-		io::printfn("shady: %s", diagnostic.to_string(tmem));
-		return;
-	}
-	assert(false, "a vertex stage with no @position should fail");
+`);
+
+	test::@check(error.contains("position"),
+		"a vertex stage with no @position should say which member is missing; got '%s'", error);
 }

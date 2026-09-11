@@ -84,6 +84,9 @@ const uint OP_S_CONVERT                 = 114;
 const uint OP_CONVERT_PTR_TO_U          = 117;
 const uint OP_CONVERT_U_TO_PTR          = 120;
 const uint OP_BITCAST                   = 124;
+const uint OP_ANY                       = 154;
+const uint OP_ALL                       = 155;
+const uint OP_SELECT                    = 169;
 
 const uint OP_S_NEGATE                  = 126;
 const uint OP_F_NEGATE                  = 127;

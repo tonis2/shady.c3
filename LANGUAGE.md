@@ -105,8 +105,14 @@ pointer arithmetic beyond `p[i]`, and no pointer-to-pointer.
 ### 2.6 Arrays
 ```
 float4[16] palette;
+float4 palette[16];   // the declarator form, as in C
 ```
-Reserved: runtime-sized arrays, needed for storage buffers.
+The length may sit on the type or after the name. Arrays may be locals or
+struct members, are indexed by a runtime value, and take an initialiser list:
+`float2 taps[2] = { float2(0, 0), float2(1, 1) };`.
+
+Reserved: runtime-sized arrays, needed for storage buffers. An array cannot be
+a function parameter or return type - pass a device-address pointer instead.
 
 ## 3. Module-level declarations
 
@@ -153,6 +159,11 @@ A member call prefers a declared method over a free function spelled the same
 way; a bare call still reaches a by-value method, passing the receiver as its
 first argument. Methods overload like any other function, so two types may each
 have a method of the same name and the receiver type picks between them.
+
+A parameter may be `out` or `inout`, which pass it by reference: the callee
+writes through a pointer to the caller's variable. `out` need not be
+initialised; `inout` is copied in and out. The matching argument at a call site
+must be a variable, not a temporary.
 
 Recursion is not supported: a function that reaches itself is an error, since a
 shader has no stack to recurse on.
@@ -266,8 +277,8 @@ right-associative. This is C3's table, verified against c3c 0.8.3 rather than
 assumed, and it differs from C in two places worth keeping.
 
 ```
- 1.  postfix          a.b   a[i]   f(x)   a.xyzw
- 2.  unary            -a   !a   +a
+ 1.  postfix          a.b   a[i]   f(x)   a.xyzw   a++
+ 2.  unary            -a   !a   +a   ++a   --a
  3.  multiplicative   *  /  %
  4.  shift            <<  >>
  5.  bitwise          &  ^  |
@@ -276,7 +287,8 @@ assumed, and it differs from C in two places worth keeping.
  8.  equality         ==  !=
  9.  logical and      &&
 10.  logical or       ||
-11.  assignment       =  +=  -=  *=  /=  %=
+11.  conditional      a ? b : c
+12.  assignment       =  +=  -=  *=  /=  %=  &=  |=  ^=  <<=  >>=
 ```
 
 Two deliberate departures from C, both inherited from C3:
@@ -311,6 +323,12 @@ int(f)  float(i)  uint(i)     // scalar conversion
 ```
 Constructor arguments are consumed left to right until the component count is
 filled; supplying too few or too many is an error.
+
+A cast is written `(type)value` and differs from a constructor in that it may
+narrow: `(float3x3)mat4` drops the fourth column and the fourth row,
+`(uint3)v` converts a vector's components, `(float)i` converts a scalar,
+`(float)v` takes a vector's first component. Only builtin type names are casts,
+so `(x) - y` stays a subtraction.
 
 Implicit conversion happens only for literals: an untyped integer literal in a
 float context becomes a float. `int` to `float` on a *variable* requires an
@@ -448,13 +466,18 @@ through.
 Mapped to GLSL.std.450 unless noted.
 
 **Math**: `abs` `sign` `floor` `ceil` `round` `fract` `mod` `min` `max` `clamp`
-`saturate` `mix` `step` `smoothstep` `sqrt` `inversesqrt` `pow` `exp` `exp2`
-`log` `log2` `sin` `cos` `tan` `asin` `acos` `atan` `atan2`
+`saturate` `mix` `lerp` `step` `smoothstep` `sqrt` `rsqrt` `inversesqrt` `pow`
+`exp` `exp2` `log` `log2` `sin` `cos` `tan` `asin` `acos` `atan` `atan2`
 
 **Geometry**: `length` `distance` `dot` `cross` `normalize` `reflect` `refract`
 `faceforward`
 
-**Matrix**: `transpose` `inverse` `determinant`
+**Matrix**: `transpose` `inverse` `determinant`, and `mul(a, b)` for a matrix
+product spelled the HLSL way.
+
+**Conversion and selection**: `asuint` `asint` `asfloat` (bit-preserving, same
+shape), `any` `all` (a bool vector to a bool), `select(when_false, when_true,
+condition)`.
 
 **Texture** (method syntax on the texture): 
 ```

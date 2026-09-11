@@ -11,12 +11,25 @@ import std::core::mem::allocators;
 
 <*
  Where a compile failed. Empty `message` means it succeeded.
+
+ The message is a copy owned by whoever asked for the diagnostic - the
+ compiler's own arenas are gone by the time it returns. Release it with
+ `Diagnostic.free`.
 *>
 struct Diagnostic
 {
 	String message;
 	uint   line;
 	uint   column;
+}
+
+<*
+ Give the message back. Safe on a diagnostic that was never filled in.
+*>
+fn void Diagnostic.free(&self)
+{
+	if (self.message.len) free(self.message);
+	*self = {};
 }
 
 fn String Diagnostic.to_string(&self, Allocator allocator)
@@ -206,24 +219,7 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 		StructMember[] members = alloc::alloc_array(self.allocator, StructMember, decl.struct_decl.members.len);
 		foreach (i, &source : decl.struct_decl.members)
 		{
-			Type* member_type = self.types.find(source.type.name);
-			if (!member_type)
-			{
-				self.fail(source.line, source.column,
-					string::format(self.allocator, "unknown type `%s`", source.type.name));
-				return CODEGEN_ERROR~;
-			}
-			if (source.type.is_pointer)
-			{
-				if (member_type.block != ADDRESS)
-				{
-					self.fail(source.line, source.column, string::format(self.allocator,
-						"`%s*` is not a device address - mark `%s` with @address to give it one",
-						member_type.name, member_type.name));
-					return CODEGEN_ERROR~;
-				}
-				member_type = self.types.pointer_to(member_type);
-			}
+			Type* member_type = self.resolve_type(source.type, type.block.layout(), source.line, source.column)!;
 			members[i] = {
 				.name        = source.name,
 				.type        = member_type,
@@ -555,7 +551,8 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
  Compile shady source to a single SPIR-V module holding every entry point.
 
  The result is owned by `allocator`. On failure the fault is accompanied by
- `diagnostic`, if one was passed in.
+ `diagnostic`, if one was passed in - the diagnostic's message is a copy on
+ `allocator` and is the caller's to free.
 *>
 fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator allocator = mem)
 {
@@ -567,7 +564,12 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 	Ast? parsed = parse(source, &parser);
 	if (catch parsed)
 	{
-		*diagnostic = { .message = parser.error, .line = parser.error_line, .column = parser.error_column };
+		*diagnostic = {
+			.message = parser.error.copy(allocator),
+			.line    = parser.error_line,
+			.column  = parser.error_column,
+		};
+		if (parser.error.len) free(parser.error);
 		return PARSE_ERROR~;
 	}
 	// `catch` above narrows `parsed` to a plain Ast from here on.
@@ -594,6 +596,7 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 	codegen.resources.init(&arena, 8);
 	codegen.locals.init(&arena, 16);
 	codegen.functions.init(&arena, 8);
+	codegen.loops.init(&arena, 4);
 	codegen.inputs.init(&arena, 8);
 	codegen.outputs.init(&arena, 8);
 	codegen.interface_ids.init(&arena, 16);
@@ -604,7 +607,11 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 
 	if (catch codegen.build())
 	{
-		*diagnostic = { .message = codegen.error, .line = codegen.error_line, .column = codegen.error_column };
+		*diagnostic = {
+			.message = codegen.error.copy(allocator),
+			.line    = codegen.error_line,
+			.column  = codegen.error_column,
+		};
 		return CODEGEN_ERROR~;
 	}
 
