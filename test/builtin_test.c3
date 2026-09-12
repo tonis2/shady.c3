@@ -5,6 +5,7 @@
 module builtin_test;
 
 import std::core::test;
+import shady;
 import shady_support;
 
 fn void mul_spells_the_matrix_product() @test
@@ -96,4 +97,23 @@ fn float4 frag(FragmentIn input) @fragment
 `));
 
 	test::@check(error == "", "[unroll] should not be an error; got '%s'", error);
+}
+
+<*
+ The one builtin here that is two-argument without being a mix of a
+ one-argument form: the quadrant the vector points into is the whole of what
+ makes it different from `atan(y / x)`.
+*>
+fn void atan2_lowers_to_the_quadrant_aware_atangent() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+    return float4(atan2(input.color.y, input.color.x));
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_ext_inst(spirv, shady::GLSL_ATAN2),
+		"atan2 should be GLSL.std.450's Atan2, not an atan or a division");
 }

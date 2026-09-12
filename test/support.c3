@@ -103,6 +103,25 @@ fn bool has_opcode(char[] spirv, uint opcode)
 	return false;
 }
 
+<*
+ Whether any `OpExtInst` asks the GLSL std450 library for this instruction.
+*>
+fn bool has_ext_inst(char[] spirv, uint instruction)
+{
+	uint* words = (uint*)spirv.ptr;
+	usz   count = (usz)spirv.len / 4;
+	usz   i     = 5;
+	while (i < count)
+	{
+		uint word   = words[i];
+		uint opcode = word & 0xffff;
+		usz  len    = (usz)(word >> 16);
+		if (opcode == shady::OP_EXT_INST && words[i + 4] == instruction) return true;
+		i += len;
+	}
+	return false;
+}
+
 fn bool has_capability(char[] spirv, uint capability)
 {
 	uint* words = (uint*)spirv.ptr;

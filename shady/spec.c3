@@ -243,6 +243,7 @@ const uint GLSL_TAN           = 15;
 const uint GLSL_ASIN          = 16;
 const uint GLSL_ACOS          = 17;
 const uint GLSL_ATAN          = 18;
+const uint GLSL_ATAN2         = 25;
 const uint GLSL_POW           = 26;
 const uint GLSL_EXP           = 27;
 const uint GLSL_LOG           = 28;

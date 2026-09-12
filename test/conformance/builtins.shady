@@ -47,3 +47,10 @@ fn float4 frag(FragmentIn input) @fragment
     float4 chosen = select(float4(0.0), squared[0], edge > 0.5);
     return chosen + clip + float4(blended * scaled, total + float(bits & 255u));
 }
+
+// `atan2(y, x)` is GLSL.std.450's Atan2 - the quadrant-aware arctangent, which
+// nothing else in the library provides.
+fn float2 atan2_of(float2 p)
+{
+    return float2(atan2(p.y, p.x), sin(cos(atan2(1.0, 2.0))));
+}

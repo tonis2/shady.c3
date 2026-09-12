@@ -2087,6 +2087,7 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 		case "asin":        instruction = GLSL_ASIN;
 		case "acos":        instruction = GLSL_ACOS;
 		case "atan":        instruction = GLSL_ATAN;
+		case "atan2":       instruction = GLSL_ATAN2;
 		case "pow":         instruction = GLSL_POW;
 		case "exp":         instruction = GLSL_EXP;
 		case "log":         instruction = GLSL_LOG;
