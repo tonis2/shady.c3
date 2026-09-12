@@ -65,3 +65,44 @@ fn VertexOut vertexMain(VertexIn input) @vertex
 `;
 	assert(shady_support::compile_error(source).len == 0);
 }
+
+<*
+ An integer varying is Flat on both sides, without the author saying so.
+
+ `@flat` is still accepted, but there is nothing to decide: a fragment shader
+ input of integer type must be decorated Flat, and a variable that carries one
+ between stages has no other legal spelling.
+*>
+fn void an_integer_varying_is_flat() @test
+{
+	char[] spirv = shady_support::build(`
+struct VOut
+{
+	float4 position @position;
+	uint variant;
+}
+
+struct FIn
+{
+	float4 position @position;
+	uint variant;
+}
+
+fn VOut vert() @vertex
+{
+	VOut o;
+	o.position = float4(0.0, 0.0, 0.0, 1.0);
+	o.variant = 3u;
+	return o;
+}
+
+fn float4 frag(FIn input) @fragment
+{
+	return float4(float(input.variant));
+}
+`);
+	defer free(spirv);
+
+	test::@check(shady_support::has_decoration(spirv, shady::Decoration.FLAT),
+		"an integer varying is decorated Flat without being asked");
+}

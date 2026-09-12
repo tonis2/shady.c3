@@ -547,7 +547,16 @@ fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageV
 			next_location = location + 1;
 		}
 
-		if (member.attributes.find("flat")) self.mod.decorate(id, Decoration.FLAT);
+		// An integer cannot be interpolated, so a varying that carries one is Flat
+		// on both sides of the stage boundary. Asked of the type rather than left to
+		// `@flat`, because there is no other legal spelling for it: a vertex output
+		// or fragment input of integer type without this decoration is a module the
+		// validator refuses, and the author has nothing to decide. `@flat` still
+		// parses, so a file that says it says nothing wrong.
+		bool varying = storage == StorageClass.OUTPUT || execution_model == ExecutionModel.FRAGMENT;
+		bool integer = !member.is_position && !member.is_builtin
+			&& (member.type.kind == INT || member.type.kind == UINT || member.type.kind == BOOL);
+		if (member.attributes.find("flat") || (varying && integer)) self.mod.decorate(id, Decoration.FLAT);
 
 		out.push({ .id = id, .type = member.type, .member_index = (usz)i, .is_position = member.is_position });
 		self.interface_ids.push(id);

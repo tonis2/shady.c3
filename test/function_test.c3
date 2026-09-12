@@ -485,3 +485,32 @@ fn float4 frag(FragmentIn input) @fragment
 
 	test::@check(error.contains("@required"), "a required function with a body is refused; got `%s`", error);
 }
+
+<*
+ An empty struct, because a material with no uniforms still needs a type for the
+ field a body reads them through: the alternative is generating the body's whole
+ context struct per material.
+*>
+fn void an_empty_struct_is_a_type() @test
+{
+	String error = shady_support::compile_error(`
+struct Uniforms
+{
+}
+
+struct FragmentIn
+{
+	float4 color;
+	Uniforms uniforms;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	Uniforms copy = input.uniforms;
+	return input.color;
+}
+`);
+	String built = error;
+
+	test::@check(built == "", "an empty struct is a type and copies by value; got `%s`", built);
+}
