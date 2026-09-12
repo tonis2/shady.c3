@@ -21,6 +21,8 @@ struct Parser
 	String error;
 	uint   error_line;
 	uint   error_column;
+	// How wide the offending token is, so a diagnostic can underline it.
+	uint   error_length;
 }
 
 alias StmtPtrList = List{Stmt*};
@@ -68,6 +70,7 @@ fn void Parser.fail(&self, String message)
 	self.error        = message.copy(mem);
 	self.error_line   = token.line;
 	self.error_column = token.column;
+	self.error_length = (uint)token.text.len;
 }
 
 fn Token? Parser.expect(&self, TokenKind kind, String message)
@@ -955,15 +958,32 @@ fn Decl*? Parser.declaration(&self)
  On success the returned Ast owns an arena holding every node; free it with
  `ast.free()`. String slices point into `source`, which must outlive the Ast.
 
- On failure the fault carries nothing, but `parser` is filled in with a message
- and a position - pass one in to report a useful error.
+ On failure the fault carries nothing, but `parser` is filled in with a message,
+ a position and the offending token's width - pass one in to report a useful
+ error.
+
+ Positions are physical: `#line` directives are collected into `map`, and
+ whoever owns the map reports through it. See `shady::LineMap`.
 *>
-fn Ast? parse(String source, Parser* parser = null)
+fn Ast? parse(String source, Parser* parser = null, LineMap* map = null)
 {
 	Parser local;
 	if (!parser) parser = &local;
 
-	TokenList tokens = tokenize(source, mem)!;
+	Lexer failed;
+	TokenList? tokenized = tokenize(source, mem, map, &failed);
+	if (catch err = tokenized)
+	{
+		parser.tokens       = {};
+		parser.at           = 0;
+		parser.allocator    = mem;
+		parser.error        = failed.error.copy(mem);
+		parser.error_line   = failed.error_line;
+		parser.error_column = failed.error_column;
+		parser.error_length = 0;
+		return err~;
+	}
+	TokenList tokens = tokenized;
 	defer tokens.free();
 
 	Ast ast;
@@ -978,6 +998,7 @@ fn Ast? parse(String source, Parser* parser = null)
 	parser.error       = "";
 	parser.error_line  = 0;
 	parser.error_column = 0;
+	parser.error_length = 0;
 
 	DeclPtrList decls;
 	decls.init(&ast.arena, 16);

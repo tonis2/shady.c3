@@ -9,35 +9,6 @@ module shady;
 import std::collections::list;
 import std::core::mem::allocators;
 
-<*
- Where a compile failed. Empty `message` means it succeeded.
-
- The message is a copy owned by whoever asked for the diagnostic - the
- compiler's own arenas are gone by the time it returns. Release it with
- `Diagnostic.free`.
-*>
-struct Diagnostic
-{
-	String message;
-	uint   line;
-	uint   column;
-}
-
-<*
- Give the message back. Safe on a diagnostic that was never filled in.
-*>
-fn void Diagnostic.free(&self)
-{
-	if (self.message.len) free(self.message);
-	*self = {};
-}
-
-fn String Diagnostic.to_string(&self, Allocator allocator)
-{
-	if (!self.message.len) return "";
-	return string::format(allocator, "%d:%d: %s", self.line, self.column, self.message);
-}
-
 const uint UNASSIGNED_BINDING = 0xffffffff;
 
 // --- Resource binding --------------------------------------------------------
@@ -389,7 +360,14 @@ fn void? Codegen.declare_constants(&self, Ast* ast)
 		}
 
 		self.mod.name(id, decl.name);
-		self.constants.push({ .name = decl.name, .type = type, .id = id });
+		self.constants.push({
+			.name    = decl.name,
+			.type    = type,
+			.id      = id,
+			.is_spec = is_spec,
+			.line    = decl.line,
+			.column  = decl.column,
+		});
 	}
 }
 
@@ -725,38 +703,55 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
  Compile shady source to a single SPIR-V module holding every entry point.
 
  The result is owned by `allocator`. On failure the fault is accompanied by
- `diagnostic`, if one was passed in - the diagnostic's message is a copy on
+ `diagnostic`, if one was passed in - every string in it is a copy on
  `allocator` and is the caller's to free.
+
+ Warnings travel beside the fault rather than in it: pass a `warnings` list and
+ every non-fatal finding is appended to it, whether the compile succeeded or
+ not. The list must already be initialized, and its entries are the caller's to
+ free, like the diagnostic.
 
  @param scalar_layout : `Pack every block with C3's own rules - 4-byte scalars,
  no rounding to 16 - rather than std140/std430. This is the mode that lines
  generated structs up with three.c3's wire layout, and it is off by default.`
+ @param warnings : `Where non-fatal findings go. Nothing is appended when this is null.`
 *>
-fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator allocator = mem, bool scalar_layout = false)
+fn char[]? compile(
+	String source,
+	Diagnostic* diagnostic = null,
+	Allocator allocator = mem,
+	bool scalar_layout = false,
+	DiagnosticList* warnings = null)
 {
 	Diagnostic local_diagnostic;
 	if (!diagnostic) diagnostic = &local_diagnostic;
 	*diagnostic = {};
 
+	// The `#line` regions and the findings the passes collect are the compile's
+	// own working state, so they live in its arena and die with it.
+	DynamicArenaAllocator arena;
+	arena.init(mem, 64 * 1024);
+	defer arena.free();
+
+	LineMap map;
+	map.init(&arena);
+
+	DiagnosticList findings;
+	findings.init(&arena, 4);
+
 	Parser parser;
-	Ast? parsed = parse(source, &parser);
+	Ast? parsed = parse(source, &parser, &map);
 	if (catch parsed)
 	{
-		*diagnostic = {
-			.message = parser.error.copy(allocator),
-			.line    = parser.error_line,
-			.column  = parser.error_column,
-		};
+		*diagnostic = diagnostic_at(allocator, source, &map, DiagnosticKind.ERROR,
+			parser.error_line, parser.error_column, parser.error_length, parser.error);
 		if (parser.error.len) free(parser.error);
+		copy_warnings(warnings, allocator, source, &map, &findings);
 		return PARSE_ERROR~;
 	}
 	// `catch` above narrows `parsed` to a plain Ast from here on.
 	Ast ast = parsed;
 	defer ast.free();
-
-	DynamicArenaAllocator arena;
-	arena.init(mem, 64 * 1024);
-	defer arena.free();
 
 	TypeTable types;
 	types.init(&arena);
@@ -772,6 +767,7 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 	codegen.types     = &types;
 	codegen.ast       = &ast;
 	codegen.scalar_layout = scalar_layout;
+	codegen.warnings  = &findings;
 	codegen.resources.init(&arena, 8);
 	codegen.constants.init(&arena, 8);
 	codegen.locals.init(&arena, 16);
@@ -787,13 +783,13 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 
 	if (catch codegen.build())
 	{
-		*diagnostic = {
-			.message = codegen.error.copy(allocator),
-			.line    = codegen.error_line,
-			.column  = codegen.error_column,
-		};
+		*diagnostic = diagnostic_at(allocator, source, &map, DiagnosticKind.ERROR,
+			codegen.error_line, codegen.error_column, codegen.error_length, codegen.error);
+		copy_warnings(warnings, allocator, source, &map, &findings);
 		return CODEGEN_ERROR~;
 	}
+
+	copy_warnings(warnings, allocator, source, &map, &findings);
 
 	// Buffer device addresses change the module header, not just its body: the
 	// addressing model stops being Logical, so it can only be written once the
@@ -811,6 +807,28 @@ fn char[]? compile(String source, Diagnostic* diagnostic = null, Allocator alloc
 	}
 
 	return mod.build(allocator);
+}
+
+<*
+ Move the findings the passes collected to the caller's list.
+
+ The positions are physical and the map is physical, so this is also where a
+ warning learns the region and line number its writer used. Nothing happens
+ when the caller did not ask for warnings.
+*>
+fn void copy_warnings(
+	DiagnosticList* out,
+	Allocator allocator,
+	String source,
+	LineMap* map,
+	DiagnosticList* findings)
+{
+	if (!out) return;
+	foreach (&finding : findings)
+	{
+		out.push(diagnostic_at(allocator, source, map, finding.kind,
+			finding.line, finding.column, finding.length, finding.message));
+	}
 }
 
 fn void? Codegen.build(&self)
@@ -869,5 +887,17 @@ fn void? Codegen.build(&self)
 	{
 		self.fail(0, 0, "the shader has no entry points");
 		return CODEGEN_ERROR~;
+	}
+
+	// A spec constant is the host's handle on a value, so one no code reads is
+	// a knob wired to nothing - and the host setting it would never find out.
+	// Everything that reads a constant resolves it by name, so by here the
+	// answer is known.
+	foreach (&constant : self.constants)
+	{
+		if (!constant.is_spec || constant.used) continue;
+		self.warn(constant.line, constant.column, string::format(self.allocator,
+			"the specialization constant `%s` is never read - setting it changes nothing",
+			constant.name), (uint)constant.name.len);
 	}
 }

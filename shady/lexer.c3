@@ -103,7 +103,7 @@ struct Token
 
 alias TokenList = List{Token};
 
-faultdef UNTERMINATED_COMMENT, UNEXPECTED_CHARACTER, MALFORMED_NUMBER;
+faultdef UNTERMINATED_COMMENT, UNEXPECTED_CHARACTER, MALFORMED_NUMBER, MALFORMED_DIRECTIVE;
 
 struct Lexer
 {
@@ -111,6 +111,11 @@ struct Lexer
 	usz    offset;
 	uint   line;
 	uint   column;
+
+	// Where `#line` directives are recorded. Null is legal - a caller that only
+	// wants tokens gets them skipped rather than mapped - and the map itself
+	// belongs to whoever passed it in.
+	LineMap* map;
 
 	// Set when a fault is returned, so the caller can report something useful.
 	String error;
@@ -148,15 +153,133 @@ fn char Lexer.advance(&self)
 fn bool is_ident_start(char c) @local => c.is_alpha() || c == '_';
 fn bool is_ident_part(char c) @local => c.is_alnum() || c == '_';
 
-fn void Lexer.fail(&self, String message)
+fn void Lexer.fail_at(&self, uint line, uint column, String message)
 {
 	self.error        = message;
-	self.error_line   = self.line;
-	self.error_column = self.column;
+	self.error_line   = line;
+	self.error_column = column;
+}
+
+fn void Lexer.fail(&self, String message)
+{
+	self.fail_at(self.line, self.column, message);
 }
 
 <*
- Skip whitespace and comments. Block comments do not nest, matching C3.
+ Whether only blanks stand between here and the previous newline.
+
+ That is what makes `#line` a line directive rather than an operator nobody
+ defined: a `#` in the middle of an expression is still an unexpected character.
+*>
+fn bool Lexer.at_line_start(&self)
+{
+	usz at = self.offset;
+	while (at > 0 && self.source[at - 1] != '\n')
+	{
+		char c = self.source[at - 1];
+		if (c != ' ' && c != '\t') return false;
+		at--;
+	}
+	return true;
+}
+
+fn bool Lexer.take_text(&self, String text)
+{
+	for (usz i = 0; i < text.len; i++)
+	{
+		if (self.peek(i) != text[i]) return false;
+	}
+	for (usz i = 0; i < text.len; i++) self.advance();
+	return true;
+}
+
+fn void Lexer.skip_blanks(&self)
+{
+	while (self.peek() == ' ' || self.peek() == '\t') self.advance();
+}
+
+<*
+ One `#line <n> "<name>"` directive, recorded in the map when there is one.
+
+ The directive numbers the line that *follows* it, so the offset is computed
+ against the next physical line rather than the directive's own. Everything
+ after the name must be blanks: a directive is generated, and one with junk on
+ the end is a bug in whoever generated it, not something to guess at.
+*>
+fn void? Lexer.directive(&self)
+{
+	const String SHAPE = "malformed `#line` directive; expected `#line <number> \"<name>\"`";
+
+	uint start_line   = self.line;
+	uint start_column = self.column;
+
+	self.advance(); // '#'
+	self.skip_blanks();
+
+	if (!self.take_text("line"))
+	{
+		self.fail_at(start_line, start_column,
+			"only `#line` is understood - shady has no preprocessor");
+		return MALFORMED_DIRECTIVE~;
+	}
+
+	if (self.peek() != ' ' && self.peek() != '\t')
+	{
+		self.fail_at(start_line, start_column, SHAPE);
+		return MALFORMED_DIRECTIVE~;
+	}
+	self.skip_blanks();
+
+	if (!self.peek().is_digit())
+	{
+		self.fail_at(start_line, start_column, SHAPE);
+		return MALFORMED_DIRECTIVE~;
+	}
+	uint number = 0;
+	while (self.peek().is_digit())
+	{
+		number = number * 10 + (uint)(self.peek() - '0');
+		self.advance();
+	}
+
+	if (self.peek() != ' ' && self.peek() != '\t')
+	{
+		self.fail_at(start_line, start_column, SHAPE);
+		return MALFORMED_DIRECTIVE~;
+	}
+	self.skip_blanks();
+
+	if (self.peek() != '"')
+	{
+		self.fail_at(start_line, start_column, SHAPE);
+		return MALFORMED_DIRECTIVE~;
+	}
+	self.advance();
+
+	usz name_start = self.offset;
+	while (self.peek() != '"' && self.peek() != '\n' && self.peek() != 0) self.advance();
+	if (self.peek() != '"')
+	{
+		self.fail_at(start_line, start_column, SHAPE);
+		return MALFORMED_DIRECTIVE~;
+	}
+	String name = self.source[name_start..self.offset - 1];
+	self.advance(); // closing quote
+
+	self.skip_blanks();
+	// `\r` is allowed so a directive that came through a CRLF file still reads.
+	if (self.offset < self.source.len && self.peek() != '\n' && self.peek() != '\r')
+	{
+		self.fail_at(start_line, start_column, SHAPE);
+		return MALFORMED_DIRECTIVE~;
+	}
+
+	if (self.map) self.map.add(start_line, (int)number - (int)(start_line + 1), name);
+}
+
+<*
+ Skip whitespace, comments and `#line` directives. Block comments do not nest,
+ matching C3.
 *>
 fn void? Lexer.skip_trivia(&self)
 {
@@ -167,6 +290,14 @@ fn void? Lexer.skip_trivia(&self)
 		if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
 		{
 			self.advance();
+			continue;
+		}
+
+		// A directive owns its whole line, so it is trivia: the token after it
+		// is the one the map renumbers.
+		if (c == '#' && self.at_line_start())
+		{
+			self.directive()!;
 			continue;
 		}
 
@@ -466,18 +597,32 @@ fn bool Lexer.take(&self, char expected)
 
 <*
  Tokenize a whole source string, ending with one EOF token.
+
+ A `#line` directive is recorded in `map` when one is passed, and skipped
+ either way; see `Lexer.directive`.
+
+ On failure the fault carries nothing, but the lexer that raised it is copied
+ to `failed` when one is passed - the message and the position are what a
+ caller reports, and a fault is not a value that can hold them.
 *>
-fn TokenList? tokenize(String source, Allocator allocator = mem)
+fn TokenList? tokenize(String source, Allocator allocator = mem, LineMap* map = null, Lexer* failed = null)
 {
 	Lexer lexer;
 	lexer.init(source);
+	lexer.map = map;
 
 	TokenList tokens;
 	tokens.init(allocator, 256);
 
 	while (true)
 	{
-		Token token = lexer.next()!;
+		Token? token = lexer.next();
+		if (catch err = token)
+		{
+			if (failed) *failed = lexer;
+			tokens.free();
+			return err~;
+		}
 		tokens.push(token);
 		if (token.kind == EOF) break;
 	}

@@ -98,12 +98,19 @@ alias StringList   = List{String};
 <*
  A module-level `const`, with the `SpecId` it was given or no spec id when it was
  not. Its id resolves wherever its name is written.
+
+ `used` is what the warning about a spec constant nothing reads asks: a value
+ the host may set that no code observes is a knob wired to nothing.
 *>
 struct Constant
 {
 	String name;
 	Type*  type;
 	Id     id;
+	bool   is_spec;
+	bool   used;
+	uint   line;
+	uint   column;
 }
 alias ConstantList = List{Constant};
 
@@ -146,6 +153,11 @@ struct Codegen
 	String error;
 	uint   error_line;
 	uint   error_column;
+	uint   error_length;
+
+	// Non-fatal findings, appended as they are found. Null is legal: a compile
+	// that was not asked for warnings finds none.
+	DiagnosticList* warnings;
 }
 
 <*
@@ -155,12 +167,31 @@ struct Codegen
 *>
 fn Layout Codegen.block_layout(&self, BlockKind kind) => self.scalar_layout ? SCALAR : kind.layout();
 
-fn void Codegen.fail(&self, uint line, uint column, String message)
+fn void Codegen.fail(&self, uint line, uint column, String message, uint length = 0)
 {
 	if (self.error.len) return;
 	self.error        = message;
 	self.error_line   = line;
 	self.error_column = column;
+	self.error_length = length;
+}
+
+<*
+ A finding that is worth saying and not worth stopping for.
+
+ The position is physical, like every other one the pass records; `compile`
+ owns the map that renumbers it.
+*>
+fn void Codegen.warn(&self, uint line, uint column, String message, uint length = 0)
+{
+	if (!self.warnings) return;
+	self.warnings.push({
+		.kind    = WARNING,
+		.message = message.copy(self.allocator),
+		.line    = line,
+		.column  = column,
+		.length  = length,
+	});
 }
 
 // --- Scope -------------------------------------------------------------------
@@ -189,7 +220,13 @@ fn Constant* Codegen.find_constant(&self, String name)
 {
 	foreach (&constant : self.constants)
 	{
-		if (constant.name == name) return constant;
+		if (constant.name == name)
+		{
+			// Resolution is the only way a constant is reached, so this is
+			// where "something reads it" is recorded.
+			constant.used = true;
+			return constant;
+		}
 	}
 	return null;
 }
@@ -455,7 +492,9 @@ fn Value? Codegen.expression(&self, Expr* expr)
 				// loaded at the point of sampling.
 				return (Value) { .type = resource.type, .pointer = resource.id, .storage = resource.storage };
 			}
-			self.fail(expr.line, expr.column, string::format(self.allocator, "unknown name `%s`", expr.ident.name));
+			self.fail(expr.line, expr.column,
+				string::format(self.allocator, "unknown name `%s`", expr.ident.name),
+				(uint)expr.ident.name.len);
 			return CODEGEN_ERROR~;
 
 		case MEMBER:

@@ -51,6 +51,28 @@ is required before `e`. A bare `1` in a float context converts implicitly
 **Attributes** start with `@` and take an optional parenthesised argument list:
 `@vertex`, `@location(0)`, `@set(1) @binding(0)`, `@threads(32, 1, 1)`.
 
+### 1.1 `#line` directives
+
+```
+#line 1 "material"
+```
+
+A directive owns its line — it must be the first thing on the line after
+whitespace — and renumbers the lines that follow it. The number applies to the
+next physical line, and the quoted name becomes the region every position in
+that range is reported under: a diagnostic on the third line of the body above
+reads `material:3:12` rather than the line it landed on in the generated module.
+A later directive renumbers from that point again, which is how generated source
+restores the module's own numbering after a spliced body.
+
+`#line` changes no token, only the coordinates a diagnostic is written in. A
+`#` anywhere else, and any other directive, is an error — shady has no
+preprocessor.
+
+The name may be any text without a quote or a newline. Columns are unchanged: a
+generator that splices a body in must not re-indent it, or the caret lands on
+the wrong token.
+
 ## 2. Types
 
 ### 2.1 Scalars

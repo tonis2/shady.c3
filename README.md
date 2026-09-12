@@ -7,15 +7,20 @@ in the same process — no files, no subprocesses, no external toolchain.
 import shady;
 
 shady::Diagnostic diagnostic;
-char[]? spirv = shady::compile(source, &diagnostic);
+shady::DiagnosticList warnings;
+warnings.init(mem, 4);
+
+char[]? spirv = shady::compile(source, &diagnostic, warnings: &warnings);
 if (catch spirv)
 {
-    io::eprintfn("%d:%d: %s", diagnostic.line, diagnostic.column, diagnostic.message);
+    io::eprintfn("%s", diagnostic.render(tmem)); // heading, source line, caret
     diagnostic.free();
     return;
 }
 diagnostic.free();
 defer free(spirv);
+foreach (&warning : warnings) warning.free();
+warnings.free();
 
 ShaderModule module = vk::loadShaderModule(device, spirv)!!;
 ```
@@ -23,6 +28,17 @@ ShaderModule module = vk::loadShaderModule(device, spirv)!!;
 Both results are the caller's: the SPIR-V is allocated on the allocator passed
 to `compile`, and the diagnostic's message is a copy, since the compiler's own
 arenas are gone by the time it returns.
+
+The diagnostic names a region, a line and a column, carries the source line
+under it and knows how wide the caret span is. `to_string` gives the
+`material:3:12: message` heading; `render` adds the line and a caret, the way a
+compiler prints a fault. A `#line 1 "material"` directive renumbers what follows
+it, so a body spliced into generated source is reported at its own
+coordinates — see [`LANGUAGE.md` §1.1](LANGUAGE.md).
+
+Warnings travel beside the fault rather than in it: a compile that succeeds can
+still say, in the same shape, that the spec constant nothing reads is a knob
+wired to nothing.
 
 One module holds every entry point, told apart by name, so a vertex and a
 fragment stage come out of a single `VkShaderModule` — as do several variants
@@ -38,9 +54,8 @@ An entry point is named after its function unless the stage attribute gives a
 name. The host selects one through `pName` in
 `VkPipelineShaderStageCreateInfo`.
 
-A bad shader is a fault with a line and a column. It never exits the process
-and never writes a temporary file, so compiling at startup — or on a file
-watch, or per frame — is safe.
+A bad shader is a fault with a position, never an exit and never a temporary
+file, so compiling at startup — or on a file watch, or per frame — is safe.
 
 ## The language
 
@@ -151,9 +166,10 @@ well as structs, pointer parameters, locals and reassignment, reads and writes
 through an address, matrix add/subtract, `InterlockedAdd`, combined
 `Sampler2D`/`Sampler2DShadow` descriptors, runtime-sized descriptor arrays with
 `NonUniformResourceIndex`, the `Sample`/`SampleLevel`/`SampleGrad`/`SampleBias`/
-`SampleCmpLevelZero` variants, several descriptor sets in one module, and
+`SampleCmpLevelZero` variants, several descriptor sets in one module,
 specialization constants (`const bool X @spec(0) = true;`) for one module
-serving several variants.
+serving several variants, `#line` source maps for diagnostics on generated
+bodies, and warnings reported on the success path beside the fault.
 
 Not yet: storage buffers and runtime-sized arrays of memory (as opposed to of
 descriptors). Each of these fails with a position and a message rather than
@@ -198,10 +214,11 @@ environment accepts things Vulkan rejects.
 | `shady/module.c3` | module assembly, sections, id allocation, dedup |
 | `shady/types.c3` | type and constant constructors |
 | `shady/function.c3` | function bodies, blocks, instructions |
-| `shady/lexer.c3` | tokenizer |
+| `shady/lexer.c3` | tokenizer, `#line` directives |
 | `shady/ast.c3` | syntax tree |
 | `shady/parser.c3` | recursive descent parser |
 | `shady/sema.c3` | type table, std140/std430 layout |
+| `shady/diagnostic.c3` | the message record, its rendering, the source map |
 | `shady/codegen.c3` | AST to SPIR-V, single pass |
 | `shady/compile.c3` | bindings, stage lowering, the public entry point |
 
