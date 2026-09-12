@@ -336,3 +336,55 @@ fn Out vert() @vertex { Out o; o.position = float4(u.inner.a + p.inner.a, 1.0); 
 
 	test::@check(error == "", "under scalar layout both blocks agree, so sharing is fine; got '%s'", error);
 }
+
+<*
+ A matrix reached through a device address is read column by column.
+
+ SPIR-V gives a matrix its layout with `ColMajor` and `MatrixStride`, both
+ *member* decorations - a bare pointer has no member to carry them, and a plain
+ `OpLoad` of a matrix through one leaves the stride unstated, which a driver
+ resolves by reading all four columns from the first one's address. Four loads
+ at the column stride and an `OpCompositeConstruct` say it with no decoration
+ to hang it on, so that is what a matrix behind a pointer lowers to.
+
+ The skin pass was the first shader to index a palette this way, and posed every
+ vertex of a character with the same column before this.
+*>
+fn void a_matrix_behind_a_pointer_is_built_from_its_columns() @test
+{
+	char[] spirv = shady_support::build(`
+struct Push @pushconstant
+{
+	float4x4* palette;
+	uint      index;
+}
+Push push;
+
+fn float4x4 pose()
+{
+	return push.palette[push.index];
+}
+
+struct Out { float4 position @position; }
+fn Out vert() @vertex
+{
+	Out o;
+	o.position = (pose() * float4(1.0, 0.0, 0.0, 1.0)).xyzw;
+	return o;
+}
+`, scalar_layout: true);
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::OP_COMPOSITE_CONSTRUCT),
+		"the matrix is one construct of four loaded columns");
+
+	// The pointer itself carries the element stride, which is what the four
+	// column loads are offset by.
+	test::@check(shady_support::has_decoration_value(spirv, shady::DECORATION_ARRAY_STRIDE, 64),
+		"the palette pointer strides by one matrix");
+
+	// And nothing decorates that pointer as a matrix: `ColMajor` on a pointer is
+	// what the validator refuses ("can only be applied to structure members").
+	test::@check(!shady_support::has_decoration(spirv, shady::DECORATION_COL_MAJOR),
+		"no ColMajor decoration, because it would have nothing legal to sit on");
+}

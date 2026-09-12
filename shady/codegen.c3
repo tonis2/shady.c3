@@ -378,7 +378,73 @@ fn Id Codegen.const_int(&self, int value)
 fn Id Codegen.rvalue(&self, Value value)
 {
 	if (value.id != NO_ID) return value.id;
+
+	// A matrix behind a device address is read a column at a time. SPIR-V gives
+	// a matrix its layout with `ColMajor` and `MatrixStride`, and both are
+	// *member* decorations - a bare pointer has no member to carry them, so a
+	// matrix load through one leaves the stride unspecified and the hardware
+	// reads every column from the first one's address. Four loads at the
+	// column stride and a construct say the same thing without a decoration to
+	// hang it on. A matrix in a struct is the ordinary case and stays a load:
+	// its member decorations are what describe it.
+	if (value.type.kind == MATRIX && value.storage == STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER)
+	{
+		Type* column = value.type.element;
+		uint  stride = value.type.matrix_stride(self.block_layout(ADDRESS));
+
+		Id[] columns = alloc::alloc_array(tmem, Id, value.type.count);
+		for (uint i = 0; i < value.type.count; i++)
+		{
+			Id pointer = self.offset_pointer(value.pointer, column, i * stride);
+			columns[i] = self.func.load(self.type_id(column), pointer, self.access_alignment(value));
+		}
+		return self.func.composite_construct(self.type_id(value.type), columns);
+	}
+
 	return self.func.load(self.type_id(value.type), value.pointer, self.access_alignment(value));
+}
+
+<*
+ Write `value` through `target`'s pointer.
+
+ A matrix behind a device address is written a column at a time, for the reason
+ `rvalue` reads one that way.
+*>
+fn void Codegen.store(&self, Value target, Id value)
+{
+	if (target.type.kind != MATRIX || target.storage != STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER)
+	{
+		self.func.store(target.pointer, value, self.access_alignment(target));
+		return;
+	}
+
+	Type* column = target.type.element;
+	uint  stride = target.type.matrix_stride(self.block_layout(ADDRESS));
+
+	for (uint i = 0; i < target.type.count; i++)
+	{
+		Id pointer = self.offset_pointer(target.pointer, column, i * stride);
+		Id part    = self.func.composite_extract(self.type_id(column), value, i);
+		self.func.store(pointer, part, self.access_alignment(target));
+	}
+}
+
+<*
+ The address `base_pointer + offset` bytes along, as a pointer to `type`.
+
+ A device address is arithmetic the shader does itself: nothing describes the
+ layout to the hardware, so even a constant offset is an instruction.
+*>
+fn Id Codegen.offset_pointer(&self, Id base_pointer, Type* type, uint offset)
+{
+	Id ulong_t = self.mod.type_int(64, false);
+	Id address = self.func.unop(OP_CONVERT_PTR_TO_U, ulong_t, base_pointer);
+	if (offset)
+	{
+		address = self.func.binop(OP_I_ADD, ulong_t, address, self.mod.const_u64(ulong_t, offset));
+	}
+	Id pointer_type = self.mod.type_pointer(STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER, self.type_id(type));
+	return self.func.unop(OP_CONVERT_U_TO_PTR, pointer_type, address);
 }
 
 <*
@@ -720,7 +786,7 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 		id = self.arithmetic(op, current, value, expr)!;
 	}
 
-	self.func.store(target.pointer, id, self.access_alignment(target));
+	self.store(target, id);
 	return (Value) { .type = target.type, .id = id };
 }
 
