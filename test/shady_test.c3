@@ -22,7 +22,7 @@ fn void build_triangle_module() @test
 	mod.init(mem);
 	defer mod.free();
 
-	mod.capability(shady::CAPABILITY_SHADER);
+	mod.capability(shady::Capability.SHADER);
 	mod.ext_inst_import("GLSL.std.450");
 	mod.set_memory_model();
 
@@ -42,74 +42,74 @@ fn void build_triangle_module() @test
 
 	// --- uniform block: { mat4 projection; mat4 view; } at set 0, binding 0 ---
 	shady::Id ubo_struct = mod.type_struct({ mat4, mat4 });
-	mod.decorate(ubo_struct, shady::DECORATION_BLOCK);
-	mod.member_decorate(ubo_struct, 0, shady::DECORATION_OFFSET, 0);
-	mod.member_decorate(ubo_struct, 0, shady::DECORATION_COL_MAJOR);
-	mod.member_decorate(ubo_struct, 0, shady::DECORATION_MATRIX_STRIDE, 16);
-	mod.member_decorate(ubo_struct, 1, shady::DECORATION_OFFSET, 64);
-	mod.member_decorate(ubo_struct, 1, shady::DECORATION_COL_MAJOR);
-	mod.member_decorate(ubo_struct, 1, shady::DECORATION_MATRIX_STRIDE, 16);
+	mod.decorate(ubo_struct, shady::Decoration.BLOCK);
+	mod.member_decorate(ubo_struct, 0, shady::Decoration.OFFSET, 0);
+	mod.member_decorate(ubo_struct, 0, shady::Decoration.COL_MAJOR);
+	mod.member_decorate(ubo_struct, 0, shady::Decoration.MATRIX_STRIDE, 16);
+	mod.member_decorate(ubo_struct, 1, shady::Decoration.OFFSET, 64);
+	mod.member_decorate(ubo_struct, 1, shady::Decoration.COL_MAJOR);
+	mod.member_decorate(ubo_struct, 1, shady::Decoration.MATRIX_STRIDE, 16);
 	mod.name(ubo_struct, "Uniforms");
 	mod.member_name(ubo_struct, 0, "projection");
 	mod.member_name(ubo_struct, 1, "view");
 
-	shady::Id ubo_ptr = mod.type_pointer(shady::STORAGE_CLASS_UNIFORM, ubo_struct);
-	shady::Id ubo     = mod.global_var(ubo_ptr, shady::STORAGE_CLASS_UNIFORM);
-	mod.decorate(ubo, shady::DECORATION_DESCRIPTOR_SET, 0);
-	mod.decorate(ubo, shady::DECORATION_BINDING, 0);
+	shady::Id ubo_ptr = mod.type_pointer(shady::StorageClass.UNIFORM, ubo_struct);
+	shady::Id ubo     = mod.global_var(ubo_ptr, shady::StorageClass.UNIFORM);
+	mod.decorate(ubo, shady::Decoration.DESCRIPTOR_SET, 0);
+	mod.decorate(ubo, shady::Decoration.BINDING, 0);
 	mod.name(ubo, "uniforms");
 
-	shady::Id mat4_uniform_ptr = mod.type_pointer(shady::STORAGE_CLASS_UNIFORM, mat4);
+	shady::Id mat4_uniform_ptr = mod.type_pointer(shady::StorageClass.UNIFORM, mat4);
 
 	// --- texture + sampler at bindings 1 and 2 ---
 	shady::Id image_t   = mod.type_image(float_t);
 	shady::Id sampler_t = mod.type_sampler();
 	shady::Id sampled_t = mod.type_sampled_image(image_t);
 
-	shady::Id image_ptr   = mod.type_pointer(shady::STORAGE_CLASS_UNIFORM_CONSTANT, image_t);
-	shady::Id sampler_ptr = mod.type_pointer(shady::STORAGE_CLASS_UNIFORM_CONSTANT, sampler_t);
+	shady::Id image_ptr   = mod.type_pointer(shady::StorageClass.UNIFORM_CONSTANT, image_t);
+	shady::Id sampler_ptr = mod.type_pointer(shady::StorageClass.UNIFORM_CONSTANT, sampler_t);
 
-	shady::Id tex = mod.global_var(image_ptr, shady::STORAGE_CLASS_UNIFORM_CONSTANT);
-	mod.decorate(tex, shady::DECORATION_DESCRIPTOR_SET, 0);
-	mod.decorate(tex, shady::DECORATION_BINDING, 1);
+	shady::Id tex = mod.global_var(image_ptr, shady::StorageClass.UNIFORM_CONSTANT);
+	mod.decorate(tex, shady::Decoration.DESCRIPTOR_SET, 0);
+	mod.decorate(tex, shady::Decoration.BINDING, 1);
 	mod.name(tex, "tex");
 
-	shady::Id samp = mod.global_var(sampler_ptr, shady::STORAGE_CLASS_UNIFORM_CONSTANT);
-	mod.decorate(samp, shady::DECORATION_DESCRIPTOR_SET, 0);
-	mod.decorate(samp, shady::DECORATION_BINDING, 2);
+	shady::Id samp = mod.global_var(sampler_ptr, shady::StorageClass.UNIFORM_CONSTANT);
+	mod.decorate(samp, shady::Decoration.DESCRIPTOR_SET, 0);
+	mod.decorate(samp, shady::Decoration.BINDING, 2);
 	mod.name(samp, "tex_sampler");
 
 	// --- vertex stage interface ---
-	shady::Id in_vec3_ptr  = mod.type_pointer(shady::STORAGE_CLASS_INPUT, vec3);
-	shady::Id in_vec4_ptr  = mod.type_pointer(shady::STORAGE_CLASS_INPUT, vec4);
-	shady::Id in_vec2_ptr  = mod.type_pointer(shady::STORAGE_CLASS_INPUT, vec2);
-	shady::Id out_vec4_ptr = mod.type_pointer(shady::STORAGE_CLASS_OUTPUT, vec4);
-	shady::Id out_vec2_ptr = mod.type_pointer(shady::STORAGE_CLASS_OUTPUT, vec2);
+	shady::Id in_vec3_ptr  = mod.type_pointer(shady::StorageClass.INPUT, vec3);
+	shady::Id in_vec4_ptr  = mod.type_pointer(shady::StorageClass.INPUT, vec4);
+	shady::Id in_vec2_ptr  = mod.type_pointer(shady::StorageClass.INPUT, vec2);
+	shady::Id out_vec4_ptr = mod.type_pointer(shady::StorageClass.OUTPUT, vec4);
+	shady::Id out_vec2_ptr = mod.type_pointer(shady::StorageClass.OUTPUT, vec2);
 
-	shady::Id in_position = mod.global_var(in_vec3_ptr, shady::STORAGE_CLASS_INPUT);
-	mod.decorate(in_position, shady::DECORATION_LOCATION, 0);
-	shady::Id in_color = mod.global_var(in_vec4_ptr, shady::STORAGE_CLASS_INPUT);
-	mod.decorate(in_color, shady::DECORATION_LOCATION, 1);
-	shady::Id in_uv = mod.global_var(in_vec2_ptr, shady::STORAGE_CLASS_INPUT);
-	mod.decorate(in_uv, shady::DECORATION_LOCATION, 2);
+	shady::Id in_position = mod.global_var(in_vec3_ptr, shady::StorageClass.INPUT);
+	mod.decorate(in_position, shady::Decoration.LOCATION, 0);
+	shady::Id in_color = mod.global_var(in_vec4_ptr, shady::StorageClass.INPUT);
+	mod.decorate(in_color, shady::Decoration.LOCATION, 1);
+	shady::Id in_uv = mod.global_var(in_vec2_ptr, shady::StorageClass.INPUT);
+	mod.decorate(in_uv, shady::Decoration.LOCATION, 2);
 
 	// A bare variable decorated BuiltIn Position, rather than a gl_PerVertex
 	// block. Both are valid; this one is less machinery.
-	shady::Id gl_position = mod.global_var(out_vec4_ptr, shady::STORAGE_CLASS_OUTPUT);
-	mod.decorate(gl_position, shady::DECORATION_BUILTIN, shady::BUILTIN_POSITION);
+	shady::Id gl_position = mod.global_var(out_vec4_ptr, shady::StorageClass.OUTPUT);
+	mod.decorate(gl_position, shady::Decoration.BUILTIN, (Id)shady::Builtin.POSITION);
 
-	shady::Id out_color = mod.global_var(out_vec4_ptr, shady::STORAGE_CLASS_OUTPUT);
-	mod.decorate(out_color, shady::DECORATION_LOCATION, 0);
-	shady::Id out_uv = mod.global_var(out_vec2_ptr, shady::STORAGE_CLASS_OUTPUT);
-	mod.decorate(out_uv, shady::DECORATION_LOCATION, 1);
+	shady::Id out_color = mod.global_var(out_vec4_ptr, shady::StorageClass.OUTPUT);
+	mod.decorate(out_color, shady::Decoration.LOCATION, 0);
+	shady::Id out_uv = mod.global_var(out_vec2_ptr, shady::StorageClass.OUTPUT);
+	mod.decorate(out_uv, shady::Decoration.LOCATION, 1);
 
 	// --- fragment stage interface ---
-	shady::Id frag_color = mod.global_var(in_vec4_ptr, shady::STORAGE_CLASS_INPUT);
-	mod.decorate(frag_color, shady::DECORATION_LOCATION, 0);
-	shady::Id frag_uv = mod.global_var(in_vec2_ptr, shady::STORAGE_CLASS_INPUT);
-	mod.decorate(frag_uv, shady::DECORATION_LOCATION, 1);
-	shady::Id frag_out = mod.global_var(out_vec4_ptr, shady::STORAGE_CLASS_OUTPUT);
-	mod.decorate(frag_out, shady::DECORATION_LOCATION, 0);
+	shady::Id frag_color = mod.global_var(in_vec4_ptr, shady::StorageClass.INPUT);
+	mod.decorate(frag_color, shady::Decoration.LOCATION, 0);
+	shady::Id frag_uv = mod.global_var(in_vec2_ptr, shady::StorageClass.INPUT);
+	mod.decorate(frag_uv, shady::Decoration.LOCATION, 1);
+	shady::Id frag_out = mod.global_var(out_vec4_ptr, shady::StorageClass.OUTPUT);
+	mod.decorate(frag_out, shady::Decoration.LOCATION, 0);
 
 	// --- vertex shader ---
 	shady::Function vs = mod.begin_function(void_t, fn_void);
@@ -123,8 +123,8 @@ fn void build_triangle_module() @test
 		shady::Id projection = vs.load(mat4, vs.access_chain(mat4_uniform_ptr, ubo, { idx0 }));
 		shady::Id view       = vs.load(mat4, vs.access_chain(mat4_uniform_ptr, ubo, { idx1 }));
 
-		shady::Id view_projection = vs.binop(shady::OP_MATRIX_TIMES_MATRIX, mat4, projection, view);
-		shady::Id clip            = vs.binop(shady::OP_MATRIX_TIMES_VECTOR, vec4, view_projection, local);
+		shady::Id view_projection = vs.binop(shady::Opcode.MATRIX_TIMES_MATRIX, mat4, projection, view);
+		shady::Id clip            = vs.binop(shady::Opcode.MATRIX_TIMES_VECTOR, vec4, view_projection, local);
 
 		vs.store(gl_position, clip);
 		vs.store(out_color, vs.load(vec4, in_color));
@@ -133,7 +133,7 @@ fn void build_triangle_module() @test
 	}
 	vs.end();
 	mod.name(vs.id, "vert");
-	mod.entry_point(shady::EXECUTION_MODEL_VERTEX, vs.id, "vert",
+	mod.entry_point(shady::ExecutionModel.VERTEX, vs.id, "vert",
 		{ in_position, in_color, in_uv, gl_position, out_color, out_uv });
 
 	// --- fragment shader ---
@@ -142,14 +142,14 @@ fn void build_triangle_module() @test
 		shady::Id image   = fs.load(image_t, tex);
 		shady::Id sampler = fs.load(sampler_t, samp);
 		shady::Id texel   = fs.image_sample(vec4, fs.sampled_image(sampled_t, image, sampler), fs.load(vec2, frag_uv));
-		shady::Id tinted  = fs.binop(shady::OP_F_MUL, vec4, texel, fs.load(vec4, frag_color));
+		shady::Id tinted  = fs.binop(shady::Opcode.F_MUL, vec4, texel, fs.load(vec4, frag_color));
 		fs.store(frag_out, tinted);
 		fs.ret();
 	}
 	fs.end();
 	mod.name(fs.id, "frag");
-	mod.entry_point(shady::EXECUTION_MODEL_FRAGMENT, fs.id, "frag", { frag_color, frag_uv, frag_out });
-	mod.execution_mode(fs.id, shady::EXECUTION_MODE_ORIGIN_UPPER_LEFT);
+	mod.entry_point(shady::ExecutionModel.FRAGMENT, fs.id, "frag", { frag_color, frag_uv, frag_out });
+	mod.execution_mode(fs.id, shady::ExecutionMode.ORIGIN_UPPER_LEFT);
 
 	// --- emit ---
 	char[] spirv = mod.build(mem);

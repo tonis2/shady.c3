@@ -13,7 +13,7 @@ import shady_support;
  Whether the module contains an instruction with this opcode, which is how a
  structural claim such as "this lowered to an atomic" is checked here.
 *>
-fn bool has_opcode(char[] spirv, uint opcode) @private
+fn bool has_opcode(char[] spirv, shady::Opcode opcode) @private
 {
 	uint* words = (uint*)spirv.ptr;
 	usz   count = (usz)spirv.len / 4;
@@ -21,7 +21,7 @@ fn bool has_opcode(char[] spirv, uint opcode) @private
 	while (i < count)
 	{
 		uint word = words[i];
-		if ((word & 0xffff) == opcode) return true;
+		if ((word & 0xffff) == (uint)opcode) return true;
 		i += (usz)(word >> 16);
 	}
 	return false;
@@ -191,7 +191,7 @@ fn void main(ComputeIn input) @compute @threads(64, 1, 1)
 `, scalar_layout: true);
 	defer free(spirv);
 
-	test::@check(has_opcode(spirv, shady::OP_ATOMIC_I_ADD),
+	test::@check(has_opcode(spirv, shady::Opcode.ATOMIC_I_ADD),
 		"InterlockedAdd should lower to OpAtomicIAdd");
 }
 

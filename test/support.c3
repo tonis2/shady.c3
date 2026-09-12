@@ -89,7 +89,7 @@ fn char[] build(String source, bool scalar_layout = false)
  structural claim - "this lowered to an atomic", "this is a spec constant" - is
  checked without a disassembler.
 *>
-fn bool has_opcode(char[] spirv, uint opcode)
+fn bool has_opcode(char[] spirv, shady::Opcode opcode)
 {
 	uint* words = (uint*)spirv.ptr;
 	usz   count = (usz)spirv.len / 4;
@@ -97,7 +97,7 @@ fn bool has_opcode(char[] spirv, uint opcode)
 	while (i < count)
 	{
 		uint word = words[i];
-		if ((word & 0xffff) == opcode) return true;
+		if ((word & 0xffff) == (uint)opcode) return true;
 		i += (usz)(word >> 16);
 	}
 	return false;
@@ -106,7 +106,7 @@ fn bool has_opcode(char[] spirv, uint opcode)
 <*
  Whether any `OpExtInst` asks the GLSL std450 library for this instruction.
 *>
-fn bool has_ext_inst(char[] spirv, uint instruction)
+fn bool has_ext_inst(char[] spirv, shady::GlslOp instruction)
 {
 	uint* words = (uint*)spirv.ptr;
 	usz   count = (usz)spirv.len / 4;
@@ -114,15 +114,15 @@ fn bool has_ext_inst(char[] spirv, uint instruction)
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_EXT_INST && words[i + 4] == instruction) return true;
+		if (opcode == shady::Opcode.EXT_INST && words[i + 4] == (uint)instruction) return true;
 		i += len;
 	}
 	return false;
 }
 
-fn bool has_capability(char[] spirv, uint capability)
+fn bool has_capability(char[] spirv, shady::Capability capability)
 {
 	uint* words = (uint*)spirv.ptr;
 	usz   count = (usz)spirv.len / 4;
@@ -130,9 +130,9 @@ fn bool has_capability(char[] spirv, uint capability)
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_CAPABILITY && words[i + 1] == capability) return true;
+		if (opcode == shady::Opcode.CAPABILITY && words[i + 1] == (uint)capability) return true;
 		i += len;
 	}
 	return false;
@@ -141,7 +141,7 @@ fn bool has_capability(char[] spirv, uint capability)
 <*
  Whether any `OpDecorate` carries this decoration and this first operand.
 *>
-fn bool has_decoration_value(char[] spirv, uint decoration, uint value)
+fn bool has_decoration_value(char[] spirv, shady::Decoration decoration, uint value)
 {
 	uint* words = (uint*)spirv.ptr;
 	usz   count = (usz)spirv.len / 4;
@@ -149,9 +149,9 @@ fn bool has_decoration_value(char[] spirv, uint decoration, uint value)
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_DECORATE && words[i + 2] == decoration && words[i + 3] == value) return true;
+		if (opcode == shady::Opcode.DECORATE && words[i + 2] == (uint)decoration && words[i + 3] == value) return true;
 		i += len;
 	}
 	return false;
@@ -160,7 +160,7 @@ fn bool has_decoration_value(char[] spirv, uint decoration, uint value)
 <*
  Whether any `OpDecorate` carries this decoration, whatever its operand.
 *>
-fn bool has_decoration(char[] spirv, uint decoration)
+fn bool has_decoration(char[] spirv, shady::Decoration decoration)
 {
 	uint* words = (uint*)spirv.ptr;
 	usz   count = (usz)spirv.len / 4;
@@ -168,9 +168,9 @@ fn bool has_decoration(char[] spirv, uint decoration)
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_DECORATE && words[i + 2] == decoration) return true;
+		if (opcode == shady::Opcode.DECORATE && words[i + 2] == (uint)decoration) return true;
 		i += len;
 	}
 	return false;

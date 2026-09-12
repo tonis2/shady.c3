@@ -53,9 +53,9 @@ fn uint struct_named(uint* words, usz count, String name) @private
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_NAME && literal_at(words, i + 2, i + len) == name) named = words[i + 1];
+		if (opcode == shady::Opcode.NAME && literal_at(words, i + 2, i + len) == name) named = words[i + 1];
 		i += len;
 	}
 	if (named == 0) return 0;
@@ -64,9 +64,9 @@ fn uint struct_named(uint* words, usz count, String name) @private
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_TYPE_STRUCT && words[i + 1] == named) return named;
+		if (opcode == shady::Opcode.TYPE_STRUCT && words[i + 1] == named) return named;
 		i += len;
 	}
 	return 0;
@@ -78,10 +78,10 @@ fn uint member_offset(uint* words, usz count, uint struct_id, uint member) @priv
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_MEMBER_DECORATE && words[i + 1] == struct_id
-			&& words[i + 2] == member && words[i + 3] == shady::DECORATION_OFFSET)
+		if (opcode == shady::Opcode.MEMBER_DECORATE && words[i + 1] == struct_id
+			&& words[i + 2] == member && words[i + 3] == (uint)shady::Decoration.OFFSET)
 		{
 			return words[i + 4];
 		}
@@ -110,9 +110,9 @@ fn uint struct_stride(uint* words, usz count, uint struct_id) @private
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_TYPE_POINTER && words[i + 3] == struct_id) pointer = words[i + 1];
+		if (opcode == shady::Opcode.TYPE_POINTER && words[i + 3] == struct_id) pointer = words[i + 1];
 		i += len;
 	}
 	if (pointer == 0) return NOT_FOUND;
@@ -121,10 +121,10 @@ fn uint struct_stride(uint* words, usz count, uint struct_id) @private
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_DECORATE && words[i + 1] == pointer
-			&& words[i + 2] == shady::DECORATION_ARRAY_STRIDE)
+		if (opcode == shady::Opcode.DECORATE && words[i + 1] == pointer
+			&& words[i + 2] == (uint)shady::Decoration.ARRAY_STRIDE)
 		{
 			return words[i + 3];
 		}
@@ -163,9 +163,9 @@ fn bool has_array_stride(char[] spirv, uint value) @private
 	while (i < count)
 	{
 		uint word   = words[i];
-		uint opcode = word & 0xffff;
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
 		usz  len    = (usz)(word >> 16);
-		if (opcode == shady::OP_DECORATE && words[i + 2] == shady::DECORATION_ARRAY_STRIDE
+		if (opcode == shady::Opcode.DECORATE && words[i + 2] == (uint)shady::Decoration.ARRAY_STRIDE
 			&& words[i + 3] == value)
 		{
 			return true;
@@ -375,16 +375,16 @@ fn Out vert() @vertex
 `, scalar_layout: true);
 	defer free(spirv);
 
-	test::@check(shady_support::has_opcode(spirv, shady::OP_COMPOSITE_CONSTRUCT),
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.COMPOSITE_CONSTRUCT),
 		"the matrix is one construct of four loaded columns");
 
 	// The pointer itself carries the element stride, which is what the four
 	// column loads are offset by.
-	test::@check(shady_support::has_decoration_value(spirv, shady::DECORATION_ARRAY_STRIDE, 64),
+	test::@check(shady_support::has_decoration_value(spirv, shady::Decoration.ARRAY_STRIDE, 64),
 		"the palette pointer strides by one matrix");
 
 	// And nothing decorates that pointer as a matrix: `ColMajor` on a pointer is
 	// what the validator refuses ("can only be applied to structure members").
-	test::@check(!shady_support::has_decoration(spirv, shady::DECORATION_COL_MAJOR),
+	test::@check(!shady_support::has_decoration(spirv, shady::Decoration.COL_MAJOR),
 		"no ColMajor decoration, because it would have nothing legal to sit on");
 }

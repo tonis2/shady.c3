@@ -44,7 +44,7 @@ struct StructMember
 	uint location;    // stage I/O location
 	bool is_position; // carries @position, so it is BuiltIn Position
 	bool is_builtin;  // carries @builtin(...)
-	uint builtin;     // the SPIR-V BuiltIn, when is_builtin
+	Builtin builtin;  // the SPIR-V BuiltIn, when is_builtin
 }
 
 struct Type
@@ -56,7 +56,7 @@ struct Type
 	uint  count;   // vector components, or matrix columns
 
 	StructMember[] members; // STRUCT only
-	uint           dim;     // TEXTURE and SAMPLED_IMAGE: the OpTypeImage dimension
+	Dim            dim;     // TEXTURE and SAMPLED_IMAGE: the OpTypeImage dimension
 
 	// SAMPLED_IMAGE only: the OpTypeImage Depth operand, 1 for a comparison
 	// sampler such as Sampler2DShadow.
@@ -146,7 +146,7 @@ struct TypeTable
 	TypePtrList types;
 }
 
-fn Type* TypeTable.add(&self, TypeKind kind, String name, Type* element = null, uint count = 0, uint dim = 0)
+fn Type* TypeTable.add(&self, TypeKind kind, String name, Type* element = null, uint count = 0, Dim dim = Dim.D1)
 {
 	Type* type = alloc::new(self.allocator, Type);
 	*type = { .kind = kind, .name = name, .element = element, .count = count, .dim = dim };
@@ -233,14 +233,14 @@ fn void TypeTable.init(&self, Allocator allocator)
 		}
 	}
 
-	self.add(TEXTURE, "texture1d", float_vectors[3], 0, DIM_1D);
-	self.add(TEXTURE, "texture2d", float_vectors[3], 0, DIM_2D);
-	self.add(TEXTURE, "texture3d", float_vectors[3], 0, DIM_3D);
-	self.add(TEXTURE, "texturecube", float_vectors[3], 0, DIM_CUBE);
+	self.add(TEXTURE, "texture1d", float_vectors[3], 0, Dim.D1);
+	self.add(TEXTURE, "texture2d", float_vectors[3], 0, Dim.D2);
+	self.add(TEXTURE, "texture3d", float_vectors[3], 0, Dim.D3);
+	self.add(TEXTURE, "texturecube", float_vectors[3], 0, Dim.CUBE);
 	self.add(SAMPLER, "sampler");
 
-	self.add(SAMPLED_IMAGE, "Sampler2D", float_vectors[3], 0, DIM_2D);
-	Type* shadow_2d = self.add(SAMPLED_IMAGE, "Sampler2DShadow", float_vectors[3], 0, DIM_2D);
+	self.add(SAMPLED_IMAGE, "Sampler2D", float_vectors[3], 0, Dim.D2);
+	Type* shadow_2d = self.add(SAMPLED_IMAGE, "Sampler2DShadow", float_vectors[3], 0, Dim.D2);
 	shadow_2d.depth = 1;
 }
 
@@ -447,16 +447,16 @@ fn uint? Type.assign_offsets(&self, Layout layout)
  Map a `@builtin(name)` to its SPIR-V BuiltIn. Returns false for an unknown
  name so the caller can report it rather than emitting something wrong.
 *>
-fn bool builtin_from_name(String name, uint* out)
+fn bool builtin_from_name(String name, Builtin* out)
 {
 	switch (name)
 	{
-		case "vertex_index":         *out = BUILTIN_VERTEX_INDEX;
-		case "instance_index":       *out = BUILTIN_INSTANCE_INDEX;
-		case "frag_coord":           *out = BUILTIN_FRAG_COORD;
-		case "global_invocation_id": *out = BUILTIN_GLOBAL_INVOCATION_ID;
-		case "local_invocation_id":  *out = BUILTIN_LOCAL_INVOCATION_ID;
-		case "workgroup_id":         *out = BUILTIN_WORKGROUP_ID;
+		case "vertex_index":         *out = Builtin.VERTEX_INDEX;
+		case "instance_index":       *out = Builtin.INSTANCE_INDEX;
+		case "frag_coord":           *out = Builtin.FRAG_COORD;
+		case "global_invocation_id": *out = Builtin.GLOBAL_INVOCATION_ID;
+		case "local_invocation_id":  *out = Builtin.LOCAL_INVOCATION_ID;
+		case "workgroup_id":         *out = Builtin.WORKGROUP_ID;
 		default: return false;
 	}
 	return true;

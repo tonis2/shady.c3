@@ -30,7 +30,7 @@ struct Value
 	Type* type;
 	Id    id;      // the loaded value; 0 when only a pointer is held
 	Id    pointer; // 0 when the value is not addressable
-	uint  storage; // storage class of `pointer`
+	StorageClass storage; // storage class of `pointer`
 }
 
 struct Local
@@ -45,7 +45,7 @@ struct Resource
 	String    name;
 	Type*     type;
 	Id        id;
-	uint      storage;
+	StorageClass storage;
 	BlockKind block;   // NONE for an opaque type, else the struct's block kind
 	uint      set;
 	uint      binding;
@@ -279,8 +279,8 @@ fn Id Codegen.type_id(&self, Type* type)
 			}
 			else
 			{
-				type.id = self.mod.type_pointer(STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER, self.type_id(type.element));
-				self.mod.decorate(type.id, DECORATION_ARRAY_STRIDE,
+				type.id = self.mod.type_pointer(StorageClass.PHYSICAL_STORAGE_BUFFER, self.type_id(type.element));
+				self.mod.decorate(type.id, Decoration.ARRAY_STRIDE,
 					array_stride(type.element, self.block_layout(ADDRESS)));
 			}
 		case TEXTURE: type.id = self.mod.type_image(self.type_id(type.element.element), type.dim);
@@ -297,7 +297,7 @@ fn Id Codegen.type_id(&self, Type* type)
 	return type.id;
 }
 
-fn Id Codegen.pointer_to(&self, uint storage_class, Type* type)
+fn Id Codegen.pointer_to(&self, StorageClass storage_class, Type* type)
 {
 	return self.mod.type_pointer(storage_class, self.type_id(type));
 }
@@ -392,7 +392,7 @@ fn Value Codegen.adapt_literal(&self, Value value, Expr* side, Type* other)
  invalid SPIR-V rather than a slow path. A uint has no `abs` or `sign` of its
  own: neither can do anything a uint does not already do.
 *>
-fn uint Codegen.by_sign(&self, uint floats, uint unsigned, uint signed, Type* result)
+fn GlslOp Codegen.by_sign(&self, GlslOp floats, GlslOp unsigned, GlslOp signed, Type* result)
 {
 	switch (result.scalar().kind)
 	{
@@ -429,7 +429,7 @@ fn Id Codegen.rvalue(&self, Value value)
 	// column stride and a construct say the same thing without a decoration to
 	// hang it on. A matrix in a struct is the ordinary case and stays a load:
 	// its member decorations are what describe it.
-	if (value.type.kind == MATRIX && value.storage == STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER)
+	if (value.type.kind == MATRIX && value.storage == StorageClass.PHYSICAL_STORAGE_BUFFER)
 	{
 		Type* column = value.type.element;
 		uint  stride = value.type.matrix_stride(self.block_layout(ADDRESS));
@@ -454,7 +454,7 @@ fn Id Codegen.rvalue(&self, Value value)
 *>
 fn void Codegen.store(&self, Value target, Id value)
 {
-	if (target.type.kind != MATRIX || target.storage != STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER)
+	if (target.type.kind != MATRIX || target.storage != StorageClass.PHYSICAL_STORAGE_BUFFER)
 	{
 		self.func.store(target.pointer, value, self.access_alignment(target));
 		return;
@@ -480,13 +480,13 @@ fn void Codegen.store(&self, Value target, Id value)
 fn Id Codegen.offset_pointer(&self, Id base_pointer, Type* type, uint offset)
 {
 	Id ulong_t = self.mod.type_int(64, false);
-	Id address = self.func.unop(OP_CONVERT_PTR_TO_U, ulong_t, base_pointer);
+	Id address = self.func.unop(Opcode.CONVERT_PTR_TO_U, ulong_t, base_pointer);
 	if (offset)
 	{
-		address = self.func.binop(OP_I_ADD, ulong_t, address, self.mod.const_u64(ulong_t, offset));
+		address = self.func.binop(Opcode.I_ADD, ulong_t, address, self.mod.const_u64(ulong_t, offset));
 	}
-	Id pointer_type = self.mod.type_pointer(STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER, self.type_id(type));
-	return self.func.unop(OP_CONVERT_U_TO_PTR, pointer_type, address);
+	Id pointer_type = self.mod.type_pointer(StorageClass.PHYSICAL_STORAGE_BUFFER, self.type_id(type));
+	return self.func.unop(Opcode.CONVERT_U_TO_PTR, pointer_type, address);
 }
 
 <*
@@ -500,7 +500,7 @@ fn Id Codegen.offset_pointer(&self, Id base_pointer, Type* type, uint offset)
 *>
 fn uint Codegen.access_alignment(&self, Value value)
 {
-	if (value.storage != STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER) return 0;
+	if (value.storage != StorageClass.PHYSICAL_STORAGE_BUFFER) return 0;
 	return value.type.align(self.block_layout(ADDRESS));
 }
 
@@ -530,24 +530,24 @@ fn Value? Codegen.offset_address(&self, Value base, Value index, Expr* expr)
 	{
 		// Sign-extend, then reinterpret: the arithmetic below is unsigned.
 		Id long_t = self.mod.type_int(64, true);
-		wide = self.func.unop(OP_BITCAST, ulong_t, self.func.unop(OP_S_CONVERT, long_t, self.rvalue(index)));
+		wide = self.func.unop(Opcode.BITCAST, ulong_t, self.func.unop(Opcode.S_CONVERT, long_t, self.rvalue(index)));
 	}
 	else
 	{
-		wide = self.func.unop(OP_U_CONVERT, ulong_t, self.rvalue(index));
+		wide = self.func.unop(Opcode.U_CONVERT, ulong_t, self.rvalue(index));
 	}
 
 	// The element's strided size, not its bare size: under std430 a float3
 	// occupies 12 bytes but the next element starts at 16.
 	Id stride  = self.mod.const_u64(ulong_t, array_stride(element, self.block_layout(ADDRESS)));
-	Id address = self.func.unop(OP_CONVERT_PTR_TO_U, ulong_t, self.rvalue(base));
-	Id offset  = self.func.binop(OP_I_MUL, ulong_t, wide, stride);
-	Id target  = self.func.binop(OP_I_ADD, ulong_t, address, offset);
+	Id address = self.func.unop(Opcode.CONVERT_PTR_TO_U, ulong_t, self.rvalue(base));
+	Id offset  = self.func.binop(Opcode.I_MUL, ulong_t, wide, stride);
+	Id target  = self.func.binop(Opcode.I_ADD, ulong_t, address, offset);
 
-	Id pointer_type = self.mod.type_pointer(STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER, self.type_id(element));
-	Id pointer      = self.func.unop(OP_CONVERT_U_TO_PTR, pointer_type, target);
+	Id pointer_type = self.mod.type_pointer(StorageClass.PHYSICAL_STORAGE_BUFFER, self.type_id(element));
+	Id pointer      = self.func.unop(Opcode.CONVERT_U_TO_PTR, pointer_type, target);
 
-	return (Value) { .type = element, .pointer = pointer, .storage = STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER };
+	return (Value) { .type = element, .pointer = pointer, .storage = StorageClass.PHYSICAL_STORAGE_BUFFER };
 }
 
 <*
@@ -563,7 +563,7 @@ fn bool Codegen.deref(&self, Value value, Value* out)
 	*out = {
 		.type    = value.type.element,
 		.pointer = self.rvalue(value),
-		.storage = STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER,
+		.storage = StorageClass.PHYSICAL_STORAGE_BUFFER,
 	};
 	return true;
 }
@@ -588,7 +588,7 @@ fn Value? Codegen.expression(&self, Expr* expr)
 		case IDENT:
 			if (Local* local = self.find_local(expr.ident.name))
 			{
-				return (Value) { .type = local.type, .pointer = local.pointer, .storage = STORAGE_CLASS_FUNCTION };
+				return (Value) { .type = local.type, .pointer = local.pointer, .storage = StorageClass.FUNCTION };
 			}
 			if (Constant* constant = self.find_constant(expr.ident.name))
 			{
@@ -782,9 +782,9 @@ fn Value? Codegen.unary_expression(&self, Expr* expr)
 	{
 		case MINUS:
 			bool is_float = operand.type.scalar().kind == FLOAT;
-			return (Value) { .type = operand.type, .id = self.func.unop(is_float ? OP_F_NEGATE : OP_S_NEGATE, type, id) };
+			return (Value) { .type = operand.type, .id = self.func.unop(is_float ? Opcode.F_NEGATE : Opcode.S_NEGATE, type, id) };
 		case BANG:
-			return (Value) { .type = operand.type, .id = self.func.unop(OP_LOGICAL_NOT, type, id) };
+			return (Value) { .type = operand.type, .id = self.func.unop(Opcode.LOGICAL_NOT, type, id) };
 		default:
 			self.fail(expr.line, expr.column, "unsupported unary operator");
 			return CODEGEN_ERROR~;
@@ -924,7 +924,7 @@ fn Value? Codegen.conditional_expression(&self, Expr* expr)
 	self.terminated = false;
 	Value then_value = self.expression(expr.conditional.then_value)!;
 	result  = then_value.type;
-	pointer = self.func.local(self.pointer_to(STORAGE_CLASS_FUNCTION, result));
+	pointer = self.func.local(self.pointer_to(StorageClass.FUNCTION, result));
 	self.func.store(pointer, self.coerce(then_value, result, expr.conditional.then_value)!);
 	if (!self.terminated) self.func.branch(merge_label);
 
@@ -936,7 +936,7 @@ fn Value? Codegen.conditional_expression(&self, Expr* expr)
 
 	self.func.label(merge_label);
 	self.terminated = false;
-	return (Value) { .type = result, .pointer = pointer, .storage = STORAGE_CLASS_FUNCTION };
+	return (Value) { .type = result, .pointer = pointer, .storage = StorageClass.FUNCTION };
 }
 
 <*
@@ -1099,7 +1099,7 @@ fn Id Codegen.matrix_add(&self, Id left, Id right, Type* matrix, bool subtract)
 		{
 			Id a = self.func.composite_extract(column_type, left, (uint)i);
 			Id b = self.func.composite_extract(column_type, right, (uint)i);
-			columns[i] = self.func.binop(subtract ? OP_F_SUB : OP_F_ADD, column_type, a, b);
+			columns[i] = self.func.binop(subtract ? Opcode.F_SUB : Opcode.F_ADD, column_type, a, b);
 		}
 		return self.func.composite_construct(self.type_id(matrix), columns);
 	};
@@ -1157,29 +1157,29 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 	{
 		if (lt.kind == MATRIX && rt.kind == VECTOR)
 		{
-			return self.func.binop(OP_MATRIX_TIMES_VECTOR, self.type_id(rt), left_id, right_id);
+			return self.func.binop(Opcode.MATRIX_TIMES_VECTOR, self.type_id(rt), left_id, right_id);
 		}
 		if (lt.kind == MATRIX && rt.kind == MATRIX)
 		{
-			return self.func.binop(OP_MATRIX_TIMES_MATRIX, self.type_id(lt), left_id, right_id);
+			return self.func.binop(Opcode.MATRIX_TIMES_MATRIX, self.type_id(lt), left_id, right_id);
 		}
 		if (lt.kind == VECTOR && rt.kind == MATRIX)
 		{
-			return self.func.binop(OP_VECTOR_TIMES_MATRIX, self.type_id(lt), left_id, right_id);
+			return self.func.binop(Opcode.VECTOR_TIMES_MATRIX, self.type_id(lt), left_id, right_id);
 		}
 		if (lt.kind == MATRIX && rt.is_scalar())
 		{
-			return self.func.binop(OP_MATRIX_TIMES_SCALAR, self.type_id(lt), left_id, right_id);
+			return self.func.binop(Opcode.MATRIX_TIMES_SCALAR, self.type_id(lt), left_id, right_id);
 		}
 		if (lt.is_scalar() && rt.kind == MATRIX)
 		{
 			// `OpMatrixTimesScalar` takes the matrix first, whichever side the
 			// scalar was written on.
-			return self.func.binop(OP_MATRIX_TIMES_SCALAR, self.type_id(rt), right_id, left_id);
+			return self.func.binop(Opcode.MATRIX_TIMES_SCALAR, self.type_id(rt), right_id, left_id);
 		}
 		if (lt.kind == VECTOR && rt.is_scalar())
 		{
-			return self.func.binop(OP_VECTOR_TIMES_SCALAR, self.type_id(lt), left_id, right_id);
+			return self.func.binop(Opcode.VECTOR_TIMES_SCALAR, self.type_id(lt), left_id, right_id);
 		}
 	}
 
@@ -1223,24 +1223,24 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 
 	switch (op)
 	{
-		case PLUS:    return self.func.binop(is_float ? OP_F_ADD : OP_I_ADD, type, left_id, right_id);
-		case MINUS:   return self.func.binop(is_float ? OP_F_SUB : OP_I_SUB, type, left_id, right_id);
-		case STAR:    return self.func.binop(is_float ? OP_F_MUL : OP_I_MUL, type, left_id, right_id);
-		case SLASH:   return self.func.binop(is_float ? OP_F_DIV : (is_uint ? OP_U_DIV : OP_S_DIV), type, left_id, right_id);
-		case PERCENT: return self.func.binop(is_float ? OP_F_MOD : (is_uint ? OP_U_MOD : OP_S_MOD), type, left_id, right_id);
-		case AMP:     return self.func.binop(OP_BITWISE_AND, type, left_id, right_id);
-		case PIPE:    return self.func.binop(OP_BITWISE_OR, type, left_id, right_id);
-		case CARET:   return self.func.binop(OP_BITWISE_XOR, type, left_id, right_id);
-		case SHL:     return self.func.binop(OP_SHIFT_LEFT_LOGICAL, type, left_id, right_id);
-		case SHR:     return self.func.binop(is_signed ? OP_SHIFT_RIGHT_ARITHMETIC : OP_SHIFT_RIGHT_LOGICAL, type, left_id, right_id);
-		case EQ_EQ:   return self.func.binop(is_float ? OP_F_ORD_EQUAL : OP_I_EQUAL, bool_type, left_id, right_id);
-		case BANG_EQ: return self.func.binop(is_float ? OP_F_ORD_NOT_EQUAL : OP_I_NOT_EQUAL, bool_type, left_id, right_id);
-		case LT:      return self.func.binop(is_float ? OP_F_ORD_LESS_THAN : (is_uint ? OP_U_LESS_THAN : OP_S_LESS_THAN), bool_type, left_id, right_id);
-		case LT_EQ:   return self.func.binop(is_float ? OP_F_ORD_LESS_THAN_EQUAL : (is_uint ? OP_U_LESS_THAN_EQUAL : OP_S_LESS_THAN_EQUAL), bool_type, left_id, right_id);
-		case GT:      return self.func.binop(is_float ? OP_F_ORD_GREATER_THAN : (is_uint ? OP_U_GREATER_THAN : OP_S_GREATER_THAN), bool_type, left_id, right_id);
-		case GT_EQ:   return self.func.binop(is_float ? OP_F_ORD_GREATER_THAN_EQUAL : (is_uint ? OP_U_GREATER_THAN_EQUAL : OP_S_GREATER_THAN_EQUAL), bool_type, left_id, right_id);
-		case AMP_AMP: return self.func.binop(OP_LOGICAL_AND, bool_type, left_id, right_id);
-		case PIPE_PIPE: return self.func.binop(OP_LOGICAL_OR, bool_type, left_id, right_id);
+		case PLUS:    return self.func.binop(is_float ? Opcode.F_ADD : Opcode.I_ADD, type, left_id, right_id);
+		case MINUS:   return self.func.binop(is_float ? Opcode.F_SUB : Opcode.I_SUB, type, left_id, right_id);
+		case STAR:    return self.func.binop(is_float ? Opcode.F_MUL : Opcode.I_MUL, type, left_id, right_id);
+		case SLASH:   return self.func.binop(is_float ? Opcode.F_DIV : (is_uint ? Opcode.U_DIV : Opcode.S_DIV), type, left_id, right_id);
+		case PERCENT: return self.func.binop(is_float ? Opcode.F_MOD : (is_uint ? Opcode.U_MOD : Opcode.S_MOD), type, left_id, right_id);
+		case AMP:     return self.func.binop(Opcode.BITWISE_AND, type, left_id, right_id);
+		case PIPE:    return self.func.binop(Opcode.BITWISE_OR, type, left_id, right_id);
+		case CARET:   return self.func.binop(Opcode.BITWISE_XOR, type, left_id, right_id);
+		case SHL:     return self.func.binop(Opcode.SHIFT_LEFT_LOGICAL, type, left_id, right_id);
+		case SHR:     return self.func.binop(is_signed ? Opcode.SHIFT_RIGHT_ARITHMETIC : Opcode.SHIFT_RIGHT_LOGICAL, type, left_id, right_id);
+		case EQ_EQ:   return self.func.binop(is_float ? Opcode.F_ORD_EQUAL : Opcode.I_EQUAL, bool_type, left_id, right_id);
+		case BANG_EQ: return self.func.binop(is_float ? Opcode.F_ORD_NOT_EQUAL : Opcode.I_NOT_EQUAL, bool_type, left_id, right_id);
+		case LT:      return self.func.binop(is_float ? Opcode.F_ORD_LESS_THAN : (is_uint ? Opcode.U_LESS_THAN : Opcode.S_LESS_THAN), bool_type, left_id, right_id);
+		case LT_EQ:   return self.func.binop(is_float ? Opcode.F_ORD_LESS_THAN_EQUAL : (is_uint ? Opcode.U_LESS_THAN_EQUAL : Opcode.S_LESS_THAN_EQUAL), bool_type, left_id, right_id);
+		case GT:      return self.func.binop(is_float ? Opcode.F_ORD_GREATER_THAN : (is_uint ? Opcode.U_GREATER_THAN : Opcode.S_GREATER_THAN), bool_type, left_id, right_id);
+		case GT_EQ:   return self.func.binop(is_float ? Opcode.F_ORD_GREATER_THAN_EQUAL : (is_uint ? Opcode.U_GREATER_THAN_EQUAL : Opcode.S_GREATER_THAN_EQUAL), bool_type, left_id, right_id);
+		case AMP_AMP: return self.func.binop(Opcode.LOGICAL_AND, bool_type, left_id, right_id);
+		case PIPE_PIPE: return self.func.binop(Opcode.LOGICAL_OR, bool_type, left_id, right_id);
 		default:
 			self.fail(expr.line, expr.column, "unsupported operator");
 			return CODEGEN_ERROR~;
@@ -1270,14 +1270,14 @@ fn Id? Codegen.coerce(&self, Value value, Type* expected, Expr* expr)
 	// An integer literal in a float slot becomes a float.
 	if (expected.kind == FLOAT && value.type.kind == INT)
 	{
-		return self.func.unop(OP_CONVERT_S_TO_F, self.type_id(expected), self.rvalue(value));
+		return self.func.unop(Opcode.CONVERT_S_TO_F, self.type_id(expected), self.rvalue(value));
 	}
 	// int and uint are both 32 bits, so moving between them is a reinterpretation
 	// and not a conversion - which is why `uint i = 0;` is allowed, as in C.
 	if ((expected.kind == UINT && value.type.kind == INT)
 		|| (expected.kind == INT && value.type.kind == UINT))
 	{
-		return self.func.unop(OP_BITCAST, self.type_id(expected), self.rvalue(value));
+		return self.func.unop(Opcode.BITCAST, self.type_id(expected), self.rvalue(value));
 	}
 	if (expected.kind == VECTOR && value.type.is_scalar())
 	{
@@ -1581,7 +1581,7 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 	{
 		bool by_ref = (sig.has_receiver && sig.receiver_ref && i == 0) || sig.refs[i];
 		param_ids[i] = by_ref
-			? self.pointer_to(STORAGE_CLASS_FUNCTION, param)
+			? self.pointer_to(StorageClass.FUNCTION, param)
 			: self.type_id(param);
 	}
 	Id fn_type = self.mod.type_function(self.type_id(sig.return_type), param_ids);
@@ -1613,13 +1613,13 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 		{
 			// The parameter already is a pointer into the caller's storage, so
 			// the receiver's members are reached through it directly.
-			Id pid = function.param(self.pointer_to(STORAGE_CLASS_FUNCTION, receiver));
+			Id pid = function.param(self.pointer_to(StorageClass.FUNCTION, receiver));
 			self.locals.push({ .name = sig.receiver_name, .type = receiver, .pointer = pid });
 		}
 		else
 		{
 			Id pid     = function.param(self.type_id(receiver));
-			Id pointer = function.local(self.pointer_to(STORAGE_CLASS_FUNCTION, receiver));
+			Id pointer = function.local(self.pointer_to(StorageClass.FUNCTION, receiver));
 			function.store(pointer, pid);
 			self.locals.push({ .name = sig.receiver_name, .type = receiver, .pointer = pointer });
 		}
@@ -1633,13 +1633,13 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 		{
 			// An `out`/`inout` parameter already is a pointer into the caller's
 			// storage, so the name is bound straight to it.
-			Id pid = function.param(self.pointer_to(STORAGE_CLASS_FUNCTION, param));
+			Id pid = function.param(self.pointer_to(StorageClass.FUNCTION, param));
 			self.locals.push({ .name = sig.names[i], .type = param, .pointer = pid });
 		}
 		else
 		{
 			Id pid     = function.param(self.type_id(param));
-			Id pointer = function.local(self.pointer_to(STORAGE_CLASS_FUNCTION, param));
+			Id pointer = function.local(self.pointer_to(StorageClass.FUNCTION, param));
 			function.store(pointer, pid);
 			self.locals.push({ .name = sig.names[i], .type = param, .pointer = pointer });
 		}
@@ -1714,7 +1714,7 @@ fn Value? Codegen.user_call(&self, Expr* expr, String name, Value* receiver)
 		usz index = (usz)i + offset;
 		if (sig.refs[index])
 		{
-			if (value.pointer == NO_ID || value.storage != STORAGE_CLASS_FUNCTION)
+			if (value.pointer == NO_ID || value.storage != StorageClass.FUNCTION)
 			{
 				self.fail(expr.line, expr.column, "an out or inout argument must be a variable");
 				return CODEGEN_ERROR~;
@@ -1741,10 +1741,10 @@ fn Value? Codegen.user_call(&self, Expr* expr, String name, Value* receiver)
 *>
 fn Id Codegen.receiver_pointer(&self, Value base)
 {
-	if (base.pointer != NO_ID && base.storage == STORAGE_CLASS_FUNCTION) return base.pointer;
+	if (base.pointer != NO_ID && base.storage == StorageClass.FUNCTION) return base.pointer;
 
 	Id id  = self.rvalue(base);
-	Id ptr = self.func.local(self.pointer_to(STORAGE_CLASS_FUNCTION, base.type));
+	Id ptr = self.func.local(self.pointer_to(StorageClass.FUNCTION, base.type));
 	self.func.store(ptr, id);
 	return ptr;
 }
@@ -1817,8 +1817,8 @@ fn Value? Codegen.non_uniform_call(&self, Expr* expr)
 	}
 
 	Id id = self.rvalue(index);
-	self.mod.decorate(id, DECORATION_NON_UNIFORM);
-	self.mod.capability(CAPABILITY_SHADER_NON_UNIFORM);
+	self.mod.decorate(id, Decoration.NON_UNIFORM);
+	self.mod.capability(Capability.SHADER_NON_UNIFORM);
 	self.mod.extension("SPV_EXT_descriptor_indexing");
 	return (Value) { .type = index.type, .id = id };
 }
@@ -1857,7 +1857,7 @@ fn Value? Codegen.atomic_add_call(&self, Expr* expr)
 	Type* uint_t    = self.types.find("uint");
 	Id    scope     = self.mod.const_u32(self.type_id(uint_t), 1); // Device
 	Id    semantics = self.mod.const_u32(self.type_id(uint_t), 0); // Relaxed
-	Id    result    = self.func.emit(OP_ATOMIC_I_ADD, self.type_id(uint_t),
+	Id    result    = self.func.emit(Opcode.ATOMIC_I_ADD, self.type_id(uint_t),
 		dest.pointer, scope, semantics, self.rvalue(value));
 	return (Value) { .type = uint_t, .id = result };
 }
@@ -1905,7 +1905,7 @@ fn Value? Codegen.select_call(&self, Expr* expr)
 		condition_id = self.splat(self.vector_of(self.types.find("bool"), result.count), condition_id);
 	}
 
-	Id id = self.func.emit(OP_SELECT, self.type_id(result),
+	Id id = self.func.emit(Opcode.SELECT, self.type_id(result),
 		condition_id, self.rvalue(when_true), self.rvalue(when_false));
 	return (Value) { .type = result, .id = id };
 }
@@ -1933,11 +1933,11 @@ fn Value? Codegen.construct(&self, Expr* expr, Type* type)
 		Value source = self.expression(args[0])!;
 		if (source.type == type) return (Value) { .type = type, .id = self.rvalue(source) };
 
-		uint opcode;
+		Opcode opcode;
 		Type* from = source.type.scalar();
-		if (type.kind == FLOAT)     { opcode = from.kind == UINT ? OP_CONVERT_U_TO_F : OP_CONVERT_S_TO_F; }
-		else if (from.kind == FLOAT) { opcode = type.kind == UINT ? OP_CONVERT_F_TO_U : OP_CONVERT_F_TO_S; }
-		else                        { opcode = OP_BITCAST; }
+		if (type.kind == FLOAT)     { opcode = from.kind == UINT ? Opcode.CONVERT_U_TO_F : Opcode.CONVERT_S_TO_F; }
+		else if (from.kind == FLOAT) { opcode = type.kind == UINT ? Opcode.CONVERT_F_TO_U : Opcode.CONVERT_F_TO_S; }
+		else                        { opcode = Opcode.BITCAST; }
 
 		return (Value) { .type = type, .id = self.func.unop(opcode, self.type_id(type), self.rvalue(source)) };
 	}
@@ -2014,16 +2014,16 @@ fn Id Codegen.convert_scalar(&self, Id id, Type* from, Type* to)
 	if (from == to) return id;
 	if (to.kind == FLOAT && from.kind != FLOAT)
 	{
-		return self.func.unop(from.kind == UINT ? OP_CONVERT_U_TO_F : OP_CONVERT_S_TO_F, self.type_id(to), id);
+		return self.func.unop(from.kind == UINT ? Opcode.CONVERT_U_TO_F : Opcode.CONVERT_S_TO_F, self.type_id(to), id);
 	}
 	if (to.kind != FLOAT && from.kind == FLOAT)
 	{
-		return self.func.unop(to.kind == UINT ? OP_CONVERT_F_TO_U : OP_CONVERT_F_TO_S, self.type_id(to), id);
+		return self.func.unop(to.kind == UINT ? Opcode.CONVERT_F_TO_U : Opcode.CONVERT_F_TO_S, self.type_id(to), id);
 	}
 	// int and uint are both 32 bits, so the bits move unchanged.
 	if (to.kind != FLOAT && from.kind != FLOAT && to != from && to.is_scalar() && from.is_scalar())
 	{
-		return self.func.unop(OP_BITCAST, self.type_id(to), id);
+		return self.func.unop(Opcode.BITCAST, self.type_id(to), id);
 	}
 	return id;
 }
@@ -2121,20 +2121,20 @@ fn Value? Codegen.sample_expression(&self, Expr* expr, Value texture, String wri
 	{
 		Value gx = self.expression(expr.call.args[1])!;
 		Value gy = self.expression(expr.call.args[2])!;
-		result = self.func.emit(OP_IMAGE_SAMPLE_EXPLICIT_LOD, self.type_id(float4), image, coord,
-			IMAGE_OPERAND_GRAD, self.rvalue(gx), self.rvalue(gy));
+		result = self.func.emit(Opcode.IMAGE_SAMPLE_EXPLICIT_LOD, self.type_id(float4), image, coord,
+			(Id)ImageOperand.GRAD, self.rvalue(gx), self.rvalue(gy));
 	}
 	else if (method == "sample_bias")
 	{
 		Value bias = self.expression(expr.call.args[1])!;
-		result = self.func.emit(OP_IMAGE_SAMPLE_IMPLICIT_LOD, self.type_id(float4), image, coord,
-			IMAGE_OPERAND_BIAS, self.rvalue(bias));
+		result = self.func.emit(Opcode.IMAGE_SAMPLE_IMPLICIT_LOD, self.type_id(float4), image, coord,
+			(Id)ImageOperand.BIAS, self.rvalue(bias));
 	}
 	else // sample_cmp_level_zero
 	{
 		Value dref = self.expression(expr.call.args[1])!;
-		result = self.func.emit(OP_IMAGE_SAMPLE_DREF_EXPLICIT_LOD, self.type_id(float_t), image, coord,
-			self.rvalue(dref), IMAGE_OPERAND_LOD, self.const_float(0.0));
+		result = self.func.emit(Opcode.IMAGE_SAMPLE_DREF_EXPLICIT_LOD, self.type_id(float_t), image, coord,
+			self.rvalue(dref), (Id)ImageOperand.LOD, self.const_float(0.0));
 		result_type = float_t;
 	}
 
@@ -2225,11 +2225,11 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 	switch (name)
 	{
 		case "dot":
-			return (Value) { .type = float_t, .id = self.func.binop(OP_DOT, self.type_id(float_t), args[0], args[1]) };
+			return (Value) { .type = float_t, .id = self.func.binop(Opcode.DOT, self.type_id(float_t), args[0], args[1]) };
 		case "transpose":
 			// A floatCxR transposes to floatRxC.
 			Type* result = self.types.find(string::format(self.allocator, "float%dx%d", first.element.count, first.count));
-			return (Value) { .type = result, .id = self.func.unop(OP_TRANSPOSE, self.type_id(result), args[0]) };
+			return (Value) { .type = result, .id = self.func.unop(Opcode.TRANSPOSE, self.type_id(result), args[0]) };
 		case "asuint":
 		case "asint":
 		case "asfloat":
@@ -2237,20 +2237,20 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 			String name_of = name == "asuint" ? "uint" : (name == "asint" ? "int" : "float");
 			Type*  scalar  = self.types.find(name_of);
 			Type*  result  = first.components() > 1 ? self.vector_of(scalar, first.components()) : scalar;
-			return (Value) { .type = result, .id = self.func.unop(OP_BITCAST, self.type_id(result), args[0]) };
+			return (Value) { .type = result, .id = self.func.unop(Opcode.BITCAST, self.type_id(result), args[0]) };
 		}
 		case "any":
 		case "all":
 		{
 			Type* bool_t = self.types.find("bool");
-			uint  opcode = name == "any" ? OP_ANY : OP_ALL;
+			Opcode opcode = name == "any" ? Opcode.ANY : Opcode.ALL;
 			return (Value) { .type = bool_t, .id = self.func.unop(opcode, self.type_id(bool_t), args[0]) };
 		}
 		default:
 			break;
 	}
 
-	uint  instruction;
+	GlslOp instruction;
 	Type* result = first;
 
 	// A GLSL.std.450 instruction wants every operand the same type as its
@@ -2263,47 +2263,47 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 
 	switch (name)
 	{
-		case "abs":         instruction = self.by_sign(GLSL_FABS, GLSL_FABS, GLSL_SABS, result);
-		case "sign":        instruction = self.by_sign(GLSL_FSIGN, GLSL_FSIGN, GLSL_SSIGN, result);
-		case "floor":       instruction = GLSL_FLOOR;
-		case "ceil":        instruction = GLSL_CEIL;
-		case "round":       instruction = GLSL_ROUND;
-		case "fract":       instruction = GLSL_FRACT;
-		case "sin":         instruction = GLSL_SIN;
-		case "cos":         instruction = GLSL_COS;
-		case "tan":         instruction = GLSL_TAN;
-		case "asin":        instruction = GLSL_ASIN;
-		case "acos":        instruction = GLSL_ACOS;
-		case "atan":        instruction = GLSL_ATAN;
-		case "atan2":       instruction = GLSL_ATAN2;
-		case "pow":         instruction = GLSL_POW;
-		case "exp":         instruction = GLSL_EXP;
-		case "log":         instruction = GLSL_LOG;
-		case "exp2":        instruction = GLSL_EXP2;
-		case "log2":        instruction = GLSL_LOG2;
-		case "sqrt":        instruction = GLSL_SQRT;
-		case "inversesqrt": instruction = GLSL_INVERSE_SQRT;
-		case "min":         instruction = self.by_sign(GLSL_FMIN, GLSL_UMIN, GLSL_SMIN, result);
-		case "max":         instruction = self.by_sign(GLSL_FMAX, GLSL_UMAX, GLSL_SMAX, result);
-		case "clamp":       instruction = self.by_sign(GLSL_FCLAMP, GLSL_UCLAMP, GLSL_SCLAMP, result);
-		case "mix":         instruction = GLSL_FMIX;
-		case "lerp":        instruction = GLSL_FMIX;
-		case "inversesqrt": instruction = GLSL_INVERSE_SQRT;
-		case "rsqrt":       instruction = GLSL_INVERSE_SQRT;
-		case "step":        instruction = GLSL_STEP;
-		case "smoothstep":  instruction = GLSL_SMOOTHSTEP;
-		case "normalize":   instruction = GLSL_NORMALIZE;
-		case "reflect":     instruction = GLSL_REFLECT;
-		case "refract":     instruction = GLSL_REFRACT;
-		case "cross":       instruction = GLSL_CROSS;
-		case "length":      instruction = GLSL_LENGTH;   result = float_t;
-		case "distance":    instruction = GLSL_DISTANCE; result = float_t;
+		case "abs":         instruction = self.by_sign(GlslOp.FABS, GlslOp.FABS, GlslOp.SABS, result);
+		case "sign":        instruction = self.by_sign(GlslOp.FSIGN, GlslOp.FSIGN, GlslOp.SSIGN, result);
+		case "floor":       instruction = GlslOp.FLOOR;
+		case "ceil":        instruction = GlslOp.CEIL;
+		case "round":       instruction = GlslOp.ROUND;
+		case "fract":       instruction = GlslOp.FRACT;
+		case "sin":         instruction = GlslOp.SIN;
+		case "cos":         instruction = GlslOp.COS;
+		case "tan":         instruction = GlslOp.TAN;
+		case "asin":        instruction = GlslOp.ASIN;
+		case "acos":        instruction = GlslOp.ACOS;
+		case "atan":        instruction = GlslOp.ATAN;
+		case "atan2":       instruction = GlslOp.ATAN2;
+		case "pow":         instruction = GlslOp.POW;
+		case "exp":         instruction = GlslOp.EXP;
+		case "log":         instruction = GlslOp.LOG;
+		case "exp2":        instruction = GlslOp.EXP2;
+		case "log2":        instruction = GlslOp.LOG2;
+		case "sqrt":        instruction = GlslOp.SQRT;
+		case "inversesqrt": instruction = GlslOp.INVERSE_SQRT;
+		case "min":         instruction = self.by_sign(GlslOp.FMIN, GlslOp.UMIN, GlslOp.SMIN, result);
+		case "max":         instruction = self.by_sign(GlslOp.FMAX, GlslOp.UMAX, GlslOp.SMAX, result);
+		case "clamp":       instruction = self.by_sign(GlslOp.FCLAMP, GlslOp.UCLAMP, GlslOp.SCLAMP, result);
+		case "mix":         instruction = GlslOp.FMIX;
+		case "lerp":        instruction = GlslOp.FMIX;
+		case "inversesqrt": instruction = GlslOp.INVERSE_SQRT;
+		case "rsqrt":       instruction = GlslOp.INVERSE_SQRT;
+		case "step":        instruction = GlslOp.STEP;
+		case "smoothstep":  instruction = GlslOp.SMOOTHSTEP;
+		case "normalize":   instruction = GlslOp.NORMALIZE;
+		case "reflect":     instruction = GlslOp.REFLECT;
+		case "refract":     instruction = GlslOp.REFRACT;
+		case "cross":       instruction = GlslOp.CROSS;
+		case "length":      instruction = GlslOp.LENGTH;   result = float_t;
+		case "distance":    instruction = GlslOp.DISTANCE; result = float_t;
 		case "saturate":
 			// Not a GLSL.std.450 instruction: clamp(x, 0, 1) spelled out.
 			Id zero = self.const_float(0.0);
 			Id one  = self.const_float(1.0);
 			if (first.kind == VECTOR) { zero = self.splat(first, zero); one = self.splat(first, one); }
-			return (Value) { .type = first, .id = self.ext_inst(GLSL_FCLAMP, first, (Id[]) { args[0], zero, one }) };
+			return (Value) { .type = first, .id = self.ext_inst(GlslOp.FCLAMP, first, (Id[]) { args[0], zero, one }) };
 		default:
 			self.fail(expr.line, expr.column, string::format(self.allocator, "unknown function `%s`", name));
 			return CODEGEN_ERROR~;
@@ -2320,14 +2320,16 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 	return (Value) { .type = result, .id = self.ext_inst(instruction, result, args.array_view()) };
 }
 
-fn Id Codegen.ext_inst(&self, uint instruction, Type* result, Id[] args)
+fn Id Codegen.ext_inst(&self, GlslOp instruction, Type* result, Id[] args)
 {
 	@pool() {
 		Id[] operands = alloc::alloc_array(tmem, Id, 2 + args.len);
+		// The instruction number is a word in the operand list, like every
+		// other operand: `GlslOp` stops at this boundary.
 		operands[0] = self.glsl;
-		operands[1] = instruction;
+		operands[1] = (Id)instruction;
 		if (args.len) operands[2..] = args[..];
-		return self.func.emit_slice(OP_EXT_INST, self.type_id(result), operands);
+		return self.func.emit_slice(Opcode.EXT_INST, self.type_id(result), operands);
 	};
 }
 
@@ -2352,7 +2354,7 @@ fn void? Codegen.store_initializer(&self, Id pointer, Type* type, Expr* expr)
 	foreach (i, element : expr.initializer.elements)
 	{
 		Id slot = self.func.access_chain(
-			self.pointer_to(STORAGE_CLASS_FUNCTION, type.element),
+			self.pointer_to(StorageClass.FUNCTION, type.element),
 			pointer,
 			(Id[]) { self.const_int((int)i) });
 		Value value = self.expression(element)!;
@@ -2389,7 +2391,7 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 				self.fail(stmt.line, stmt.column, "a runtime-sized array is only a module-level resource");
 				return CODEGEN_ERROR~;
 			}
-			Id pointer = self.func.local(self.pointer_to(STORAGE_CLASS_FUNCTION, type));
+			Id pointer = self.func.local(self.pointer_to(StorageClass.FUNCTION, type));
 			self.mod.name(pointer, stmt.decl.name);
 			if (stmt.decl.value)
 			{

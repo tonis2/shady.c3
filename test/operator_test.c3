@@ -169,7 +169,7 @@ fn float4 frag(FragmentIn input) @fragment
 `));
 	defer free(spirv);
 
-	test::@check(shady_support::has_opcode(spirv, shady::OP_COMPOSITE_INSERT),
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.COMPOSITE_INSERT),
 		"the component write is a composite insert");
 }
 
@@ -226,7 +226,7 @@ fn float4 frag(FragmentIn input) @fragment
 `));
 	defer free(spirv);
 
-	test::@check(shady_support::has_opcode(spirv, shady::OP_U_DIV), "a uint divide is OpUDiv");
-	test::@check(shady_support::has_opcode(spirv, shady::OP_U_MOD), "a uint remainder is OpUMod");
-	test::@check(shady_support::has_opcode(spirv, shady::OP_U_LESS_THAN), "a uint compare is OpULessThan");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.U_DIV), "a uint divide is OpUDiv");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.U_MOD), "a uint remainder is OpUMod");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.U_LESS_THAN), "a uint compare is OpULessThan");
 }

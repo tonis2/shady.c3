@@ -107,14 +107,14 @@ fn float4 frag(FragmentIn input) @fragment
 `);
 	defer free(spirv);
 
-	test::@check(shady_support::has_capability(spirv, shady::CAPABILITY_RUNTIME_DESCRIPTOR_ARRAY),
+	test::@check(shady_support::has_capability(spirv, shady::Capability.RUNTIME_DESCRIPTOR_ARRAY),
 		"a runtime-sized descriptor array needs RuntimeDescriptorArray");
-	test::@check(shady_support::has_capability(spirv, shady::CAPABILITY_SHADER_NON_UNIFORM),
+	test::@check(shady_support::has_capability(spirv, shady::Capability.SHADER_NON_UNIFORM),
 		"a non-uniform index needs ShaderNonUniform");
-	test::@check(shady_support::has_decoration(spirv, shady::DECORATION_NON_UNIFORM),
+	test::@check(shady_support::has_decoration(spirv, shady::Decoration.NON_UNIFORM),
 		"the index should carry the NonUniform decoration");
-	test::@check(shady_support::has_decoration_value(spirv, shady::DECORATION_DESCRIPTOR_SET, 0)
-		&& shady_support::has_decoration_value(spirv, shady::DECORATION_DESCRIPTOR_SET, 1),
+	test::@check(shady_support::has_decoration_value(spirv, shady::Decoration.DESCRIPTOR_SET, 0)
+		&& shady_support::has_decoration_value(spirv, shady::Decoration.DESCRIPTOR_SET, 1),
 		"the module should use both set 0 and set 1");
 }
 

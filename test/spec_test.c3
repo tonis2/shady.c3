@@ -35,15 +35,15 @@ fn void spec_constants_are_emitted_with_their_ids() @test
 	char[] spirv = shady_support::build(SPECS);
 	defer free(spirv);
 
-	test::@check(shady_support::has_opcode(spirv, shady::OP_SPEC_CONSTANT_TRUE),
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.SPEC_CONSTANT_TRUE),
 		"a bool spec constant should be OpSpecConstantTrue");
-	test::@check(shady_support::has_opcode(spirv, shady::OP_SPEC_CONSTANT),
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.SPEC_CONSTANT),
 		"a uint or float spec constant should be OpSpecConstant");
-	test::@check(shady_support::has_decoration_value(spirv, shady::DECORATION_SPEC_ID, 0),
+	test::@check(shady_support::has_decoration_value(spirv, shady::Decoration.SPEC_ID, 0),
 		"spec id 0 should be decorated");
-	test::@check(shady_support::has_decoration_value(spirv, shady::DECORATION_SPEC_ID, 1),
+	test::@check(shady_support::has_decoration_value(spirv, shady::Decoration.SPEC_ID, 1),
 		"spec id 1 should be decorated");
-	test::@check(shady_support::has_decoration_value(spirv, shady::DECORATION_SPEC_ID, 2),
+	test::@check(shady_support::has_decoration_value(spirv, shady::Decoration.SPEC_ID, 2),
 		"spec id 2 should be decorated");
 }
 
@@ -76,7 +76,7 @@ fn float4 frag(FragmentIn input) @fragment
 `);
 	defer free(spirv);
 
-	test::@check(!shady_support::has_decoration(spirv, shady::DECORATION_SPEC_ID),
+	test::@check(!shady_support::has_decoration(spirv, shady::Decoration.SPEC_ID),
 		"a const without @spec should not be decorated");
 }
 

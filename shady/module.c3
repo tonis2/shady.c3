@@ -29,7 +29,7 @@ alias IdList = List{Id};
 *>
 struct CachedDecl @local
 {
-	uint  opcode;
+	Opcode opcode;
 	Id[]  operands;
 	Id    result;
 }
@@ -105,18 +105,18 @@ fn Id Module.id(&self) => self.next_id++;
  Append one instruction. The word count in the high half of the first word
  covers the opcode word itself, hence the +1.
 *>
-fn void emit(WordList* section, uint opcode, Id... operands)
+fn void emit(WordList* section, Opcode opcode, Id... operands)
 {
-	section.push(((uint)(1 + operands.len) << 16) | opcode);
+	section.push(((uint)(1 + operands.len) << 16) | (uint)opcode);
 	foreach (word : operands) section.push(word);
 }
 
 <*
  Same, but for instructions whose operand count is not known at the call site.
 *>
-fn void emit_slice(WordList* section, uint opcode, Id[] operands)
+fn void emit_slice(WordList* section, Opcode opcode, Id[] operands)
 {
-	section.push(((uint)(1 + operands.len) << 16) | opcode);
+	section.push(((uint)(1 + operands.len) << 16) | (uint)opcode);
 	foreach (word : operands) section.push(word);
 }
 
@@ -168,7 +168,7 @@ fn Id[] string_words(String text, Allocator allocator) @local
  legitimately different types in SPIR-V, and sharing them would share their
  Offset/Block decorations too.
 *>
-fn Id Module.decl(&self, uint opcode, Id result_type, Id[] operands, bool dedupe)
+fn Id Module.decl(&self, Opcode opcode, Id result_type, Id[] operands, bool dedupe)
 {
 	bool typed = result_type != NO_ID;
 
@@ -205,7 +205,7 @@ fn Id Module.decl(&self, uint opcode, Id result_type, Id[] operands, bool dedupe
 		self.cache.push({ .opcode = opcode, .operands = kept, .result = result });
 	}
 
-	self.declarations.push(((uint)((typed ? 3 : 2) + operands.len) << 16) | opcode);
+	self.declarations.push(((uint)((typed ? 3 : 2) + operands.len) << 16) | (uint)opcode);
 	if (typed) self.declarations.push(result_type);
 	self.declarations.push(result);
 	foreach (word : operands) self.declarations.push(word);
@@ -221,7 +221,7 @@ fn Id Module.decl(&self, uint opcode, Id result_type, Id[] operands, bool dedupe
  definition does, and a later `unique` for the same operands must find it
  rather than minting a second pointer type.
 *>
-fn void Module.cache_result(&self, uint opcode, Id result, Id... operands)
+fn void Module.cache_result(&self, Opcode opcode, Id result, Id... operands)
 {
 	Id[] kept = alloc::alloc_array(self.allocator, Id, operands.len);
 	if (operands.len) kept[..] = operands[..];
@@ -231,22 +231,22 @@ fn void Module.cache_result(&self, uint opcode, Id result, Id... operands)
 <*
  A shared declaration with no result type, i.e. a type: `%r = OpTypeX ...`.
 *>
-fn Id Module.unique(&self, uint opcode, Id... operands) => self.decl(opcode, NO_ID, operands, true);
+fn Id Module.unique(&self, Opcode opcode, Id... operands) => self.decl(opcode, NO_ID, operands, true);
 
 <*
  As `unique`, for operand lists built at runtime.
 *>
-fn Id Module.unique_slice(&self, uint opcode, Id[] operands) => self.decl(opcode, NO_ID, operands, true);
+fn Id Module.unique_slice(&self, Opcode opcode, Id[] operands) => self.decl(opcode, NO_ID, operands, true);
 
 <*
  A shared declaration that carries a result type, i.e. a constant.
 *>
-fn Id Module.unique_typed(&self, uint opcode, Id result_type, Id... operands)
+fn Id Module.unique_typed(&self, Opcode opcode, Id result_type, Id... operands)
 {
 	return self.decl(opcode, result_type, operands, true);
 }
 
-fn Id Module.unique_typed_slice(&self, uint opcode, Id result_type, Id[] operands)
+fn Id Module.unique_typed_slice(&self, Opcode opcode, Id result_type, Id[] operands)
 {
 	return self.decl(opcode, result_type, operands, true);
 }
@@ -254,30 +254,30 @@ fn Id Module.unique_typed_slice(&self, uint opcode, Id result_type, Id[] operand
 <*
  An unshared declaration with no result type - structs and arrays.
 *>
-fn Id Module.declare(&self, uint opcode, Id... operands) => self.decl(opcode, NO_ID, operands, false);
+fn Id Module.declare(&self, Opcode opcode, Id... operands) => self.decl(opcode, NO_ID, operands, false);
 
-fn Id Module.declare_slice(&self, uint opcode, Id[] operands) => self.decl(opcode, NO_ID, operands, false);
+fn Id Module.declare_slice(&self, Opcode opcode, Id[] operands) => self.decl(opcode, NO_ID, operands, false);
 
 <*
  An unshared declaration carrying a result type - global variables, which must
  each be their own object even when two have the same pointer type.
 *>
-fn Id Module.declare_typed(&self, uint opcode, Id result_type, Id... operands)
+fn Id Module.declare_typed(&self, Opcode opcode, Id result_type, Id... operands)
 {
 	return self.decl(opcode, result_type, operands, false);
 }
 
 // --- Module-level directives -------------------------------------------------
 
-fn void Module.capability(&self, uint capability)
+fn void Module.capability(&self, Capability capability)
 {
-	emit(&self.capabilities, OP_CAPABILITY, capability);
+	emit(&self.capabilities, Opcode.CAPABILITY, (Id)capability);
 }
 
 fn void Module.extension(&self, String name)
 {
 	@pool() {
-		emit_slice(&self.extensions, OP_EXTENSION, string_words(name, tmem));
+		emit_slice(&self.extensions, Opcode.EXTENSION, string_words(name, tmem));
 	};
 }
 
@@ -286,17 +286,17 @@ fn Id Module.ext_inst_import(&self, String name)
 	Id result = self.id();
 	@pool() {
 		Id[] text = string_words(name, tmem);
-		self.ext_imports.push(((uint)(2 + text.len) << 16) | OP_EXT_INST_IMPORT);
+		self.ext_imports.push(((uint)(2 + text.len) << 16) | (uint)Opcode.EXT_INST_IMPORT);
 		self.ext_imports.push(result);
 		foreach (word : text) self.ext_imports.push(word);
 	};
 	return result;
 }
 
-fn void Module.set_memory_model(&self, uint addressing_model = ADDRESSING_MODEL_LOGICAL, uint memory_model = MEMORY_MODEL_GLSL450)
+fn void Module.set_memory_model(&self, AddressingModel addressing_model = AddressingModel.LOGICAL, MemoryModel memory_model = MemoryModel.GLSL450)
 {
 	self.memory_model.clear();
-	emit(&self.memory_model, OP_MEMORY_MODEL, addressing_model, memory_model);
+	emit(&self.memory_model, Opcode.MEMORY_MODEL, (Id)addressing_model, (Id)memory_model);
 }
 
 <*
@@ -306,23 +306,23 @@ fn void Module.set_memory_model(&self, uint addressing_model = ADDRESSING_MODEL_
  reach, statically. Getting this wrong is the most common way to produce a
  module that validates but misbehaves, so it is explicit rather than inferred.
 *>
-fn void Module.entry_point(&self, uint execution_model, Id function, String name, Id[] interface_ids = {})
+fn void Module.entry_point(&self, ExecutionModel execution_model, Id function, String name, Id[] interface_ids = {})
 {
 	@pool() {
 		Id[] text = string_words(name, tmem);
-		self.entry_points.push(((uint)(3 + text.len + interface_ids.len) << 16) | OP_ENTRY_POINT);
-		self.entry_points.push(execution_model);
+		self.entry_points.push(((uint)(3 + text.len + interface_ids.len) << 16) | (uint)Opcode.ENTRY_POINT);
+		self.entry_points.push((uint)execution_model);
 		self.entry_points.push(function);
 		foreach (word : text) self.entry_points.push(word);
 		foreach (id : interface_ids) self.entry_points.push(id);
 	};
 }
 
-fn void Module.execution_mode(&self, Id function, uint mode, Id... operands)
+fn void Module.execution_mode(&self, Id function, ExecutionMode mode, Id... operands)
 {
-	self.execution_modes.push(((uint)(3 + operands.len) << 16) | OP_EXECUTION_MODE);
+	self.execution_modes.push(((uint)(3 + operands.len) << 16) | (uint)Opcode.EXECUTION_MODE);
 	self.execution_modes.push(function);
-	self.execution_modes.push(mode);
+	self.execution_modes.push((uint)mode);
 	foreach (word : operands) self.execution_modes.push(word);
 }
 
@@ -332,7 +332,7 @@ fn void Module.name(&self, Id target, String text)
 {
 	@pool() {
 		Id[] words = string_words(text, tmem);
-		self.debug_names.push(((uint)(2 + words.len) << 16) | OP_NAME);
+		self.debug_names.push(((uint)(2 + words.len) << 16) | (uint)Opcode.NAME);
 		self.debug_names.push(target);
 		foreach (word : words) self.debug_names.push(word);
 	};
@@ -342,7 +342,7 @@ fn void Module.member_name(&self, Id target, uint member, String text)
 {
 	@pool() {
 		Id[] words = string_words(text, tmem);
-		self.debug_names.push(((uint)(3 + words.len) << 16) | OP_MEMBER_NAME);
+		self.debug_names.push(((uint)(3 + words.len) << 16) | (uint)Opcode.MEMBER_NAME);
 		self.debug_names.push(target);
 		self.debug_names.push(member);
 		foreach (word : words) self.debug_names.push(word);
@@ -351,20 +351,20 @@ fn void Module.member_name(&self, Id target, uint member, String text)
 
 // --- Decorations -------------------------------------------------------------
 
-fn void Module.decorate(&self, Id target, uint decoration, Id... operands)
+fn void Module.decorate(&self, Id target, Decoration decoration, Id... operands)
 {
-	self.annotations.push(((uint)(3 + operands.len) << 16) | OP_DECORATE);
+	self.annotations.push(((uint)(3 + operands.len) << 16) | (uint)Opcode.DECORATE);
 	self.annotations.push(target);
-	self.annotations.push(decoration);
+	self.annotations.push((uint)decoration);
 	foreach (word : operands) self.annotations.push(word);
 }
 
-fn void Module.member_decorate(&self, Id target, uint member, uint decoration, Id... operands)
+fn void Module.member_decorate(&self, Id target, uint member, Decoration decoration, Id... operands)
 {
-	self.annotations.push(((uint)(4 + operands.len) << 16) | OP_MEMBER_DECORATE);
+	self.annotations.push(((uint)(4 + operands.len) << 16) | (uint)Opcode.MEMBER_DECORATE);
 	self.annotations.push(target);
 	self.annotations.push(member);
-	self.annotations.push(decoration);
+	self.annotations.push((uint)decoration);
 	foreach (word : operands) self.annotations.push(word);
 }
 

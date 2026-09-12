@@ -28,7 +28,7 @@ struct Function
  Open a function. The entry block's OpLabel is emitted for you when the
  function is closed, so parameters can still be declared afterwards.
 *>
-fn Function Module.begin_function(&self, Id result_type, Id function_type, uint control = FUNCTION_CONTROL_NONE)
+fn Function Module.begin_function(&self, Id result_type, Id function_type, FunctionControl control = FunctionControl.NONE)
 {
 	Function f = {
 		.mod         = self,
@@ -46,7 +46,7 @@ fn Function Module.begin_function(&self, Id result_type, Id function_type, uint 
 fn Id Function.param(&self, Id type)
 {
 	Id result = self.mod.id();
-	emit(&self.params, OP_FUNCTION_PARAMETER, type, result);
+	emit(&self.params, Opcode.FUNCTION_PARAMETER, type, result);
 	return result;
 }
 
@@ -59,11 +59,11 @@ fn Id Function.local(&self, Id pointer_type, Id initializer = NO_ID)
 	Id result = self.mod.id();
 	if (initializer != NO_ID)
 	{
-		emit(&self.locals, OP_VARIABLE, pointer_type, result, STORAGE_CLASS_FUNCTION, initializer);
+		emit(&self.locals, Opcode.VARIABLE, pointer_type, result, (Id)StorageClass.FUNCTION, initializer);
 	}
 	else
 	{
-		emit(&self.locals, OP_VARIABLE, pointer_type, result, STORAGE_CLASS_FUNCTION);
+		emit(&self.locals, Opcode.VARIABLE, pointer_type, result, (Id)StorageClass.FUNCTION);
 	}
 	return result;
 }
@@ -71,10 +71,10 @@ fn Id Function.local(&self, Id pointer_type, Id initializer = NO_ID)
 <*
  Emit an instruction that produces a value.
 *>
-fn Id Function.emit(&self, uint opcode, Id result_type, Id... operands)
+fn Id Function.emit(&self, Opcode opcode, Id result_type, Id... operands)
 {
 	Id result = self.mod.id();
-	self.body.push(((uint)(3 + operands.len) << 16) | opcode);
+	self.body.push(((uint)(3 + operands.len) << 16) | (uint)opcode);
 	self.body.push(result_type);
 	self.body.push(result);
 	foreach (word : operands) self.body.push(word);
@@ -84,10 +84,10 @@ fn Id Function.emit(&self, uint opcode, Id result_type, Id... operands)
 <*
  As `emit`, for operand lists built at runtime.
 *>
-fn Id Function.emit_slice(&self, uint opcode, Id result_type, Id[] operands)
+fn Id Function.emit_slice(&self, Opcode opcode, Id result_type, Id[] operands)
 {
 	Id result = self.mod.id();
-	self.body.push(((uint)(3 + operands.len) << 16) | opcode);
+	self.body.push(((uint)(3 + operands.len) << 16) | (uint)opcode);
 	self.body.push(result_type);
 	self.body.push(result);
 	foreach (word : operands) self.body.push(word);
@@ -97,7 +97,7 @@ fn Id Function.emit_slice(&self, uint opcode, Id result_type, Id[] operands)
 <*
  Emit an instruction with no result id, such as OpStore or OpBranch.
 *>
-fn void Function.emit_void(&self, uint opcode, Id... operands)
+fn void Function.emit_void(&self, Opcode opcode, Id... operands)
 {
 	emit_slice(&self.body, opcode, operands);
 }
@@ -116,10 +116,10 @@ fn Id Function.new_label(&self) => self.mod.id();
 *>
 fn void Function.label(&self, Id label)
 {
-	emit(&self.body, OP_LABEL, label);
+	emit(&self.body, Opcode.LABEL, label);
 }
 
-fn void Function.branch(&self, Id target) => emit(&self.body, OP_BRANCH, target);
+fn void Function.branch(&self, Id target) => emit(&self.body, Opcode.BRANCH, target);
 
 <*
  A conditional branch. In structured control flow this must be preceded by
@@ -127,22 +127,22 @@ fn void Function.branch(&self, Id target) => emit(&self.body, OP_BRANCH, target)
 *>
 fn void Function.branch_conditional(&self, Id condition, Id true_label, Id false_label)
 {
-	emit(&self.body, OP_BRANCH_CONDITIONAL, condition, true_label, false_label);
+	emit(&self.body, Opcode.BRANCH_CONDITIONAL, condition, true_label, false_label);
 }
 
-fn void Function.selection_merge(&self, Id merge_label, uint control = SELECTION_CONTROL_NONE)
+fn void Function.selection_merge(&self, Id merge_label, SelectionControl control = SelectionControl.NONE)
 {
-	emit(&self.body, OP_SELECTION_MERGE, merge_label, control);
+	emit(&self.body, Opcode.SELECTION_MERGE, merge_label, (Id)control);
 }
 
-fn void Function.loop_merge(&self, Id merge_label, Id continue_label, uint control = LOOP_CONTROL_NONE)
+fn void Function.loop_merge(&self, Id merge_label, Id continue_label, LoopControl control = LoopControl.NONE)
 {
-	emit(&self.body, OP_LOOP_MERGE, merge_label, continue_label, control);
+	emit(&self.body, Opcode.LOOP_MERGE, merge_label, continue_label, (Id)control);
 }
 
-fn void Function.ret(&self) => emit(&self.body, OP_RETURN);
-fn void Function.ret_value(&self, Id value) => emit(&self.body, OP_RETURN_VALUE, value);
-fn void Function.discard(&self) => emit(&self.body, OP_KILL);
+fn void Function.ret(&self) => emit(&self.body, Opcode.RETURN);
+fn void Function.ret_value(&self, Id value) => emit(&self.body, Opcode.RETURN_VALUE, value);
+fn void Function.discard(&self) => emit(&self.body, Opcode.KILL);
 
 // --- Common instructions -----------------------------------------------------
 
@@ -154,14 +154,14 @@ fn void Function.discard(&self) => emit(&self.body, OP_KILL);
 *>
 fn Id Function.load(&self, Id type, Id pointer, uint alignment = 0)
 {
-	if (alignment) return self.emit(OP_LOAD, type, pointer, MEMORY_ACCESS_ALIGNED, alignment);
-	return self.emit(OP_LOAD, type, pointer);
+	if (alignment) return self.emit(Opcode.LOAD, type, pointer, (Id)MemoryAccess.ALIGNED, alignment);
+	return self.emit(Opcode.LOAD, type, pointer);
 }
 
 fn void Function.store(&self, Id pointer, Id value, uint alignment = 0)
 {
-	if (alignment) { self.emit_void(OP_STORE, pointer, value, MEMORY_ACCESS_ALIGNED, alignment); return; }
-	self.emit_void(OP_STORE, pointer, value);
+	if (alignment) { self.emit_void(Opcode.STORE, pointer, value, (Id)MemoryAccess.ALIGNED, alignment); return; }
+	self.emit_void(Opcode.STORE, pointer, value);
 }
 
 <*
@@ -174,13 +174,13 @@ fn Id Function.access_chain(&self, Id pointer_type, Id base, Id[] indices)
 		Id[] operands = alloc::alloc_array(tmem, Id, 1 + indices.len);
 		operands[0] = base;
 		if (indices.len) operands[1..] = indices[..];
-		return self.emit_slice(OP_ACCESS_CHAIN, pointer_type, operands);
+		return self.emit_slice(Opcode.ACCESS_CHAIN, pointer_type, operands);
 	};
 }
 
 fn Id Function.composite_construct(&self, Id type, Id[] components)
 {
-	return self.emit_slice(OP_COMPOSITE_CONSTRUCT, type, components);
+	return self.emit_slice(Opcode.COMPOSITE_CONSTRUCT, type, components);
 }
 
 <*
@@ -193,7 +193,7 @@ fn Id Function.composite_extract(&self, Id type, Id composite, uint... indices)
 		Id[] operands = alloc::alloc_array(tmem, Id, 1 + indices.len);
 		operands[0] = composite;
 		foreach (i, index : indices) operands[1 + i] = index;
-		return self.emit_slice(OP_COMPOSITE_EXTRACT, type, operands);
+		return self.emit_slice(Opcode.COMPOSITE_EXTRACT, type, operands);
 	};
 }
 
@@ -211,7 +211,7 @@ fn Id Function.composite_insert(&self, Id type, Id composite, Id object, uint...
 		operands[0] = object;
 		operands[1] = composite;
 		foreach (i, index : indices) operands[2 + i] = index;
-		return self.emit_slice(OP_COMPOSITE_INSERT, type, operands);
+		return self.emit_slice(Opcode.COMPOSITE_INSERT, type, operands);
 	};
 }
 
@@ -226,16 +226,16 @@ fn Id Function.vector_shuffle(&self, Id type, Id a, Id b, uint... components)
 		operands[0] = a;
 		operands[1] = b;
 		foreach (i, component : components) operands[2 + i] = component;
-		return self.emit_slice(OP_VECTOR_SHUFFLE, type, operands);
+		return self.emit_slice(Opcode.VECTOR_SHUFFLE, type, operands);
 	};
 }
 
-fn Id Function.binop(&self, uint opcode, Id type, Id left, Id right)
+fn Id Function.binop(&self, Opcode opcode, Id type, Id left, Id right)
 {
 	return self.emit(opcode, type, left, right);
 }
 
-fn Id Function.unop(&self, uint opcode, Id type, Id operand) => self.emit(opcode, type, operand);
+fn Id Function.unop(&self, Opcode opcode, Id type, Id operand) => self.emit(opcode, type, operand);
 
 <*
  Call a function. `function` is the id of an OpFunction, which is emitted
@@ -247,7 +247,7 @@ fn Id Function.call(&self, Id result_type, Id function, Id[] args)
 		Id[] operands = alloc::alloc_array(tmem, Id, 1 + args.len);
 		operands[0] = function;
 		if (args.len) operands[1..] = args[..];
-		return self.emit_slice(OP_FUNCTION_CALL, result_type, operands);
+		return self.emit_slice(Opcode.FUNCTION_CALL, result_type, operands);
 	};
 }
 
@@ -260,7 +260,7 @@ fn Id Function.call(&self, Id result_type, Id function, Id[] args)
 *>
 fn Id Function.sampled_image(&self, Id sampled_image_type, Id image, Id sampler)
 {
-	return self.emit(OP_SAMPLED_IMAGE, sampled_image_type, image, sampler);
+	return self.emit(Opcode.SAMPLED_IMAGE, sampled_image_type, image, sampler);
 }
 
 <*
@@ -269,13 +269,13 @@ fn Id Function.sampled_image(&self, Id sampled_image_type, Id image, Id sampler)
 *>
 fn Id Function.image_sample(&self, Id result_type, Id sampled_image, Id coordinate)
 {
-	return self.emit(OP_IMAGE_SAMPLE_IMPLICIT_LOD, result_type, sampled_image, coordinate);
+	return self.emit(Opcode.IMAGE_SAMPLE_IMPLICIT_LOD, result_type, sampled_image, coordinate);
 }
 
 fn Id Function.image_sample_lod(&self, Id result_type, Id sampled_image, Id coordinate, Id lod)
 {
 	// 2 = the Lod image operand bit.
-	return self.emit(OP_IMAGE_SAMPLE_EXPLICIT_LOD, result_type, sampled_image, coordinate, 2, lod);
+	return self.emit(Opcode.IMAGE_SAMPLE_EXPLICIT_LOD, result_type, sampled_image, coordinate, 2, lod);
 }
 
 // --- Closing -----------------------------------------------------------------
@@ -293,12 +293,12 @@ fn void Function.end(&self)
 
 	WordList* out = &self.mod.functions;
 
-	emit(out, OP_FUNCTION, self.result_type, self.id, FUNCTION_CONTROL_NONE, self.type);
+	emit(out, Opcode.FUNCTION, self.result_type, self.id, (Id)FunctionControl.NONE, self.type);
 	out.push_all(self.params.array_view());
-	emit(out, OP_LABEL, self.entry_label);
+	emit(out, Opcode.LABEL, self.entry_label);
 	out.push_all(self.locals.array_view());
 	out.push_all(self.body.array_view());
-	emit(out, OP_FUNCTION_END);
+	emit(out, Opcode.FUNCTION_END);
 
 	self.params.free();
 	self.locals.free();

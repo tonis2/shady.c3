@@ -114,6 +114,6 @@ fn float4 frag(FragmentIn input) @fragment
 `));
 	defer free(spirv);
 
-	test::@check(shady_support::has_ext_inst(spirv, shady::GLSL_ATAN2),
+	test::@check(shady_support::has_ext_inst(spirv, shady::GlslOp.ATAN2),
 		"atan2 should be GLSL.std.450's Atan2, not an atan or a division");
 }

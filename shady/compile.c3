@@ -172,7 +172,7 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 		if (decl.kind != DeclKind.STRUCT) continue;
 		if (self.types.find(decl.name).block != ADDRESS) continue;
 		Type* type = self.types.find(decl.name);
-		type.pointer_id = self.mod.type_forward_pointer(STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER);
+		type.pointer_id = self.mod.type_forward_pointer(StorageClass.PHYSICAL_STORAGE_BUFFER);
 		self.types.pointer_to(type);
 	}
 
@@ -199,7 +199,7 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 			};
 			if (Attribute* builtin = source.attributes.find("builtin"))
 			{
-				uint which;
+				Builtin which;
 				if (builtin.args.len != 1 || !builtin.args[0].is_name || !builtin_from_name(builtin.args[0].name, &which))
 				{
 					self.fail(builtin.line, builtin.column, "@builtin needs a known builtin name");
@@ -236,11 +236,11 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 			return CODEGEN_ERROR~;
 		}
 		Id type_id = self.type_id(type);
-		self.mod.decorate(type_id, DECORATION_BLOCK);
+		self.mod.decorate(type_id, Decoration.BLOCK);
 		self.decorate_block_members(type_id, type, layout);
 
-		self.mod.define_forward_pointer(type.pointer_id, STORAGE_CLASS_PHYSICAL_STORAGE_BUFFER, type_id);
-		self.mod.decorate(type.pointer_id, DECORATION_ARRAY_STRIDE, size);
+		self.mod.define_forward_pointer(type.pointer_id, StorageClass.PHYSICAL_STORAGE_BUFFER, type_id);
+		self.mod.decorate(type.pointer_id, Decoration.ARRAY_STRIDE, size);
 	}
 }
 
@@ -389,19 +389,19 @@ fn void Codegen.decorate_block_members(&self, Id type_id, Type* type, Layout lay
 	foreach (i, &m : type.members)
 	{
 		uint member = (uint)i;
-		self.mod.member_decorate(type_id, member, DECORATION_OFFSET, m.offset);
+		self.mod.member_decorate(type_id, member, Decoration.OFFSET, m.offset);
 
 		if (m.type.kind == MATRIX)
 		{
-			self.mod.member_decorate(type_id, member, DECORATION_COL_MAJOR);
-			self.mod.member_decorate(type_id, member, DECORATION_MATRIX_STRIDE, m.type.matrix_stride(layout));
+			self.mod.member_decorate(type_id, member, Decoration.COL_MAJOR);
+			self.mod.member_decorate(type_id, member, Decoration.MATRIX_STRIDE, m.type.matrix_stride(layout));
 		}
 
 		// Every array layer in the member's type, then the struct inside it.
 		Type* element = m.type;
 		while (element.kind == ARRAY)
 		{
-			self.mod.decorate(self.type_id(element), DECORATION_ARRAY_STRIDE, array_stride(element.element, layout));
+			self.mod.decorate(self.type_id(element), Decoration.ARRAY_STRIDE, array_stride(element.element, layout));
 			element = element.element;
 		}
 		if (element.kind == STRUCT)
@@ -425,15 +425,15 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 		// assign_bindings resolved the type and its block kind already.
 		Type* type = resource.type;
 
-		uint storage;
+		StorageClass storage;
 		switch (resource.block)
 		{
 			case UNIFORM:
 			case PUSH_CONSTANT:
 				Layout layout = self.block_layout(resource.block);
 				storage = resource.block == BlockKind.UNIFORM
-					? STORAGE_CLASS_UNIFORM
-					: STORAGE_CLASS_PUSH_CONSTANT;
+					? StorageClass.UNIFORM
+					: StorageClass.PUSH_CONSTANT;
 
 				// Block layout has to be decided before the type id is emitted,
 				// because the decorations hang off that id.
@@ -447,7 +447,7 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 				}
 				resource.size = size;
 				Id type_id    = self.type_id(type);
-				self.mod.decorate(type_id, DECORATION_BLOCK);
+				self.mod.decorate(type_id, Decoration.BLOCK);
 				self.decorate_block_members(type_id, type, layout);
 
 			case ADDRESS:
@@ -475,10 +475,10 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 				// one does not.
 				if (type.kind == ARRAY && type.runtime)
 				{
-					self.mod.capability(CAPABILITY_RUNTIME_DESCRIPTOR_ARRAY);
+					self.mod.capability(Capability.RUNTIME_DESCRIPTOR_ARRAY);
 					self.mod.extension("SPV_EXT_descriptor_indexing");
 				}
-				storage = STORAGE_CLASS_UNIFORM_CONSTANT;
+				storage = StorageClass.UNIFORM_CONSTANT;
 				break;
 			}
 		}
@@ -489,10 +489,10 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 
 		// A push constant block has no descriptor to bind, so it gets neither
 		// a set nor a binding - and it never consumed one, see assign_bindings.
-		if (storage != STORAGE_CLASS_PUSH_CONSTANT)
+		if (storage != StorageClass.PUSH_CONSTANT)
 		{
-			self.mod.decorate(resource.id, DECORATION_DESCRIPTOR_SET, resource.set);
-			self.mod.decorate(resource.id, DECORATION_BINDING, resource.binding);
+			self.mod.decorate(resource.id, Decoration.DESCRIPTOR_SET, resource.set);
+			self.mod.decorate(resource.id, Decoration.BINDING, resource.binding);
 		}
 	}
 }
@@ -511,13 +511,13 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
  coordinate. Vulkan rejects BuiltIn Position in a fragment shader outright
  (VUID-Position-Position-04318), so this is a translation, not a convenience.
 *>
-fn void? Codegen.stage_variables(&self, Type* type, uint storage, StageVarList* out, uint execution_model, uint line, uint column)
+fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageVarList* out, ExecutionModel execution_model, uint line, uint column)
 {
 	uint next_location = 0;
 
 	foreach (i, &member : type.members)
 	{
-		if (member.is_position && storage == STORAGE_CLASS_INPUT && execution_model != EXECUTION_MODEL_FRAGMENT)
+		if (member.is_position && storage == StorageClass.INPUT && execution_model != ExecutionModel.FRAGMENT)
 		{
 			self.fail(line, column, "@position is only meaningful on a vertex output or a fragment input");
 			return CODEGEN_ERROR~;
@@ -529,12 +529,12 @@ fn void? Codegen.stage_variables(&self, Type* type, uint storage, StageVarList* 
 
 		if (member.is_position)
 		{
-			bool is_fragment_input = storage == STORAGE_CLASS_INPUT;
-			self.mod.decorate(id, DECORATION_BUILTIN, is_fragment_input ? BUILTIN_FRAG_COORD : BUILTIN_POSITION);
+			bool is_fragment_input = storage == StorageClass.INPUT;
+			self.mod.decorate(id, Decoration.BUILTIN, (Id)(is_fragment_input ? Builtin.FRAG_COORD : Builtin.POSITION));
 		}
 		else if (member.is_builtin)
 		{
-			self.mod.decorate(id, DECORATION_BUILTIN, member.builtin);
+			self.mod.decorate(id, Decoration.BUILTIN, (Id)(uint)member.builtin);
 		}
 		else
 		{
@@ -543,11 +543,11 @@ fn void? Codegen.stage_variables(&self, Type* type, uint storage, StageVarList* 
 			{
 				location = (uint)explicit_location.args[0].number;
 			}
-			self.mod.decorate(id, DECORATION_LOCATION, location);
+			self.mod.decorate(id, Decoration.LOCATION, location);
 			next_location = location + 1;
 		}
 
-		if (member.attributes.find("flat")) self.mod.decorate(id, DECORATION_FLAT);
+		if (member.attributes.find("flat")) self.mod.decorate(id, Decoration.FLAT);
 
 		out.push({ .id = id, .type = member.type, .member_index = (usz)i, .is_position = member.is_position });
 		self.interface_ids.push(id);
@@ -583,7 +583,7 @@ fn String? Codegen.entry_name(&self, Decl* decl, Attribute* stage)
  with ordinary member access, and the return value is scattered back out to the
  stage's output variables (see emit_return).
 *>
-fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, String entry_name)
+fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_model, String entry_name)
 {
 	self.inputs.clear();
 	self.outputs.clear();
@@ -608,7 +608,7 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
 			self.fail(decl.line, decl.column, "an entry point parameter must be a struct");
 			return CODEGEN_ERROR~;
 		}
-		self.stage_variables(input_type, STORAGE_CLASS_INPUT, &self.inputs, execution_model, decl.line, decl.column)!;
+		self.stage_variables(input_type, StorageClass.INPUT, &self.inputs, execution_model, decl.line, decl.column)!;
 	}
 
 	// Outputs, from the return type.
@@ -622,18 +622,18 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
 
 	if (return_type.kind == STRUCT)
 	{
-		self.stage_variables(return_type, STORAGE_CLASS_OUTPUT, &self.outputs, execution_model, decl.line, decl.column)!;
+		self.stage_variables(return_type, StorageClass.OUTPUT, &self.outputs, execution_model, decl.line, decl.column)!;
 	}
 	else if (return_type.kind != VOID)
 	{
 		// A bare value is the stage's single output at location 0.
-		Id id = self.mod.global_var(self.pointer_to(STORAGE_CLASS_OUTPUT, return_type), STORAGE_CLASS_OUTPUT);
-		self.mod.decorate(id, DECORATION_LOCATION, 0);
+		Id id = self.mod.global_var(self.pointer_to(StorageClass.OUTPUT, return_type), StorageClass.OUTPUT);
+		self.mod.decorate(id, Decoration.LOCATION, 0);
 		self.outputs.push({ .id = id, .type = return_type, .member_index = 0 });
 		self.interface_ids.push(id);
 	}
 
-	if (execution_model == EXECUTION_MODEL_VERTEX)
+	if (execution_model == ExecutionModel.VERTEX)
 	{
 		bool has_position = false;
 		foreach (&output : self.outputs) if (output.is_position) has_position = true;
@@ -653,14 +653,14 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
 	// Rebuild the parameter struct as a local, member by member.
 	if (input_type)
 	{
-		Id pointer = function.local(self.pointer_to(STORAGE_CLASS_FUNCTION, input_type));
+		Id pointer = function.local(self.pointer_to(StorageClass.FUNCTION, input_type));
 		self.mod.name(pointer, decl.function.params[0].name);
 
 		foreach (&input : self.inputs)
 		{
 			Id value  = function.load(self.type_id(input.type), input.id);
 			Id member = function.access_chain(
-				self.pointer_to(STORAGE_CLASS_FUNCTION, input.type),
+				self.pointer_to(StorageClass.FUNCTION, input.type),
 				pointer,
 				(Id[]) { self.const_int((int)input.member_index) });
 			function.store(member, value);
@@ -680,11 +680,11 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
 	self.mod.name(function.id, decl.name);
 	self.mod.entry_point(execution_model, function.id, entry_name, self.interface_ids.array_view());
 
-	if (execution_model == EXECUTION_MODEL_FRAGMENT)
+	if (execution_model == ExecutionModel.FRAGMENT)
 	{
-		self.mod.execution_mode(function.id, EXECUTION_MODE_ORIGIN_UPPER_LEFT);
+		self.mod.execution_mode(function.id, ExecutionMode.ORIGIN_UPPER_LEFT);
 	}
-	else if (execution_model == EXECUTION_MODEL_GLCOMPUTE)
+	else if (execution_model == ExecutionModel.GL_COMPUTE)
 	{
 		Attribute* threads = decl.attributes.find( "threads");
 		if (!threads || threads.args.len != 3)
@@ -692,7 +692,7 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, uint execution_model, Strin
 			self.fail(decl.line, decl.column, "a @compute entry point needs @threads(x, y, z)");
 			return CODEGEN_ERROR~;
 		}
-		self.mod.execution_mode(function.id, EXECUTION_MODE_LOCAL_SIZE,
+		self.mod.execution_mode(function.id, ExecutionMode.LOCAL_SIZE,
 			(uint)threads.args[0].number, (uint)threads.args[1].number, (uint)threads.args[2].number);
 	}
 }
@@ -777,7 +777,7 @@ fn char[]? compile(
 	codegen.outputs.init(&arena, 8);
 	codegen.interface_ids.init(&arena, 16);
 
-	mod.capability(CAPABILITY_SHADER);
+	mod.capability(Capability.SHADER);
 	codegen.glsl = mod.ext_inst_import("GLSL.std.450");
 	mod.set_memory_model();
 
@@ -798,12 +798,12 @@ fn char[]? compile(
 	if (codegen.uses_device_addresses)
 	{
 		mod.version = VERSION_1_3;
-		mod.capability(CAPABILITY_PHYSICAL_STORAGE_BUFFER_ADDRESSES);
+		mod.capability(Capability.PHYSICAL_STORAGE_BUFFER_ADDRESSES);
 		// Addresses are computed as 64-bit integers, which is a capability of
 		// its own even though PhysicalStorageBufferAddresses implies the type.
-		mod.capability(CAPABILITY_INT64);
+		mod.capability(Capability.INT64);
 		mod.extension(EXTENSION_PHYSICAL_STORAGE_BUFFER);
-		mod.set_memory_model(ADDRESSING_MODEL_PHYSICAL_STORAGE_BUFFER64);
+		mod.set_memory_model(AddressingModel.PHYSICAL_STORAGE_BUFFER64);
 	}
 
 	return mod.build(allocator);
@@ -868,7 +868,7 @@ fn void? Codegen.build(&self)
 			// on first call. Not an entry point, so nothing to do here.
 			continue;
 		}
-		uint execution_model = kind.execution_model();
+		ExecutionModel execution_model = kind.execution_model();
 
 		String entry_name = self.entry_name(decl, stage)!;
 		foreach (taken : entry_names)

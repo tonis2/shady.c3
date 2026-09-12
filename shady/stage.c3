@@ -48,12 +48,12 @@ fn bool stage_from_attribute(String name, Stage* out)
 <*
  The SPIR-V execution model a function of this stage is emitted under.
 *>
-fn uint Stage.execution_model(Stage self) @inline
+fn ExecutionModel Stage.execution_model(Stage self) @inline
 {
 	switch (self)
 	{
-		case Stage.VERTEX:   return EXECUTION_MODEL_VERTEX;
-		case Stage.FRAGMENT: return EXECUTION_MODEL_FRAGMENT;
-		case Stage.COMPUTE:  return EXECUTION_MODEL_GLCOMPUTE;
+		case Stage.VERTEX:   return ExecutionModel.VERTEX;
+		case Stage.FRAGMENT: return ExecutionModel.FRAGMENT;
+		case Stage.COMPUTE:  return ExecutionModel.GL_COMPUTE;
 	}
 }
