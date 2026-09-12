@@ -585,6 +585,14 @@ fn String? Codegen.entry_name(&self, Decl* decl, Attribute* stage)
 *>
 fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_model, String entry_name)
 {
+	if (!decl.function.body)
+	{
+		self.fail(decl.line, decl.column, string::format(self.allocator,
+			"`%s` is an entry point, so it is the definition: it cannot be declared without a body",
+			decl.name));
+		return CODEGEN_ERROR~;
+	}
+
 	self.inputs.clear();
 	self.outputs.clear();
 	self.interface_ids.clear();

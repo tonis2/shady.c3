@@ -1441,7 +1441,7 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 			at++;
 		}
 
-		self.functions.push({
+		FunctionSig sig = {
 			.decl          = decl,
 			.return_type   = return_type,
 			.params        = params,
@@ -1451,8 +1451,71 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 			.has_receiver  = receiver != null,
 			.receiver_ref  = receiver_ref,
 			.receiver_name = receiver_name,
-		});
+		};
+
+		// One function, declared and then defined - or one of the two, when the
+		// text that defines it is spliced in from elsewhere. The two spellings
+		// have to agree, so the definition cannot quietly become a second
+		// function with the same name and a different signature.
+		// Matched by signature, not by name: a second function of the same name and
+		// a different signature is an overload, which was legal long before
+		// declarations were.
+		FunctionSig* earlier = null;
+		foreach (&existing : self.functions)
+		{
+			if (existing.decl.name != decl.name) continue;
+			if (!signatures_agree(existing, &sig)) continue;
+			earlier = existing;
+			break;
+		}
+
+		if (!earlier)
+		{
+			self.functions.push(sig);
+			continue;
+		}
+
+		bool earlier_has_body  = earlier.decl.function.body != null;
+		bool declared_has_body = decl.function.body != null;
+
+		if (earlier_has_body && declared_has_body)
+		{
+			// Two definitions of one signature: refused where a call matches both,
+			// which is where it always was - not here.
+			self.functions.push(sig);
+			continue;
+		}
+		if (!earlier_has_body && !declared_has_body)
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"`%s` is declared twice, and nothing defines it", decl.name));
+			return CODEGEN_ERROR~;
+		}
+
+		// The definition fills the declaration, in the declaration's place, so the
+		// first mention of the name is still where it stands in the module.
+		if (declared_has_body) *earlier = sig;
 	}
+}
+
+<*
+ Do two declarations describe the same function? A declaration and the definition
+ that fills it do; an overload of the same name does not.
+*>
+fn bool signatures_agree(FunctionSig* declared, FunctionSig* defined) @private
+{
+	if (declared.params.len != defined.params.len) return false;
+	if (declared.return_type != defined.return_type) return false;
+	if (declared.has_receiver != defined.has_receiver) return false;
+	if (declared.receiver_ref != defined.receiver_ref) return false;
+
+	foreach (i, type : declared.params)
+	{
+		if (defined.params[i] != type) return false;
+		if (declared.refs[i] != defined.refs[i]) return false;
+		if (declared.outs[i] != defined.outs[i]) return false;
+	}
+	return true;
 }
 
 fn bool Codegen.has_function(&self, String name)
@@ -1570,6 +1633,12 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 	{
 		self.fail(sig.decl.line, sig.decl.column, string::format(self.allocator,
 			"`%s` calls itself - recursion is not supported", sig.decl.name));
+		return CODEGEN_ERROR~;
+	}
+	if (!sig.decl.function.body)
+	{
+		self.fail(sig.decl.line, sig.decl.column, string::format(self.allocator,
+			"`%s` is declared without a body, and nothing in this module defines it", sig.decl.name));
 		return CODEGEN_ERROR~;
 	}
 	sig.emitting = true;

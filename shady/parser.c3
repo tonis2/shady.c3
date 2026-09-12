@@ -902,7 +902,22 @@ fn Decl*? Parser.declaration(&self)
 			decl.kind       = DeclKind.FUNCTION;
 			decl.name       = name.text;
 			decl.attributes = self.attributes()!;
-			Stmt* body      = self.block()!;
+
+			// A declaration without a body, when the definition is somewhere the
+			// text does not say: `fn float4 mesh_fragment(VertexOutput input);`
+			// and the material half defines it. A name with no definition anywhere
+			// is refused where it is called.
+			Stmt* body;
+			if (self.check(SEMICOLON))
+			{
+				self.advance();
+				body = null;
+			}
+			else
+			{
+				body = self.block()!;
+			}
+
 			decl.function   = {
 				.return_type = return_type,
 				.params      = params.array_view(),

@@ -316,3 +316,77 @@ fn VertexOutput vertexMain(VertexIn input) @vertex
 `);
 	test::@check(error == "", "a helper with two vector arguments resolves; got `%s`", error);
 }
+
+<*
+ A declaration without a body, and the definition that fills it.
+
+ This is how a pass says "the material half writes this function": the geometry
+ half calls it, the material half defines it, and the generator splices the two
+ into one module - so the name is declared where it is used and defined somewhere
+ this file does not contain.
+*>
+fn void a_declaration_is_filled_by_its_definition() @test
+{
+	String geometry = `
+struct FragmentIn
+{
+	float4 color;
+}
+
+struct Shaded { float4 albedo; }
+
+fn Shaded shade(FragmentIn input);
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	Shaded shaded = shade(input);
+	return shaded.albedo;
+}
+`;
+	String material = `
+fn Shaded shade(FragmentIn input)
+{
+	Shaded shaded;
+	shaded.albedo = input.color;
+	return shaded;
+}
+`;
+	String error = shady_support::compile_error(string::tformat("%s%s", geometry, material));
+
+	test::@check(error == "", "the definition fills the declaration; got `%s`", error);
+}
+
+<*
+ A declared name with no definition is refused where it is called, not at the
+ declaration: the text that defines it is spliced in ahead of this one.
+*>
+fn void a_definition_that_never_arrives_is_refused() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 shade(FragmentIn input);
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	return shade(input);
+}
+`));
+
+	test::@check(error.contains("nothing in this module defines it"),
+		"a call to an undefined declaration says so; got `%s`", error);
+}
+
+<*
+ An entry point is never a declaration: it is the definition the module exists
+ for, so a body is the whole point of it.
+*>
+fn void a_bodyless_entry_point_is_refused() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment;
+
+fn float4 other(FragmentIn input) @fragment { return input.color; }
+`));
+
+	test::@check(error.contains("cannot be declared without a body"),
+		"an entry point needs a body; got `%s`", error);
+}
