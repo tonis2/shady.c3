@@ -33,6 +33,7 @@ const char[*] EMBED_SCALAR       = $embed("conformance/scalar_layout.shady");
 const char[*] EMBED_POINTERS     = $embed("conformance/pointers.shady");
 const char[*] EMBED_BINDLESS     = $embed("conformance/bindless.shady");
 const char[*] EMBED_SPEC         = $embed("conformance/spec.shady");
+const char[*] EMBED_INT_BUILTINS = $embed("conformance/integer_builtins.shady");
 
 struct Case
 {
@@ -56,6 +57,7 @@ const Case[*] CORPUS = {
 	{ "pointers",     (String)EMBED_POINTERS[..],     true  },
 	{ "bindless",     (String)EMBED_BINDLESS[..],     false },
 	{ "spec",         (String)EMBED_SPEC[..],         false },
+	{ "int_builtins", (String)EMBED_INT_BUILTINS[..], false },
 };
 
 fn void the_conformance_corpus_compiles_and_validates() @test

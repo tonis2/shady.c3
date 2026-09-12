@@ -384,6 +384,24 @@ fn Value Codegen.adapt_literal(&self, Value value, Expr* side, Type* other)
 	}
 }
 
+<*
+ Which instruction a builtin that has one per number family uses.
+
+ `GLSL.std.450` spells `min` three times - `FMin`, `UMin` and `SMin` - and each
+ one takes only its own operands, so an integer `min` compiled as `FMin` is
+ invalid SPIR-V rather than a slow path. A uint has no `abs` or `sign` of its
+ own: neither can do anything a uint does not already do.
+*>
+fn uint Codegen.by_sign(&self, uint floats, uint unsigned, uint signed, Type* result)
+{
+	switch (result.scalar().kind)
+	{
+		case UINT: return unsigned;
+		case INT:  return signed;
+		default:   return floats;
+	}
+}
+
 fn Id Codegen.const_float(&self, double value)
 {
 	return self.mod.const_f32(self.type_id(self.types.find("float")), (float)value);
@@ -2245,8 +2263,8 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 
 	switch (name)
 	{
-		case "abs":         instruction = GLSL_FABS;
-		case "sign":        instruction = GLSL_FSIGN;
+		case "abs":         instruction = self.by_sign(GLSL_FABS, GLSL_FABS, GLSL_SABS, result);
+		case "sign":        instruction = self.by_sign(GLSL_FSIGN, GLSL_FSIGN, GLSL_SSIGN, result);
 		case "floor":       instruction = GLSL_FLOOR;
 		case "ceil":        instruction = GLSL_CEIL;
 		case "round":       instruction = GLSL_ROUND;
@@ -2265,9 +2283,9 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 		case "log2":        instruction = GLSL_LOG2;
 		case "sqrt":        instruction = GLSL_SQRT;
 		case "inversesqrt": instruction = GLSL_INVERSE_SQRT;
-		case "min":         instruction = GLSL_FMIN;
-		case "max":         instruction = GLSL_FMAX;
-		case "clamp":       instruction = GLSL_FCLAMP;
+		case "min":         instruction = self.by_sign(GLSL_FMIN, GLSL_UMIN, GLSL_SMIN, result);
+		case "max":         instruction = self.by_sign(GLSL_FMAX, GLSL_UMAX, GLSL_SMAX, result);
+		case "clamp":       instruction = self.by_sign(GLSL_FCLAMP, GLSL_UCLAMP, GLSL_SCLAMP, result);
 		case "mix":         instruction = GLSL_FMIX;
 		case "lerp":        instruction = GLSL_FMIX;
 		case "inversesqrt": instruction = GLSL_INVERSE_SQRT;

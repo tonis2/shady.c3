@@ -1,0 +1,45 @@
+// The integer half of the GLSL.std.450 builtins.
+//
+// `min`, `max` and `clamp` each have one instruction per number family, and
+// only the float one used to be emitted: a `uint` min compiled to `FMin` is
+// invalid SPIR-V, which `spirv-val` catches here rather than a driver crashing
+// on it later. `abs` and `sign` have a signed form and no unsigned one.
+
+struct VertexIn
+{
+    float3 position;
+}
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 uv;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex(main)
+{
+    FragmentIn output;
+    output.position = float4(input.position, 1.0);
+    output.uv = float4(0.0);
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    uint a = uint(input.uv.x * 16.0);
+    uint b = uint(input.uv.y * 8.0);
+    uint small = min(a, b);
+    uint big = max(a, b);
+    uint bounded = clamp(a, 1u, 4u);
+
+    int c = int(input.uv.x * 4.0) - 2;
+    int d = asint(b);
+    int nearer = min(c, d);
+    int farther = max(c, d);
+    int limited = clamp(c, -1, 1);
+    int magnitude = abs(c);
+    int direction = sign(c);
+
+    return float4(float(small + big + bounded), float(nearer + farther + limited),
+        float(magnitude + direction), 1.0);
+}
