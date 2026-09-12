@@ -198,6 +198,22 @@ fn Id Function.composite_extract(&self, Id type, Id composite, uint... indices)
 }
 
 <*
+ Write a value into a composite: `insert(v, x, i)` is `v` with component `i`
+ replaced. The inverse of `composite_extract`, and the only way SPIR-V has to
+ write into a vector.
+*>
+fn Id Function.composite_insert(&self, Id type, Id composite, Id object, uint... indices)
+{
+	@pool() {
+		Id[] operands = alloc::alloc_array(tmem, Id, 2 + indices.len);
+		operands[0] = composite;
+		operands[1] = object;
+		foreach (i, index : indices) operands[2 + i] = index;
+		return self.emit_slice(OP_COMPOSITE_INSERT, type, operands);
+	};
+}
+
+<*
  Build a vector by picking components out of one or two vectors. Component
  indices run across `a` then `b`.
 *>

@@ -73,6 +73,7 @@ const uint OP_MEMBER_DECORATE           = 72;
 const uint OP_VECTOR_SHUFFLE            = 79;
 const uint OP_COMPOSITE_CONSTRUCT       = 80;
 const uint OP_COMPOSITE_EXTRACT         = 81;
+const uint OP_COMPOSITE_INSERT          = 82;
 
 const uint OP_SAMPLED_IMAGE             = 86;
 const uint OP_IMAGE_SAMPLE_IMPLICIT_LOD = 87;

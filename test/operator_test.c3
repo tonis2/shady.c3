@@ -5,6 +5,7 @@
 module operator_test;
 
 import std::core::test;
+import shady;
 import shady_support;
 
 fn void a_ternary_branches() @test
@@ -144,4 +145,45 @@ fn float4 frag(FragmentIn input) @fragment
 `));
 
 	test::@check(error == "", "`(x) - y` must stay a subtraction, not become a cast; got '%s'", error);
+}
+
+<*
+ A single component of a vector is writable, and a multi-component swizzle is
+ not.
+
+ SPIR-V has no store into a composite, so `uv.x = a` is `uv = insert(uv, a, 0)`
+ - the inverse of the extract the read path uses. `uv.xy = a` would need a
+ masked store, which SPIR-V does not have in any form, so it stays refused
+ where it is written rather than doing half of it.
+*>
+fn void a_vector_component_is_an_lvalue() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	float2 uv = input.color.xy;
+	uv.x = input.color.z;
+	uv.y += 2.0;
+	return float4(uv, 0.0, 1.0);
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::OP_COMPOSITE_INSERT),
+		"the component write is a composite insert");
+}
+
+fn void a_multi_component_swizzle_is_not_assignable() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	float2 uv = input.color.xy;
+	uv.xy = input.color.zw;
+	return float4(uv, 0.0, 1.0);
+}
+`));
+
+	test::@check(error.contains("cannot assign"),
+		"a masked write is refused rather than half done; got `%s`", error);
 }

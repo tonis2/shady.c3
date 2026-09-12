@@ -751,6 +751,24 @@ fn Value? Codegen.unary_expression(&self, Expr* expr)
 
 fn Value? Codegen.assign_expression(&self, Expr* expr)
 {
+	// `v.x = a` and `v.x += a`, before the general path: a vector component is
+	// an lvalue in the language, and SPIR-V has no store into a composite, so
+	// the write is the whole vector with that component replaced. A
+	// multi-component swizzle is *not* assignable - `v.xy = a` would need a
+	// masked store - and falls through to the refusal below.
+	if (expr.assign.target.kind == MEMBER)
+	{
+		Expr* member = expr.assign.target;
+		Value base   = self.expression(member.member.value)!;
+		uint[4] indices;
+		uint    count;
+		if (base.type.kind == VECTOR && base.pointer != NO_ID
+			&& swizzle_indices(member.member.name, &indices, &count) && count == 1)
+		{
+			return self.assign_component(expr, member, base, indices[0]);
+		}
+	}
+
 	Value target = self.expression(expr.assign.target)!;
 	if (target.pointer == NO_ID)
 	{
@@ -768,26 +786,70 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 	else
 	{
 		// `a += b` is `a = a + b`, with the same operator selection.
-		TokenKind op;
-		switch (expr.assign.op)
-		{
-			case PLUS_EQ:    op = PLUS;
-			case MINUS_EQ:   op = MINUS;
-			case STAR_EQ:    op = STAR;
-			case SLASH_EQ:   op = SLASH;
-			case AMP_EQ:     op = AMP;
-			case PIPE_EQ:    op = PIPE;
-			case CARET_EQ:   op = CARET;
-			case SHL_EQ:     op = SHL;
-			case SHR_EQ:     op = SHR;
-			default:         op = PERCENT;
-		}
+		TokenKind op = compound_op(expr.assign.op);
 		Value current = { .type = target.type, .id = self.rvalue(target) };
 		id = self.arithmetic(op, current, value, expr)!;
 	}
 
 	self.store(target, id);
 	return (Value) { .type = target.type, .id = id };
+}
+
+<*
+ `v[i] = a`: read the component, work out its new value, write the vector back.
+
+ `member` is the swizzle expression, kept for its position in a diagnostic.
+*>
+fn Value? Codegen.assign_component(&self, Expr* expr, Expr* member, Value base, uint index)
+{
+	Type* scalar = base.type.element;
+	if (index >= base.type.count)
+	{
+		self.fail(member.line, member.column,
+			string::format(self.allocator, "swizzle `%s` reaches past a %s", member.member.name, base.type.name));
+		return CODEGEN_ERROR~;
+	}
+
+	Id   current = self.rvalue(base);
+	Id   part    = self.func.composite_extract(self.type_id(scalar), current, index);
+	Id[] operands = alloc::alloc_array(tmem, Id, 2);
+	Value value = self.expression(expr.assign.value)!;
+
+	Id id;
+	if (expr.assign.op == EQ)
+	{
+		id = self.coerce(value, scalar, expr)!;
+	}
+	else
+	{
+		Value now = { .type = scalar, .id = part };
+		id = self.arithmetic(compound_op(expr.assign.op), now, value, expr)!;
+	}
+
+	Id updated = self.func.composite_insert(self.type_id(base.type), current, id, index);
+	self.func.store(base.pointer, updated, self.access_alignment(base));
+	return (Value) { .type = scalar, .id = id };
+}
+
+<*
+ The binary operator an assignment operator stands for, so `v.x += a` and
+ `v += a` pick the same instruction.
+*>
+fn TokenKind compound_op(TokenKind assign_op) @private
+{
+	switch (assign_op)
+	{
+		case PLUS_EQ:  return PLUS;
+		case MINUS_EQ: return MINUS;
+		case STAR_EQ:  return STAR;
+		case SLASH_EQ: return SLASH;
+		case AMP_EQ:   return AMP;
+		case PIPE_EQ:  return PIPE;
+		case CARET_EQ: return CARET;
+		case SHL_EQ:   return SHL;
+		case SHR_EQ:   return SHR;
+		default:       return PERCENT;
+	}
 }
 
 <*
