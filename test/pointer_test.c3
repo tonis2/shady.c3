@@ -224,3 +224,35 @@ fn Out vert() @vertex
 	test::@check(error.contains("InterlockedAdd"),
 		"the error should name the call; got '%s'", error);
 }
+
+<*
+ A device-address pointer as a condition: `if (p)` is `p != 0`.
+
+ The comparison is on the address as an integer, because Vulkan allows no
+ equality on a `PhysicalStorageBuffer` pointer - and the original engine shaders
+ use exactly this to say "this stream is absent", which is a null pointer rather
+ than a flag bit.
+*>
+fn void a_pointer_is_a_condition() @test
+{
+	String error = shady_support::compile_error(`
+struct Row @address { float4 value; }
+struct Push @pushconstant { Row* rows; uint count; }
+Push push;
+
+struct Out { float4 position @position; }
+
+fn Out vert() @vertex
+{
+	Out o;
+	// The engine's shaders say "this stream is absent" with a null pointer, and
+	// the comparison is on the address as an integer: Vulkan allows no equality
+	// on a PhysicalStorageBuffer pointer.
+	if (push.rows) o.position = push.rows[0].value;
+	else o.position = float4(0.0, 0.0, 0.0, 1.0);
+	return o;
+}
+`);
+
+	test::@check(error == "", "a pointer is a condition; got `%s`", error);
+}

@@ -908,7 +908,7 @@ fn Value? Codegen.conditional_expression(&self, Expr* expr)
 	// Materialise the test before the merge: SPIR-V requires the merge to be
 	// immediately followed by the branch, and loading a bool local is an
 	// instruction like any other.
-	Id    test = self.rvalue(condition);
+	Id    test = self.condition(condition, expr.conditional.condition);
 
 	Id then_label  = self.func.new_label();
 	Id else_label  = self.func.new_label();
@@ -1896,7 +1896,7 @@ fn Value? Codegen.select_call(&self, Expr* expr)
 	Value condition  = self.expression(expr.call.args[2])!;
 
 	Type* result       = when_true.type;
-	Id    condition_id = self.rvalue(condition);
+	Id    condition_id = self.condition(condition, expr.call.args[2]);
 
 	// OpSelect wants a condition of the same shape as its result, so a scalar
 	// bool against a vector is broadcast.
@@ -2502,10 +2502,38 @@ fn void? Codegen.emit_return(&self, Stmt* stmt)
 	self.terminated = true;
 }
 
+<*
+ A value usable as a branch condition.
+
+ `if (p)` on a device address is `p != 0`, and the comparison is on the address
+ as a 64-bit integer rather than on the pointer: Vulkan allows no ordering or
+ equality on `PhysicalStorageBuffer` pointers, and an integer is what the
+ address already is.
+
+ Everything else has to already be a bool - a bare `if (1)` is refused where it
+ is written rather than turned into a condition the branch cannot take.
+*>
+fn Id Codegen.condition(&self, Value value, Expr* expr)
+{
+	if (value.type.kind == BOOL) return self.rvalue(value);
+
+	if (value.type.kind == POINTER)
+	{
+		Id ulong_t = self.mod.type_int(64, false);
+		Id address = self.func.unop(Opcode.CONVERT_PTR_TO_U, ulong_t, self.rvalue(value));
+		Id zero    = self.mod.const_u64(ulong_t, 0);
+		return self.func.binop(Opcode.I_NOT_EQUAL, self.mod.type_bool(), address, zero);
+	}
+
+	self.fail(expr.line, expr.column, string::format(self.allocator,
+		"a %s is not a condition", value.type.name));
+	return self.rvalue(value);
+}
+
 fn void? Codegen.emit_if(&self, Stmt* stmt)
 {
 	Value condition = self.expression(stmt.if_stmt.condition)!;
-	Id    test      = self.rvalue(condition);
+	Id    test      = self.condition(condition, stmt.if_stmt.condition);
 
 	Id then_label  = self.func.new_label();
 	Id else_label  = stmt.if_stmt.else_branch ? self.func.new_label() : NO_ID;
@@ -2554,7 +2582,7 @@ fn void? Codegen.emit_loop(&self, uint line, uint column, Stmt* unused, Expr* co
 	if (condition)
 	{
 		Value test = self.expression(condition)!;
-		self.func.branch_conditional(self.rvalue(test), body_label, merge_label);
+		self.func.branch_conditional(self.condition(test, condition), body_label, merge_label);
 	}
 	else
 	{

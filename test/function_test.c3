@@ -193,3 +193,126 @@ fn float4 f(float4 color) { if (color.x > 0.0) { return color; } }
 
 	test::@check(error.len > 0, "a path with no return should be refused; got '%s'", error);
 }
+
+<*
+ A member of an `out` parameter is an expression like any other.
+
+ The shape is `mesh.shady`'s vertex body: it writes into an `out` struct and
+ passes one of that struct's members to a helper. Failing to resolve the member's
+ type there is what "no `variant_uv` takes these arguments" means - the
+ overload set is empty because the argument's type could not be worked out.
+*>
+fn void a_member_of_an_out_parameter_is_an_argument() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+struct Output
+{
+	float2 uv;
+	float3 color;
+}
+
+fn float2 move_uv(float2 uv, float4 row) { return uv + row.xy; }
+
+fn void build(out Output output)
+{
+	output.uv = float2(0.25, 0.5);
+	output.uv = move_uv(output.uv, float4(0.1, 0.2, 0.0, 0.0));
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	Output output;
+	build(output);
+	return float4(output.uv, 0.0, 1.0);
+}
+`));
+
+	test::@check(error == "", "a member of an out parameter can be an argument; got `%s`", error);
+}
+
+<*
+ Both arguments at once: a member of an `out` parameter, and an array element of
+ a wire struct copied out of a push block.
+
+ Each of those alone resolves; together they did not, which is the shape
+ `mesh.shady` writes for its per-copy uv and the reason this test exists.
+*>
+fn void both_argument_shapes_at_once() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+struct Row @address
+{
+	float4 rows[4];
+	uint  count;
+}
+
+struct Push @pushconstant { Row* row; }
+Push push;
+
+struct Output
+{
+	float2 uv;
+}
+
+fn float2 move_uv(float2 uv, float4 row) { return uv + row.xy; }
+
+fn void build(out Output output)
+{
+	Row row = push.row[0];
+	output.uv = float2(0.25, 0.5);
+	if (row.count != 0)
+	{
+		uint which = min(row.count, 3);
+		output.uv = move_uv(output.uv, row.rows[which]);
+	}
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	Output output;
+	build(output);
+	return float4(output.uv, 0.0, 1.0);
+}
+`));
+
+	test::@check(error == "", "both argument shapes resolve together; got `%s`", error);
+}
+
+<*
+ A helper whose parameter is a vector it swizzles and assigns into.
+*>
+fn void a_helper_called_with_two_vector_literals() @test
+{
+	String error = shady_support::compile_error(`
+struct VertexIn { uint vid @builtin(vertex_index); }
+struct VertexOutput { float2 uv; float4 sv_position @position; }
+
+fn float2 variant_uv(float2 uv, float4 row)
+{
+	uint turns = ((uint)row.z) & 3;
+	if (turns == 1) uv = float2(uv.y, 1.0 - uv.x);
+	else if (turns == 2) uv = float2(1.0 - uv.x, 1.0 - uv.y);
+	else if (turns == 3) uv = float2(1.0 - uv.y, uv.x);
+
+	uint flip = (uint)row.w;
+	if ((flip & 1) != 0) uv.x = 1.0 - uv.x;
+	if ((flip & 2) != 0) uv.y = 1.0 - uv.y;
+
+	return uv + row.xy;
+}
+
+fn void build(VertexIn input, out VertexOutput output)
+{
+	output.uv = variant_uv(float2(0.0, 0.0), float4(0.0, 0.0, 0.0, 0.0));
+}
+
+fn VertexOutput vertexMain(VertexIn input) @vertex
+{
+	VertexOutput output;
+	build(input, output);
+	output.sv_position = float4(0.0, 0.0, 0.0, 1.0);
+	return output;
+}
+`);
+	test::@check(error == "", "a helper with two vector arguments resolves; got `%s`", error);
+}
