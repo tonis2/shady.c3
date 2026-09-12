@@ -511,10 +511,8 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
  coordinate. Vulkan rejects BuiltIn Position in a fragment shader outright
  (VUID-Position-Position-04318), so this is a translation, not a convenience.
 *>
-fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageVarList* out, ExecutionModel execution_model, uint line, uint column)
+fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageVarList* out, ExecutionModel execution_model, uint* next_location, uint line, uint column)
 {
-	uint next_location = 0;
-
 	foreach (i, &member : type.members)
 	{
 		if (member.is_position && storage == StorageClass.INPUT && execution_model != ExecutionModel.FRAGMENT)
@@ -538,13 +536,13 @@ fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageV
 		}
 		else
 		{
-			uint location = next_location;
+			uint location = *next_location;
 			if (Attribute* explicit_location = member.attributes.find("location"))
 			{
 				location = (uint)explicit_location.args[0].number;
 			}
 			self.mod.decorate(id, Decoration.LOCATION, location);
-			next_location = location + 1;
+			*next_location = location + 1;
 		}
 
 		// An integer cannot be interpolated, so a varying that carries one is Flat
@@ -610,22 +608,22 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 	Type* void_t  = self.types.find("void");
 	Id    fn_void = self.mod.type_function(self.type_id(void_t));
 
-	// Inputs, from the single parameter's struct type.
-	Type* input_type = null;
-	if (decl.function.params.len > 1)
+	// Inputs, one struct per parameter. A second parameter is how a stage takes
+	// a builtin beside its varying struct: a fragment's `front_facing` has no
+	// place in the struct the vertex stage writes, and Vulkan refuses a vertex
+	// output decorated with it.
+	uint next_input_location = 0;
+	foreach (p, param : decl.function.params)
 	{
-		self.fail(decl.line, decl.column, "an entry point takes at most one parameter");
-		return CODEGEN_ERROR~;
-	}
-	if (decl.function.params.len == 1)
-	{
-		input_type = self.types.find(decl.function.params[0].type.name);
+		Type* input_type = self.types.find(param.type.name);
 		if (!input_type || input_type.kind != STRUCT)
 		{
 			self.fail(decl.line, decl.column, "an entry point parameter must be a struct");
 			return CODEGEN_ERROR~;
 		}
-		self.stage_variables(input_type, StorageClass.INPUT, &self.inputs, execution_model, decl.line, decl.column)!;
+		sz first = (sz)self.inputs.len();
+		self.stage_variables(input_type, StorageClass.INPUT, &self.inputs, execution_model, &next_input_location, decl.line, decl.column)!;
+		for (sz i = first; i < (sz)self.inputs.len(); i++) self.inputs[i].parameter = (uint)p;
 	}
 
 	// Outputs, from the return type.
@@ -639,7 +637,8 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 
 	if (return_type.kind == STRUCT)
 	{
-		self.stage_variables(return_type, StorageClass.OUTPUT, &self.outputs, execution_model, decl.line, decl.column)!;
+		uint next_output_location = 0;
+		self.stage_variables(return_type, StorageClass.OUTPUT, &self.outputs, execution_model, &next_output_location, decl.line, decl.column)!;
 	}
 	else if (return_type.kind != VOID)
 	{
@@ -667,14 +666,16 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 	self.fn_return  = return_type;
 	self.terminated = false;
 
-	// Rebuild the parameter struct as a local, member by member.
-	if (input_type)
+	// Rebuild each parameter struct as a local, member by member.
+	foreach (p, param : decl.function.params)
 	{
+		Type* input_type = self.types.find(param.type.name);
 		Id pointer = function.local(self.pointer_to(StorageClass.FUNCTION, input_type));
-		self.mod.name(pointer, decl.function.params[0].name);
+		self.mod.name(pointer, param.name);
 
 		foreach (&input : self.inputs)
 		{
+			if (input.parameter != (uint)p) continue;
 			Id value  = function.load(self.type_id(input.type), input.id);
 			Id member = function.access_chain(
 				self.pointer_to(StorageClass.FUNCTION, input.type),
@@ -683,7 +684,7 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 			function.store(member, value);
 		}
 
-		self.locals.push({ .name = decl.function.params[0].name, .type = input_type, .pointer = pointer });
+		self.locals.push({ .name = param.name, .type = input_type, .pointer = pointer });
 	}
 
 	self.statement(decl.function.body)!;

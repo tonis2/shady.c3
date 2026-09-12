@@ -155,6 +155,10 @@ constdef Opcode : uint
 	BITWISE_XOR               = 198,
 	BITWISE_AND               = 199,
 
+	// Screen-space derivatives: core opcodes, not GLSL.std.450 instructions.
+	DPDX                      = 207,
+	DPDY                      = 208,
+
 	ATOMIC_I_ADD              = 234,
 
 	LOOP_MERGE                = 246,
@@ -259,6 +263,7 @@ constdef Builtin : uint
 	POSITION               = 0,
 	POINT_SIZE             = 1,
 	FRAG_COORD             = 15,
+	FRONT_FACING           = 17,
 	WORKGROUP_ID           = 26,
 	LOCAL_INVOCATION_ID    = 27,
 	GLOBAL_INVOCATION_ID   = 28,

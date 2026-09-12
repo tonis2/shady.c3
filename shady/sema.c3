@@ -454,6 +454,7 @@ fn bool builtin_from_name(String name, Builtin* out)
 		case "vertex_index":         *out = Builtin.VERTEX_INDEX;
 		case "instance_index":       *out = Builtin.INSTANCE_INDEX;
 		case "frag_coord":           *out = Builtin.FRAG_COORD;
+		case "front_facing":         *out = Builtin.FRONT_FACING;
 		case "global_invocation_id": *out = Builtin.GLOBAL_INVOCATION_ID;
 		case "local_invocation_id":  *out = Builtin.LOCAL_INVOCATION_ID;
 		case "workgroup_id":         *out = Builtin.WORKGROUP_ID;

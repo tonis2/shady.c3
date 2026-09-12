@@ -16,6 +16,13 @@ struct FragmentIn
     float4 color;
 }
 
+// A second entry parameter, so a fragment can take a builtin beside its
+// varyings: `front_facing` has no place in the struct a vertex stage writes.
+struct FragmentFace
+{
+    bool front_facing @builtin(front_facing);
+}
+
 fn FragmentIn vert(VertexIn input) @vertex(main)
 {
     FragmentIn output;
@@ -24,7 +31,7 @@ fn FragmentIn vert(VertexIn input) @vertex(main)
     return output;
 }
 
-fn float4 frag(FragmentIn input) @fragment
+fn float4 frag(FragmentIn input, FragmentFace face) @fragment
 {
     float4x4 m = uniforms.view_projection;
     float4x4 squared = mul(m, m);
@@ -45,7 +52,17 @@ fn float4 frag(FragmentIn input) @fragment
     }
 
     float4 chosen = select(float4(0.0), squared[0], edge > 0.5);
-    return chosen + clip + float4(blended * scaled, total + float(bits & 255u));
+
+    // Screen-space derivatives: core `OpDPdx`/`OpDPdy`, so a fragment shader
+    // only - which is what the validator is here to say.
+    float2 slope = float2(ddx(input.color.x), ddy(input.color.y));
+
+    // `frac` is Slang's spelling of GLSL's `fract`; the material library uses
+    // both and they are one instruction.
+    float folded = frac(input.color.z + 0.5) + fract(input.color.w - 0.5);
+
+    return chosen + clip + float4(blended * scaled, total + float(bits & 255u))
+        + float4(slope, 0.0, folded) + float4(face.front_facing ? 0.25 : 0.0);
 }
 
 // `atan2(y, x)` is GLSL.std.450's Atan2 - the quadrant-aware arctangent, which

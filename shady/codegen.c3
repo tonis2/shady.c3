@@ -60,6 +60,10 @@ struct StageVar
 	Id    id;
 	Type* type;
 	usz   member_index;
+	// Which of the entry point's parameter structs this variable came from.
+	// Zero for every stage whose interface is one struct, which is all of the
+	// corpus but a fragment taking a builtin beside its varyings.
+	uint  parameter;
 	bool  is_position;
 }
 
@@ -2355,6 +2359,15 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 			Opcode opcode = name == "any" ? Opcode.ANY : Opcode.ALL;
 			return (Value) { .type = bool_t, .id = self.func.unop(opcode, self.type_id(bool_t), args[0]) };
 		}
+		case "ddx":
+		case "ddy":
+		{
+			// Core opcodes, so they stay out of the GLSL.std.450 dispatch below.
+			// The result has the operand's own shape, which is what GLSL's
+			// `dFdx` family says as well.
+			Opcode opcode = name == "ddx" ? Opcode.DPDX : Opcode.DPDY;
+			return (Value) { .type = first, .id = self.func.unop(opcode, self.type_id(first), args[0]) };
+		}
 		default:
 			break;
 	}
@@ -2378,6 +2391,7 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 		case "ceil":        instruction = GlslOp.CEIL;
 		case "round":       instruction = GlslOp.ROUND;
 		case "fract":       instruction = GlslOp.FRACT;
+		case "frac":        instruction = GlslOp.FRACT; // Slang's spelling
 		case "sin":         instruction = GlslOp.SIN;
 		case "cos":         instruction = GlslOp.COS;
 		case "tan":         instruction = GlslOp.TAN;
