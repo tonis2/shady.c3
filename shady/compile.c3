@@ -849,26 +849,26 @@ fn void? Codegen.build(&self)
 	{
 		if (decl.kind != DeclKind.FUNCTION) continue;
 
-		uint       execution_model;
-		Attribute* stage;
-		if (stage = decl.attributes.find( "vertex"), stage)
+		// Whichever of the stage attributes this function carries. Asked of
+		// `Stage` rather than compared here, because the same list is what a
+		// generator writing a module has to spell.
+		Stage      kind;
+		Attribute* stage = null;
+		foreach (&attribute : decl.attributes)
 		{
-			execution_model = EXECUTION_MODEL_VERTEX;
+			if (stage_from_attribute(attribute.name, &kind))
+			{
+				stage = attribute;
+				break;
+			}
 		}
-		else if (stage = decl.attributes.find( "fragment"), stage)
-		{
-			execution_model = EXECUTION_MODEL_FRAGMENT;
-		}
-		else if (stage = decl.attributes.find( "compute"), stage)
-		{
-			execution_model = EXECUTION_MODEL_GLCOMPUTE;
-		}
-		else
+		if (!stage)
 		{
 			// An ordinary function: declared by declare_functions and emitted
 			// on first call. Not an entry point, so nothing to do here.
 			continue;
 		}
+		uint execution_model = kind.execution_model();
 
 		String entry_name = self.entry_name(decl, stage)!;
 		foreach (taken : entry_names)
