@@ -64,7 +64,7 @@ fn float4 frag(FragmentIn input) @fragment
     float4x4 m = float4x4(input.color, input.color, input.color, input.color);
     float3x3 small = (float3x3)m;
     uint3 bits = (uint3)int3(1, 2, 3);
-    float scalar = (float)bits.x + (uint)small[0].x;
+    float scalar = (float)bits.x + (float)(uint)small[0].x;
     return float4(small[0], scalar);
 }
 `));
@@ -186,4 +186,47 @@ fn float4 frag(FragmentIn input) @fragment
 
 	test::@check(error.contains("cannot assign"),
 		"a masked write is refused rather than half done; got `%s`", error);
+}
+
+<*
+ A `uint` and a `float` are not mixed implicitly: only literals adapt, so the
+ two sides of an operation have to agree on their kind, or one of them is
+ converted where the port writes it.
+*>
+fn void a_float_and_a_uint_are_not_mixed() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	uint count = 3u;
+	float half = 0.5;
+	return float4(half / count);
+}
+`));
+
+	test::@check(error.contains("convert one side explicitly"),
+		"mixing a float with a uint is refused; got `%s`", error);
+}
+
+<*
+ `uint` arithmetic is unsigned: SPIR-V picks the opcode by signedness, and a
+ division or comparison compiled as signed is wrong above half the range.
+*>
+fn void uint_arithmetic_is_unsigned() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	uint a = uint(input.color.x * 8.0);
+	uint b = a / 2u;
+	uint c = a % 3u;
+	bool  d = a < c;
+	return float4(float(b + c), 0.0, 0.0, d ? 1.0 : 0.0);
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::OP_U_DIV), "a uint divide is OpUDiv");
+	test::@check(shady_support::has_opcode(spirv, shady::OP_U_MOD), "a uint remainder is OpUMod");
+	test::@check(shady_support::has_opcode(spirv, shady::OP_U_LESS_THAN), "a uint compare is OpULessThan");
 }

@@ -360,6 +360,30 @@ fn Type*? Codegen.resolve_type(&self, TypeRef ref, uint line, uint column)
 
 // --- Constants ---------------------------------------------------------------
 
+<*
+ An untyped integer literal takes the kind of the other side: `u & 1` is a uint
+ operation, `v * 2` multiplies floats, and `bits <<= 2` shifts by a uint. That
+ is the one implicit conversion the language has (LANGUAGE.md 5.3) - everything
+ else has to say what it means with a cast.
+*>
+fn Value Codegen.adapt_literal(&self, Value value, Expr* side, Type* other)
+{
+	if (side.kind != INT_LITERAL || value.type.kind != INT && value.type.kind != UINT) return value;
+
+	switch (other.scalar().kind)
+	{
+		case UINT:
+		{
+			Type* uint_t = self.types.find("uint");
+			return (Value) { .type = uint_t, .id = self.mod.const_u32(self.type_id(uint_t), (uint)side.literal.value) };
+		}
+		case FLOAT:
+			return (Value) { .type = self.types.find("float"), .id = self.const_float(side.literal.value) };
+		default:
+			return value;
+	}
+}
+
 fn Id Codegen.const_float(&self, double value)
 {
 	return self.mod.const_f32(self.type_id(self.types.find("float")), (float)value);
@@ -788,6 +812,7 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 		// `a += b` is `a = a + b`, with the same operator selection.
 		TokenKind op = compound_op(expr.assign.op);
 		Value current = { .type = target.type, .id = self.rvalue(target) };
+		value = self.adapt_literal(value, expr.assign.value, target.type);
 		id = self.arithmetic(op, current, value, expr)!;
 	}
 
@@ -823,6 +848,7 @@ fn Value? Codegen.assign_component(&self, Expr* expr, Expr* member, Value base, 
 	else
 	{
 		Value now = { .type = scalar, .id = part };
+		value = self.adapt_literal(value, expr.assign.value, scalar);
 		id = self.arithmetic(compound_op(expr.assign.op), now, value, expr)!;
 	}
 
@@ -1030,6 +1056,8 @@ fn Value? Codegen.binary_expression(&self, Expr* expr)
 {
 	Value left  = self.expression(expr.binary.left)!;
 	Value right = self.expression(expr.binary.right)!;
+	left  = self.adapt_literal(left, expr.binary.left, right.type);
+	right = self.adapt_literal(right, expr.binary.right, left.type);
 	Id    id    = self.arithmetic(expr.binary.op, left, right, expr)!;
 
 	Type* result = self.result_type(expr.binary.op, left.type, right.type);
@@ -1156,8 +1184,22 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 		lt      = rt;
 	}
 
-	bool is_float = lt.scalar().kind == FLOAT;
+	// The two sides have to agree: only literals are converted implicitly
+	// (LANGUAGE.md 5.3), so a `uint` next to a `float` is refused here rather
+	// than carried into an instruction whose operands do not match its type.
+	// That mismatch is invalid SPIR-V, and a driver that is handed one may do
+	// anything - RADV crashes rather than reporting it.
+	if (lt.scalar().kind != rt.scalar().kind)
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"cannot use a %s and a %s in one operation - convert one side explicitly",
+			lt.name, rt.name));
+		return CODEGEN_ERROR~;
+	}
+
+	bool is_float  = lt.scalar().kind == FLOAT;
 	bool is_signed = lt.scalar().kind == INT;
+	bool is_uint   = lt.scalar().kind == UINT;
 	Id   type      = self.type_id(lt);
 	Id   bool_type = self.type_id(self.result_type(op, lt, rt));
 
@@ -1166,8 +1208,8 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 		case PLUS:    return self.func.binop(is_float ? OP_F_ADD : OP_I_ADD, type, left_id, right_id);
 		case MINUS:   return self.func.binop(is_float ? OP_F_SUB : OP_I_SUB, type, left_id, right_id);
 		case STAR:    return self.func.binop(is_float ? OP_F_MUL : OP_I_MUL, type, left_id, right_id);
-		case SLASH:   return self.func.binop(is_float ? OP_F_DIV : OP_S_DIV, type, left_id, right_id);
-		case PERCENT: return self.func.binop(is_float ? OP_F_MOD : OP_S_MOD, type, left_id, right_id);
+		case SLASH:   return self.func.binop(is_float ? OP_F_DIV : (is_uint ? OP_U_DIV : OP_S_DIV), type, left_id, right_id);
+		case PERCENT: return self.func.binop(is_float ? OP_F_MOD : (is_uint ? OP_U_MOD : OP_S_MOD), type, left_id, right_id);
 		case AMP:     return self.func.binop(OP_BITWISE_AND, type, left_id, right_id);
 		case PIPE:    return self.func.binop(OP_BITWISE_OR, type, left_id, right_id);
 		case CARET:   return self.func.binop(OP_BITWISE_XOR, type, left_id, right_id);
@@ -1175,10 +1217,10 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 		case SHR:     return self.func.binop(is_signed ? OP_SHIFT_RIGHT_ARITHMETIC : OP_SHIFT_RIGHT_LOGICAL, type, left_id, right_id);
 		case EQ_EQ:   return self.func.binop(is_float ? OP_F_ORD_EQUAL : OP_I_EQUAL, bool_type, left_id, right_id);
 		case BANG_EQ: return self.func.binop(is_float ? OP_F_ORD_NOT_EQUAL : OP_I_NOT_EQUAL, bool_type, left_id, right_id);
-		case LT:      return self.func.binop(is_float ? OP_F_ORD_LESS_THAN : OP_S_LESS_THAN, bool_type, left_id, right_id);
-		case LT_EQ:   return self.func.binop(is_float ? OP_F_ORD_LESS_THAN_EQUAL : OP_S_LESS_THAN_EQUAL, bool_type, left_id, right_id);
-		case GT:      return self.func.binop(is_float ? OP_F_ORD_GREATER_THAN : OP_S_GREATER_THAN, bool_type, left_id, right_id);
-		case GT_EQ:   return self.func.binop(is_float ? OP_F_ORD_GREATER_THAN_EQUAL : OP_S_GREATER_THAN_EQUAL, bool_type, left_id, right_id);
+		case LT:      return self.func.binop(is_float ? OP_F_ORD_LESS_THAN : (is_uint ? OP_U_LESS_THAN : OP_S_LESS_THAN), bool_type, left_id, right_id);
+		case LT_EQ:   return self.func.binop(is_float ? OP_F_ORD_LESS_THAN_EQUAL : (is_uint ? OP_U_LESS_THAN_EQUAL : OP_S_LESS_THAN_EQUAL), bool_type, left_id, right_id);
+		case GT:      return self.func.binop(is_float ? OP_F_ORD_GREATER_THAN : (is_uint ? OP_U_GREATER_THAN : OP_S_GREATER_THAN), bool_type, left_id, right_id);
+		case GT_EQ:   return self.func.binop(is_float ? OP_F_ORD_GREATER_THAN_EQUAL : (is_uint ? OP_U_GREATER_THAN_EQUAL : OP_S_GREATER_THAN_EQUAL), bool_type, left_id, right_id);
 		case AMP_AMP: return self.func.binop(OP_LOGICAL_AND, bool_type, left_id, right_id);
 		case PIPE_PIPE: return self.func.binop(OP_LOGICAL_OR, bool_type, left_id, right_id);
 		default:

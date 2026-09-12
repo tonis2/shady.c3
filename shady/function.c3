@@ -205,9 +205,11 @@ fn Id Function.composite_extract(&self, Id type, Id composite, uint... indices)
 fn Id Function.composite_insert(&self, Id type, Id composite, Id object, uint... indices)
 {
 	@pool() {
+		// Object first, composite second: that is the order the instruction
+		// takes them in, unlike `composite_extract`.
 		Id[] operands = alloc::alloc_array(tmem, Id, 2 + indices.len);
-		operands[0] = composite;
-		operands[1] = object;
+		operands[0] = object;
+		operands[1] = composite;
 		foreach (i, index : indices) operands[2 + i] = index;
 		return self.emit_slice(OP_COMPOSITE_INSERT, type, operands);
 	};
