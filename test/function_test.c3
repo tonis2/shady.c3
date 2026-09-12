@@ -390,3 +390,98 @@ fn float4 other(FragmentIn input) @fragment { return input.color; }
 	test::@check(error.contains("cannot be declared without a body"),
 		"an entry point needs a body; got `%s`", error);
 }
+
+<*
+ `@required`: a function this module needs and does not contain.
+
+ This is the seam a material supplies - the geometry half calls `shade`, the
+ material half's text defines it - spelled as a claim rather than as a call the
+ reader has to notice.
+*>
+fn void a_required_function_is_filled_by_its_definition() @test
+{
+	String error = shady_support::compile_error(`
+struct FragmentIn
+{
+	float4 color;
+}
+
+struct Shaded { float4 albedo; }
+
+fn Shaded shade(FragmentIn input) @required;
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	Shaded shaded = shade(input);
+	return shaded.albedo;
+}
+
+fn Shaded shade(FragmentIn input)
+{
+	Shaded shaded;
+	shaded.albedo = input.color;
+	return shaded;
+}
+`);
+
+	test::@check(error == "", "a required function can be defined after its declaration; got `%s`", error);
+}
+
+<*
+ The difference from a plain declaration, and the whole reason the attribute
+ exists: **nobody has to call it** for the module to be wrong. A module that
+ says it needs a definition and gets none is refused, once, at the declaration.
+*>
+fn void a_required_function_nobody_defines_is_refused() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 shade(FragmentIn input) @required;
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	return input.color;
+}
+`));
+
+	test::@check(error.contains("@required") && error.contains("nothing in this module defines it"),
+		"an unfilled requirement names itself; got `%s`", error);
+}
+
+<*
+ A plain declaration keeps the old behaviour: it is refused where it is *called*,
+ because a module may declare something it only sometimes provides.
+*>
+fn void a_plain_declaration_is_still_only_checked_at_the_call() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 shade(FragmentIn input);
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	return input.color;
+}
+`));
+
+	test::@check(error == "", "an unused declaration is not an error; got `%s`", error);
+}
+
+<*
+ `@required` says "not here", so a body in the same breath is a contradiction
+ rather than a definition that wins.
+*>
+fn void a_required_function_cannot_have_a_body() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 shade(FragmentIn input) @required
+{
+	return input.color;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	return shade(input);
+}
+`));
+
+	test::@check(error.contains("@required"), "a required function with a body is refused; got `%s`", error);
+}

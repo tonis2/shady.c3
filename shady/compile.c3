@@ -844,6 +844,7 @@ fn void? Codegen.build(&self)
 	self.declare_structs(self.ast)!;
 	self.declare_constants(self.ast)!;
 	self.declare_functions(self.ast)!;
+	self.check_required()!;
 	self.assign_bindings(self.ast)!;
 	self.emit_resources(self.ast)!;
 

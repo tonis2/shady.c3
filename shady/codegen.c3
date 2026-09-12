@@ -83,6 +83,12 @@ struct FunctionSig
 	Id      func_id;
 	bool    emitted;
 	bool    emitting; // set while the body is being emitted, to catch recursion
+
+	// `@required`: this module needs a definition it does not contain, and the
+	// text that provides one is spliced in from elsewhere. Carried on the
+	// signature rather than read off the declaration, because the declaration is
+	// what the definition replaces.
+	bool    required;
 }
 
 alias FunctionSigList = List{FunctionSig};
@@ -1441,8 +1447,18 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 			at++;
 		}
 
+		bool has_body = decl.function.body != null;
+		if (decl.attributes.find("required") && has_body)
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"`%s` is @required, so it cannot have a body here - the body is what the text spliced into this module provides",
+				decl.name));
+			return CODEGEN_ERROR~;
+		}
+
 		FunctionSig sig = {
 			.decl          = decl,
+			.required      = decl.attributes.find("required") != null,
 			.return_type   = return_type,
 			.params        = params,
 			.names         = names,
@@ -1477,6 +1493,10 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 
 		bool earlier_has_body  = earlier.decl.function.body != null;
 		bool declared_has_body = decl.function.body != null;
+
+		// The declaration's marker survives the fill: it is a claim about the
+		// module, and the definition does not withdraw it.
+		sig.required = sig.required || earlier.required;
 
 		if (earlier_has_body && declared_has_body)
 		{
@@ -1516,6 +1536,26 @@ fn bool signatures_agree(FunctionSig* declared, FunctionSig* defined) @private
 		if (declared.outs[i] != defined.outs[i]) return false;
 	}
 	return true;
+}
+
+<*
+ Every `@required` function has a definition.
+
+ Asked of the signatures and not of the call sites, which is the difference
+ between this and a plain declaration: a declaration nobody filled is only wrong
+ if something calls it, and a *required* one is wrong because the module said it
+ needs it. The ordinary declaration keeps its old behaviour - refused where it is
+ called - because a module may declare a function it only sometimes provides.
+*>
+fn void? Codegen.check_required(&self)
+{
+	foreach (&sig : self.functions)
+	{
+		if (!sig.required || sig.decl.function.body) continue;
+		self.fail(sig.decl.line, sig.decl.column, string::format(self.allocator,
+			"`%s` is @required, and nothing in this module defines it", sig.decl.name));
+		return CODEGEN_ERROR~;
+	}
 }
 
 fn bool Codegen.has_function(&self, String name)
