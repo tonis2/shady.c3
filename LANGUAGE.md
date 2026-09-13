@@ -20,7 +20,7 @@ Source is UTF-8. Whitespace is insignificant except as a token separator.
 **Identifiers** match `[A-Za-z_][A-Za-z0-9_]*`.
 
 **Keywords**: `fn` `struct` `const` `return` `if` `else` `while` `for` `break`
-`continue` `discard` `true` `false` `interface` `provides` `import`.
+`continue` `discard` `true` `false` `interface` `implements` `import`.
 Reserved for later: `in` `out` `switch` `case` `default` `do`.
 
 `uniform`, `buffer` and `push_constant` are *not* keywords — they used to be,
@@ -316,17 +316,22 @@ it and a definition fills it exactly as it fills a plain declaration (§3.1).
 What the interface adds is the name for the set:
 
 ```
-provides AreaAlgorithm;
+implements AreaAlgorithm;
 ```
 
-`provides I;` states that this module defines every member of `I`. It is
+`implements I;` states that this module defines every member of `I`. It is
 `@required` generalised from one declaration to a named set: the claim is
 checked once per module, whether or not anything calls the members, and a
 missing member is an error naming the interface and the member. Defining an
 overload of a member's name is not defining the member - the return type and
 parameter types have to match.
 
-A module that declares an interface without `provides` is not claiming
+The interface has to be part of the module: declared in its own text, or read
+out of an imported file by name (§3.6). `implements` is where a reader learns
+which interface the module answers for, beside the import that says where it
+lives.
+
+A module that declares an interface without `implements` is not claiming
 anything: its members are ordinary declarations, refused only where they are
 called.
 
@@ -334,17 +339,32 @@ A member is a plain function: no receiver, no attributes, no body.
 
 Where a module's text is more than one file (§3.6), the check runs on the
 module, not per file: one file may declare the interface, another define a
-member, and a third write `provides`.
+member, and a third write `implements`.
 
 ### 3.6 Imports
 
 ```
 import "lighting.shady";
+import { AreaAlgorithm } from "lighting.shady";
 ```
 
-An import is a module-level statement and stands alone on its line. It joins
-the imported file's text to this module before the module is parsed: a module's
-text is its **import closure**.
+An import is a module-level statement and stands alone on its line. Both forms
+join the imported file's text to this module before the module is parsed: a
+module's text is its **import closure**.
+
+The braces of the named form name what was read out of the file: every name
+must be an interface the file declares, and one the file does not declare is
+refused at the import. That is the form a module writes when it implements an
+interface (§3.5), so the interface is spelled next to the file it lives in:
+
+```
+import { AreaAlgorithm } from "lighting.shady";
+
+implements AreaAlgorithm;
+```
+
+A file named by both forms is included once: the closure is a set of files,
+whichever spelling named it.
 
 The imported file is resolved like every other source - the program embedding
 the compiler supplies it, disk first and its embedded copy as fallback in
@@ -356,8 +376,8 @@ Each file keeps its own `#line` region (§1.1), so a diagnostic inside an
 imported file names *that* file and its own line rather than a line in the
 spliced module.
 
-- A file imported twice is included once: the closure is a set of files, so a
-  diamond import is one copy.
+- A file imported twice, by either form, is included once: the closure is a set
+  of files, so a diamond import is one copy.
 - Imports may not form a cycle; one is an error naming the cycle.
 - Name resolution is unchanged by the splice. The closure is one flat module,
   so an imported function, struct or constant resolves wherever it is written,

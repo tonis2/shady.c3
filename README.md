@@ -169,9 +169,10 @@ through an address, matrix add/subtract, `InterlockedAdd`, combined
 `SampleCmpLevelZero` variants, several descriptor sets in one module,
 specialization constants (`const bool X @spec(0) = true;`) for one module
 serving several variants, interfaces (`interface I { ... }` plus
-`provides I;`, a compile-time obligation with no vtables and no dispatch),
-`import "file.shady";` with the module's text as its import closure (each file
-in its own `#line` region, a cycle refused, a repeated import included once),
+`implements I;`, a compile-time obligation with no vtables and no dispatch),
+`import "file.shady";` and `import { I } from "file.shady";` with the module's
+text as its import closure (each file in its own `#line` region, a cycle
+refused, a repeated import included once),
 `#line` source maps for diagnostics on generated bodies, and warnings reported
 on the success path beside the fault.
 

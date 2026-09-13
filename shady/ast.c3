@@ -326,8 +326,8 @@ enum DeclKind : char
 	FUNCTION,
 	RESOURCE, // uniform blocks, textures, samplers
 	CONSTANT,
-	INTERFACE, // a named set of function declarations
-	PROVIDES,  // `provides I;`: this module claims to define every member of I
+	INTERFACE,  // a named set of function declarations
+	IMPLEMENTS, // `implements I;`: this module defines every member of I
 }
 
 struct DeclStruct
@@ -370,7 +370,7 @@ struct DeclConstant
  
  Each member is also registered as an ordinary top-level function declaration -
  one without a body - so a call resolves through it and a definition fills it
- exactly as it fills a plain declaration. `provides` is what turns a member's
+ exactly as it fills a plain declaration. `implements` is what turns a member's
  absence from "only wrong if called" into an error (LANGUAGE.md section 3.5).
 *>
 struct DeclInterface
@@ -379,10 +379,10 @@ struct DeclInterface
 }
 
 <*
- `provides I;`, a module-level claim that every member of `I` is defined in this
- module. Checked once, on the whole module's text.
+ `implements I;`, a module-level statement that every member of `I` is defined
+ in this module. Checked once, on the whole module's text.
 *>
-struct DeclProvider
+struct DeclImplements
 {
 	String interface_name;
 }
@@ -407,7 +407,7 @@ struct Decl
 		DeclResource resource;
 		DeclConstant constant;
 		DeclInterface interface_decl;
-		DeclProvider provider;
+		DeclImplements implements_decl;
 	}
 }
 

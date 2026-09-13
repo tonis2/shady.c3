@@ -1,5 +1,5 @@
 <*
- `interface` and `provides`: a named set of declarations, and a module's claim
+ `interface` and `implements`: a named set of declarations, and a module's claim
  that it defines every one of them (LANGUAGE.md section 3.5).
 
  An interface is static - there is no `any`, no vtable, no run-time dispatch.
@@ -29,7 +29,7 @@ interface Shading
 fn float3 diffuse(Surface s) { return s.albedo; }
 fn float3 ambient(Surface s) { return s.albedo * 0.1; }
 
-provides Shading;
+implements Shading;
 
 fn float4 shade(FragmentIn input)
 {
@@ -64,7 +64,7 @@ interface Shading
 
 fn float3 diffuse(Surface s) { return s.albedo; }
 
-provides Shading;
+implements Shading;
 
 fn float4 frag(FragmentIn input) @fragment
 {
@@ -90,7 +90,7 @@ interface Shading
 
 fn float3 tint(float4 color) { return color.rgb; }
 
-provides Shading;
+implements Shading;
 
 fn float4 frag(FragmentIn input) @fragment
 {
@@ -103,10 +103,10 @@ fn float4 frag(FragmentIn input) @fragment
 }
 
 <*
- Declaring an interface is not claiming it: no `provides`, no obligation. A
+ Declaring an interface is not claiming it: no `implements`, no obligation. A
  plain declaration keeps the same rule.
 *>
-fn void an_interface_nobody_provides_is_not_an_error() @test
+fn void an_interface_nobody_implements_is_not_an_error() @test
 {
 	String error = shady_support::compile_error(shady_support::fragment(`
 interface Optional
@@ -126,7 +126,7 @@ fn float4 frag(FragmentIn input) @fragment
 fn void providing_an_interface_that_does_not_exist_is_refused() @test
 {
 	String error = shady_support::compile_error(shady_support::fragment(`
-provides Nonesuch;
+implements Nonesuch;
 
 fn float4 frag(FragmentIn input) @fragment
 {
@@ -156,8 +156,8 @@ interface Bright
 
 fn float3 glow() { return float3(1.0); }
 
-provides Luminous;
-provides Bright;
+implements Luminous;
+implements Bright;
 
 fn float4 frag(FragmentIn input) @fragment
 {

@@ -245,15 +245,17 @@ fn float4 frag(FragmentIn input) @fragment
 }
 
 <*
- An interface declared in an imported file and provided by the root: the check
- runs on the module, so the two halves meet.
+ An interface declared in an imported file and implemented by the root: the
+ check runs on the module, so the two halves meet. Both import forms name the
+ same file, which is still included once.
 *>
 fn void an_interface_in_an_imported_file_is_checked_on_the_module() @test
 {
 	String error = compile_imports(shady_support::fragment(`
 import "contract.shady";
+import { Shading } from "contract.shady";
 
-provides Shading;
+implements Shading;
 
 fn float3 shade(Surface s)
 {
@@ -274,6 +276,101 @@ fn float4 frag(FragmentIn input) @fragment
 `));
 
 	test::@check(error == "", "an imported interface should be satisfied across files; got `%s`", error);
+}
+
+<*
+ The named form on its own: the interface it names is in the module, and the
+ module can implement it.
+*>
+fn void a_named_import_resolves_an_interface() @test
+{
+	String error = compile_imports(shady_support::fragment(`
+import { Shading } from "contract.shady";
+
+implements Shading;
+
+fn float3 shade(Surface s)
+{
+	return s.albedo;
+}
+
+fn float4 shaded(FragmentIn input)
+{
+	Surface s;
+	s.albedo = input.color.rgb;
+	return float4(lit(s), 1.0);
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	return shaded(input);
+}
+`));
+
+	test::@check(error == "", "a named import should make its interface implementable; got `%s`", error);
+}
+
+<*
+ A named import against the interface the file does not declare is refused at
+ the import, naming both.
+*>
+fn void a_named_import_the_file_does_not_declare_is_refused() @test
+{
+	String error = resolve_error(`import { Nonesuch } from "contract.shady";
+`);
+
+	test::@check(error.contains("contract.shady") && error.contains("Nonesuch")
+		&& error.contains("does not declare"),
+		"a name the file does not declare should be refused by name; got `%s`", error);
+}
+
+<*
+ An interface brought in by name still carries the whole-module obligation: a
+ member with no exact-signature definition is refused, naming the interface and
+ the member.
+*>
+fn void a_named_imports_missing_member_is_refused() @test
+{
+	String error = compile_imports(shady_support::fragment(`
+import { Shading } from "contract.shady";
+
+implements Shading;
+
+fn float3 something_else(Surface s)
+{
+	return s.albedo;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+	return input.color;
+}
+`));
+
+	test::@check(error.contains("Shading") && error.contains("shade"),
+		"the refusal should name the interface and the missing member; got `%s`", error);
+}
+
+<*
+ A file named by both forms is one copy: the closure holds the interface once.
+*>
+fn void a_file_named_by_both_forms_is_included_once() @test
+{
+	String? resolved = shady::resolve_imports(shady_support::fragment(`
+import "contract.shady";
+import { Shading } from "contract.shady";
+`), "root.shady", &fixture_import);
+	if (catch resolved)
+	{
+		test::@check(false, "resolution should succeed");
+		return;
+	}
+	String closure = resolved;
+	defer free(closure);
+
+	test::@check(count_of(closure, "interface Shading") == 1,
+		"one file named twice should stand once; found the interface %d times",
+		count_of(closure, "interface Shading"));
 }
 
 fn void an_import_must_stand_alone_on_its_line() @test

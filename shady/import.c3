@@ -1,16 +1,24 @@
 <*
- `import "file.shady";`, resolved before parsing (LANGUAGE.md section 3.6).
+ Imports, resolved before parsing (LANGUAGE.md section 3.6).
 
- A module's text is its import closure: every imported file's text joins the
+ Both forms join a file's text to the module before it is parsed:
+
+     import "lighting.shady";
+     import { AreaAlgorithm } from "lighting.shady";
+
+ A module's text is its **import closure**: every imported file's text joins the
  module, each under its own `#line` region so a diagnostic names the file it is
- in rather than a line in a spliced blob. The compiler itself never touches the
- disk - a caller supplies the text of each name through an `ImportResolver`, and
- three.c3's `load_source` is one.
+ in rather than a line in a spliced blob. The named form additionally says what
+ was read out of the file: every name in braces must be an interface the file
+ declares, which is how a file can implement one and still name its home.
 
- Cycles are refused. A file imported twice is included once: the closure is a
- set of files, so the second import of a name has nothing left to add. Both
- rules need state that spans the whole recursion, which is why resolution -
- unlike parsing - owns the walk.
+ The compiler itself never touches the disk - a caller supplies the text of each
+ name through an `ImportResolver`, and three.c3's `load_source` is one.
+
+ Cycles are refused. A file imported twice, by either form, is included once:
+ the closure is a set of files, so the second import of a name has nothing left
+ to add. Both rules need state that spans the whole recursion, which is why
+ resolution - unlike parsing - owns the walk.
 
  The result is always a new string on `allocator`, even when there is nothing
  to resolve, so a caller can free what it is handed without asking where it
@@ -31,13 +39,23 @@ faultdef IMPORT_ERROR;
 *>
 alias ImportResolver = fn String?(String name, Allocator allocator);
 
-// One `import "name";`, as the line it sits on.
+// One `import`, as the line it sits on. A plain import has no names; a named
+// one carries the declarations it read out of the file.
 struct ImportSite @local
 {
-	uint   line;
-	uint   column;
-	uint   length;
-	String name;
+	uint     line;
+	uint     column;
+	uint     length;
+	String   name;
+	String[] names;
+}
+
+// A file the closure already holds, with the interfaces its text declares -
+// what a later named import of the same file is checked against.
+struct IncludedFile @local
+{
+	String   name;
+	String[] interfaces;
 }
 
 struct ImportContext @local
@@ -53,7 +71,7 @@ struct ImportContext @local
 	List{String} open;
 	// The files already in the closure. A name here is skipped, so a diamond
 	// import is one copy of the file.
-	List{String} included;
+	List{IncludedFile} included;
 }
 
 <*
@@ -111,7 +129,8 @@ fn String? resolve_imports(
  A scan rather than a tokenize, because this runs on every file a caller loads -
  including the Slang templates three.c3 still hands `load_source` - and those do
  not lex as shady at all. The shape looked for is `import` followed by blanks
- and a quote, which is specific enough that no shipped template contains it.
+ and a quote or a brace, which is specific enough that no shipped template
+ contains it.
 *>
 fn bool mentions_import(String source) @local
 {
@@ -135,10 +154,168 @@ fn bool mentions_import(String source) @local
 		{
 			after++;
 		}
-		if (after < source.len && source[after] == '"') return true;
+		if (after < source.len && (source[after] == '"' || source[after] == '{')) return true;
 		at++;
 	}
 	return false;
+}
+
+<*
+ One import statement: `import "file";` or `import { A, B } from "file";`.
+
+ On success fills `site` and returns the index just past the `;`. On failure
+ reports through `diagnostic` and raises IMPORT_ERROR.
+*>
+fn sz? parse_import_site(
+	ImportContext* context,
+	TokenList* tokens,
+	sz at,
+	ImportSite* site,
+	Diagnostic* diagnostic,
+	Allocator allocator,
+	String source,
+	String name) @local
+{
+	TokenList list  = *tokens;
+	Token     token = list[at];
+
+	if (list[at + 1].kind == LBRACE)
+	{
+		List{String} names;
+		names.init(context.scratch, 4);
+
+		sz cursor = at + 2;
+		while (true)
+		{
+			if (list[cursor].kind != IDENT)
+			{
+				import_fail(diagnostic, allocator, source, name, token.line, token.column,
+					(uint)token.text.len, "expected a name inside the import braces");
+				return IMPORT_ERROR~;
+			}
+			names.push(list[cursor].text);
+			cursor++;
+			if (list[cursor].kind == COMMA)
+			{
+				cursor++;
+				continue;
+			}
+			break;
+		}
+		if (list[cursor].kind != RBRACE)
+		{
+			import_fail(diagnostic, allocator, source, name, token.line, token.column,
+				(uint)token.text.len, "expected `}` closing the imported names");
+			return IMPORT_ERROR~;
+		}
+		cursor++;
+		if (list[cursor].kind != IDENT || list[cursor].text != "from")
+		{
+			import_fail(diagnostic, allocator, source, name, token.line, token.column,
+				(uint)token.text.len, "expected `from` after the imported names");
+			return IMPORT_ERROR~;
+		}
+		cursor++;
+		if (list[cursor].kind != STRING)
+		{
+			import_fail(diagnostic, allocator, source, name, token.line, token.column,
+				(uint)token.text.len, "expected a quoted file name after `from`");
+			return IMPORT_ERROR~;
+		}
+		String imported = list[cursor].text;
+		if (imported.len == 0)
+		{
+			import_fail(diagnostic, allocator, source, name, token.line, token.column,
+				(uint)list[cursor].text.len + 2, "an import needs a file name");
+			return IMPORT_ERROR~;
+		}
+		cursor++;
+
+		// The line is replaced whole, so nothing else may stand on it.
+		if (!(at == 0 || list[at - 1].line < token.line))
+		{
+			import_fail(diagnostic, allocator, source, name, token.line, token.column,
+				(uint)token.text.len, "an import stands alone on its line");
+			return IMPORT_ERROR~;
+		}
+		if (list[cursor].kind != SEMICOLON)
+		{
+			bool ends_line = list[cursor].kind == EOF || list[cursor].line > token.line;
+			uint span = list[cursor].line == token.line
+				? list[cursor].column + (uint)list[cursor].text.len - token.column
+				: (uint)token.text.len;
+			import_fail(diagnostic, allocator, source, name, token.line, token.column, span,
+				ends_line
+					? "expected `;` after the imported file name"
+					: "an import stands alone on its line");
+			return IMPORT_ERROR~;
+		}
+		bool ends_line = list[cursor + 1].kind == EOF || list[cursor + 1].line > token.line;
+		if (!ends_line)
+		{
+			import_fail(diagnostic, allocator, source, name, token.line, token.column,
+				(uint)list[cursor].text.len, "an import stands alone on its line");
+			return IMPORT_ERROR~;
+		}
+
+		*site = {
+			.line   = token.line,
+			.column = token.column,
+			.length = list[cursor].line == token.line
+				? list[cursor].column + (uint)list[cursor].text.len - token.column
+				: (uint)token.text.len,
+			.name   = imported,
+			.names  = names.array_view(),
+		};
+		return cursor + 1;
+	}
+
+	if (list[at + 1].kind != STRING)
+	{
+		import_fail(diagnostic, allocator, source, name, token.line, token.column,
+			(uint)token.text.len, "expected a quoted file name after `import`");
+		return IMPORT_ERROR~;
+	}
+	String imported = list[at + 1].text;
+	if (imported.len == 0)
+	{
+		import_fail(diagnostic, allocator, source, name, token.line, token.column,
+			(uint)list[at + 1].text.len + 2, "an import needs a file name");
+		return IMPORT_ERROR~;
+	}
+
+	// The line is replaced whole, so nothing else may stand on it.
+	if (!(at == 0 || list[at - 1].line < token.line))
+	{
+		import_fail(diagnostic, allocator, source, name, token.line, token.column,
+			(uint)token.text.len, "an import stands alone on its line");
+		return IMPORT_ERROR~;
+	}
+	if (list[at + 2].kind != SEMICOLON)
+	{
+		bool ends_line = list[at + 2].kind == EOF || list[at + 2].line > token.line;
+		import_fail(diagnostic, allocator, source, name, token.line, token.column,
+			(uint)list[at + 1].text.len + 2,
+			ends_line
+				? "expected `;` after the imported file name"
+				: "an import stands alone on its line");
+		return IMPORT_ERROR~;
+	}
+	bool ends_line = list[at + 3].kind == EOF || list[at + 3].line > token.line;
+	if (!ends_line)
+	{
+		import_fail(diagnostic, allocator, source, name, token.line, token.column,
+			(uint)list[at + 2].text.len, "an import stands alone on its line");
+		return IMPORT_ERROR~;
+	}
+
+	*site = {
+		.line   = token.line,
+		.column = token.column,
+		.length = (uint)imported.len + 2,
+		.name   = imported,
+	};
+	return at + 3;
 }
 
 <*
@@ -192,56 +369,12 @@ fn void? expand(
 					(uint)token.text.len, "`import` is a module-level statement");
 				return IMPORT_ERROR~;
 			}
-			if (tokens[i + 1].kind != STRING)
-			{
-				import_fail(diagnostic, allocator, source, name, token.line, token.column,
-					(uint)token.text.len, "expected a quoted file name after `import`");
-				return IMPORT_ERROR~;
-			}
 
-			String imported = tokens[i + 1].text;
-			if (imported.len == 0)
-			{
-				import_fail(diagnostic, allocator, source, name, token.line, token.column,
-					(uint)tokens[i + 1].text.len + 2, "an import needs a file name");
-				return IMPORT_ERROR~;
-			}
-
-			// The line is replaced whole, so nothing else may stand on it.
-			bool starts_line = i == 0 || tokens[i - 1].line < token.line;
-			if (!starts_line)
-			{
-				import_fail(diagnostic, allocator, source, name, token.line, token.column,
-					(uint)token.text.len, "an import stands alone on its line");
-				return IMPORT_ERROR~;
-			}
-
-			if (tokens[i + 2].kind != SEMICOLON)
-			{
-				bool ends_line = tokens[i + 2].kind == EOF || tokens[i + 2].line > token.line;
-				import_fail(diagnostic, allocator, source, name, token.line, token.column,
-					(uint)tokens[i + 1].text.len + 2,
-					ends_line
-						? "expected `;` after the imported file name"
-						: "an import stands alone on its line");
-				return IMPORT_ERROR~;
-			}
-
-			bool ends_line = tokens[i + 3].kind == EOF || tokens[i + 3].line > token.line;
-			if (!ends_line)
-			{
-				import_fail(diagnostic, allocator, source, name, token.line, token.column,
-					(uint)tokens[i + 2].text.len, "an import stands alone on its line");
-				return IMPORT_ERROR~;
-			}
-
-			sites.push({
-				.line   = token.line,
-				.column = token.column,
-				.length = (uint)imported.len + 2,
-				.name   = imported,
-			});
-			i += 3;
+			ImportSite site;
+			sz? after = parse_import_site(context, &tokens, i, &site, diagnostic, allocator, source, name);
+			if (catch after) return IMPORT_ERROR~;
+			sites.push(site);
+			i = after;
 			continue;
 		}
 		i++;
@@ -278,7 +411,9 @@ fn void? expand(
 				return IMPORT_ERROR~;
 			}
 
-			if (!string_list_has(&context.included, site.name))
+			IncludedFile* included = find_included(context, site.name);
+
+			if (!included)
 			{
 				// The text is the walk's until it has been copied: the scratch
 				// allocator owns it, so a resolver may hand over anything it
@@ -294,6 +429,11 @@ fn void? expand(
 				}
 				String imported = fetched;
 
+				// Every name in braces must be an interface this file declares:
+				// that is what a named import promises about itself.
+				String[] interfaces = declared_interfaces(imported, context.scratch);
+				check_import_names(site, interfaces, diagnostic, allocator, source, name)!;
+
 				out.append_string("#line 1 \"");
 				out.append_string(site.name);
 				out.append_string("\"\n");
@@ -301,10 +441,16 @@ fn void? expand(
 				context.open.push(site.name);
 				expand(context, imported, site.name, out, diagnostic, allocator)!;
 				(void)context.open.pop();
-				context.included.push(site.name);
+				context.included.push({ .name = site.name, .interfaces = interfaces });
 
 				if (out.len() == 0 || out.str_view()[out.len() - 1] != '\n') out.append_char('\n');
 				out.appendf("#line %d \"%s\"\n", (int)(report + 1), region);
+			}
+			else if (site.names.len)
+			{
+				// The file is already in the closure; the names still have to
+				// come from it, so check them against what its text declared.
+				check_import_names(site, included.interfaces, diagnostic, allocator, source, name)!;
 			}
 
 			report++;
@@ -360,10 +506,65 @@ fn String import_cycle(ImportContext* context, String name) @local
 	return chain.str_view();
 }
 
-fn bool string_list_has(List{String}* list, String value) @local
+fn IncludedFile* find_included(ImportContext* context, String name) @local
 {
-	foreach (entry : *list) if (entry == value) return true;
-	return false;
+	foreach (&entry : context.included) if (entry.name == name) return entry;
+	return null;
+}
+
+<*
+ The interfaces a file's text declares, so a named import can be checked
+ against the file it names. Interfaces are the named declarations an import can
+ bring in today; a name that is not one is refused.
+*>
+fn String[] declared_interfaces(String source, Allocator allocator) @local
+{
+	Lexer failed;
+	TokenList? tokenized = tokenize(source, allocator, null, &failed);
+	if (catch tokenized) return {};
+
+	TokenList tokens = tokenized;
+	List{String} names;
+	names.init(allocator, 4);
+	foreach (i, token : tokens)
+	{
+		if (token.kind != INTERFACE) continue;
+		if (i + 1 >= tokens.len()) break;
+		if (tokens[i + 1].kind == IDENT) names.push(tokens[i + 1].text);
+	}
+	if (names.len() == 0) return {};
+	return names.array_view();
+}
+
+<*
+ Every name a named import wrote must be an interface the imported file
+ declares. Reported at the import line, noting the file that came up short.
+*>
+fn void? check_import_names(
+	ImportSite site,
+	String[] interfaces,
+	Diagnostic* diagnostic,
+	Allocator allocator,
+	String source,
+	String name) @local
+{
+	foreach (declared : site.names)
+	{
+		bool found = false;
+		foreach (interface_name : interfaces)
+		{
+			if (interface_name == declared)
+			{
+				found = true;
+				break;
+			}
+		}
+		if (found) continue;
+
+		import_fail(diagnostic, allocator, source, name, site.line, site.column, site.length,
+			string::format(tmem, "`%s` does not declare an interface named `%s`", site.name, declared));
+		return IMPORT_ERROR~;
+	}
 }
 
 <*

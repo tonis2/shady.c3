@@ -1,6 +1,6 @@
-// `interface` and `provides`: a named set of declarations, and the module's
-// claim that it defines every member. The members are ordinary functions here,
-// so the refusals an interface adds are compile-time only - there is no
+// `interface` and `implements`: a named set of declarations, and the module's
+// claim that it defines every one of them. The members are ordinary functions
+// here, so the refusals an interface adds are compile-time only - there is no
 // dispatch, no vtable, and nothing in the emitted module that would not be
 // there without it.
 
@@ -31,7 +31,7 @@ fn float3 ambient(Surface s)
     return s.albedo * 0.1;
 }
 
-provides Shading;
+implements Shading;
 
 fn float4 shade(FragmentIn input)
 {

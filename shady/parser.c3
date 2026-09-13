@@ -972,11 +972,11 @@ fn Decl*? Parser.declaration(&self)
 					return PARSE_ERROR~;
 				}
 				// A member is a declaration, not a definition: the obligation
-				// every module that provides the interface has to meet.
+				// every module that implements the interface has to meet.
 				if (member.function.body)
 				{
 					self.fail_at(member.line, member.column, string::format(self.allocator,
-						"`%s` is an interface member, so it has no body - the module that provides the interface defines it",
+						"`%s` is an interface member, so it has no body - the module that implements the interface defines it",
 						member.name));
 					return PARSE_ERROR~;
 				}
@@ -1005,12 +1005,12 @@ fn Decl*? Parser.declaration(&self)
 			return decl;
 		}
 
-		case PROVIDES:
+		case IMPLEMENTS:
 			self.advance();
-			Token target = self.expect(IDENT, "expected an interface name after `provides`")!;
-			self.expect(SEMICOLON, "expected `;` after the provided interface")!;
-			decl.kind     = DeclKind.PROVIDES;
-			decl.provider = { .interface_name = target.text };
+			Token target = self.expect(IDENT, "expected an interface name after `implements`")!;
+			self.expect(SEMICOLON, "expected `;` after the implemented interface")!;
+			decl.kind = DeclKind.IMPLEMENTS;
+			decl.implements_decl = { .interface_name = target.text };
 			return decl;
 
 		case IMPORT:

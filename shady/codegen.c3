@@ -1568,7 +1568,7 @@ fn void? Codegen.check_required(&self)
 }
 
 <*
- Every `provides I;` claim is met: each member of `I` has a definition in this
+ Every `implements I;` claim is met: each member of `I` has a definition in this
  module.
 
  An interface generalises `@required` from one declaration to a named set. The
@@ -1578,11 +1578,11 @@ fn void? Codegen.check_required(&self)
 *>
 fn void? Codegen.check_interfaces(&self)
 {
-	foreach (provided : self.ast.decls)
+	foreach (implemented : self.ast.decls)
 	{
-		if (provided.kind != DeclKind.PROVIDES) continue;
+		if (implemented.kind != DeclKind.IMPLEMENTS) continue;
 
-		String name = provided.provider.interface_name;
+		String name = implemented.implements_decl.interface_name;
 
 		Decl* contract = null;
 		foreach (candidate : self.ast.decls)
@@ -1595,7 +1595,7 @@ fn void? Codegen.check_interfaces(&self)
 		}
 		if (!contract)
 		{
-			self.fail(provided.line, provided.column,
+			self.fail(implemented.line, implemented.column,
 				string::format(self.allocator, "there is no interface named `%s`", name));
 			return CODEGEN_ERROR~;
 		}
@@ -1607,7 +1607,7 @@ fn void? Codegen.check_interfaces(&self)
 			if (satisfied) continue;
 
 			self.fail(member.line, member.column, string::format(self.allocator,
-				"`%s.%s` is declared by the interface, and this module provides `%s` without defining it",
+				"`%s.%s` is declared by the interface, and this module implements `%s` without defining it",
 				name, member.name, name));
 			return CODEGEN_ERROR~;
 		}

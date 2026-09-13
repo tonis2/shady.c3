@@ -1,13 +1,13 @@
-// One module, two files: the imported half arrives through `import`, included
-// once even though the line is written twice. `Lit` is declared where it is
-// imported from and provided here, and the interface check gathers both halves
-// of the module.
+// One module, two files: the imported half arrives through a named import,
+// included once even though the line is written twice. `Lit` is declared where
+// it is imported from and implemented here, and the interface check gathers
+// both halves of the module.
 //
 // The `#line` region the imported file gets is what a diagnostic would name;
 // a wrong line in a spliced blob is the thing that region exists to prevent.
 
-import "import_lib.shady";
-import "import_lib.shady";
+import { Lit } from "import_lib.shady";
+import { Lit } from "import_lib.shady";
 
 struct FragmentIn
 {
@@ -15,7 +15,7 @@ struct FragmentIn
     float4 color;
 }
 
-provides Lit;
+implements Lit;
 
 fn float3 lit(Surface s)
 {

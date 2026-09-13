@@ -37,7 +37,7 @@ enum TokenKind : char
 	TRUE,
 	FALSE,
 	INTERFACE,
-	PROVIDES,
+	IMPLEMENTS,
 	IMPORT,
 	// Reserved: parsed as keywords so using one as a name is a clear error
 	// rather than a confusing syntax error later.
@@ -362,7 +362,7 @@ fn TokenKind keyword_kind(String word) @local
 		case "true":          return TRUE;
 		case "false":         return FALSE;
 		case "interface":     return INTERFACE;
-		case "provides":      return PROVIDES;
+		case "implements":    return IMPLEMENTS;
 		case "import":        return IMPORT;
 		case "in":            return IN;
 		case "out":           return OUT;
