@@ -1511,6 +1511,11 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 		}
 		if (!earlier_has_body && !declared_has_body)
 		{
+			// Two interfaces may share a member signature, and that is one
+			// obligation, not a duplicate declaration. A plain declaration
+			// repeated still says nothing new and stays refused.
+			if (decl.interface_member || earlier.decl.interface_member) continue;
+
 			self.fail(decl.line, decl.column, string::format(self.allocator,
 				"`%s` is declared twice, and nothing defines it", decl.name));
 			return CODEGEN_ERROR~;
@@ -1560,6 +1565,85 @@ fn void? Codegen.check_required(&self)
 			"`%s` is @required, and nothing in this module defines it", sig.decl.name));
 		return CODEGEN_ERROR~;
 	}
+}
+
+<*
+ Every `provides I;` claim is met: each member of `I` has a definition in this
+ module.
+
+ An interface generalises `@required` from one declaration to a named set. The
+ check is asked of the module, once, so it does not matter which file of the
+ module's text declared the interface, which defined a member, or where the
+ claim was written - see LANGUAGE.md section 3.5.
+*>
+fn void? Codegen.check_interfaces(&self)
+{
+	foreach (provided : self.ast.decls)
+	{
+		if (provided.kind != DeclKind.PROVIDES) continue;
+
+		String name = provided.provider.interface_name;
+
+		Decl* contract = null;
+		foreach (candidate : self.ast.decls)
+		{
+			if (candidate.kind == DeclKind.INTERFACE && candidate.name == name)
+			{
+				contract = candidate;
+				break;
+			}
+		}
+		if (!contract)
+		{
+			self.fail(provided.line, provided.column,
+				string::format(self.allocator, "there is no interface named `%s`", name));
+			return CODEGEN_ERROR~;
+		}
+
+		foreach (member : contract.interface_decl.members)
+		{
+			bool? satisfied = self.member_defined(member);
+			if (catch err = satisfied) return err~;
+			if (satisfied) continue;
+
+			self.fail(member.line, member.column, string::format(self.allocator,
+				"`%s.%s` is declared by the interface, and this module provides `%s` without defining it",
+				name, member.name, name));
+			return CODEGEN_ERROR~;
+		}
+	}
+}
+
+<*
+ Whether some definition in the module matches this interface member's
+ signature. An overload of the same name is not a definition of the member, so
+ the written types are compared rather than the name alone.
+*>
+fn bool? Codegen.member_defined(&self, Decl* member)
+{
+	Type* return_type = self.resolve_type(member.function.return_type, member.line, member.column)!;
+
+	foreach (&sig : self.functions)
+	{
+		if (sig.decl.name != member.name) continue;
+		if (!sig.decl.function.body) continue;
+		if (sig.has_receiver) continue;
+		if (sig.return_type != return_type) continue;
+		if (sig.params.len != member.function.params.len) continue;
+
+		bool same = true;
+		foreach (i, &param : member.function.params)
+		{
+			Type* type = self.resolve_type(param.type, param.line, param.column)!;
+			if (sig.params[i] != type || sig.refs[i] != param.by_ref)
+			{
+				same = false;
+				break;
+			}
+		}
+		if (same) return true;
+	}
+	return false;
 }
 
 fn bool Codegen.has_function(&self, String name)

@@ -1,0 +1,23 @@
+// The imported half of `import.shady`. It is a file of its own so the test can
+// show that an imported name resolves, and that a diagnostic inside it names
+// this file rather than the module it was spliced into.
+
+struct Surface
+{
+    float3 albedo;
+}
+
+interface Lit
+{
+    fn float3 lit(Surface s);
+}
+
+fn float3 tint(float3 color)
+{
+    return color * 0.5;
+}
+
+fn float3 shade_surface(Surface s)
+{
+    return lit(s) + tint(s.albedo);
+}

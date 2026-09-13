@@ -73,6 +73,20 @@ fn void Parser.fail(&self, String message)
 	self.error_length = (uint)token.text.len;
 }
 
+<*
+ As `fail`, at a position already in hand rather than the next token: a member
+ found invalid is reported where the member stands, not where its parsing
+ stopped.
+*>
+fn void Parser.fail_at(&self, uint line, uint column, String message)
+{
+	if (self.error.len) return;
+	self.error        = message.copy(mem);
+	self.error_line   = line;
+	self.error_column = column;
+	self.error_length = 1;
+}
+
 fn Token? Parser.expect(&self, TokenKind kind, String message)
 {
 	if (!self.check(kind))
@@ -939,6 +953,73 @@ fn Decl*? Parser.declaration(&self)
 			decl.constant = { .type = type, .value = value };
 			return decl;
 
+		case INTERFACE:
+		{
+			self.advance();
+			Token name = self.expect(IDENT, "expected an interface name")!;
+			decl.kind  = DeclKind.INTERFACE;
+			decl.name  = name.text;
+			self.expect(LBRACE, "expected `{` opening the interface body")!;
+
+			DeclPtrList members;
+			members.init(self.allocator, 4);
+			while (!self.check(RBRACE) && !self.check(EOF))
+			{
+				Decl* member = self.declaration()!;
+				if (member.kind != DeclKind.FUNCTION)
+				{
+					self.fail_at(member.line, member.column, "an interface member is a function declaration");
+					return PARSE_ERROR~;
+				}
+				// A member is a declaration, not a definition: the obligation
+				// every module that provides the interface has to meet.
+				if (member.function.body)
+				{
+					self.fail_at(member.line, member.column, string::format(self.allocator,
+						"`%s` is an interface member, so it has no body - the module that provides the interface defines it",
+						member.name));
+					return PARSE_ERROR~;
+				}
+				if (member.function.receiver.len)
+				{
+					self.fail_at(member.line, member.column, "an interface member is a plain function, not a method");
+					return PARSE_ERROR~;
+				}
+				if (member.attributes.len)
+				{
+					self.fail_at(member.line, member.column, "an interface member carries no attributes");
+					return PARSE_ERROR~;
+				}
+				foreach (earlier : members)
+				{
+					if (earlier.name != member.name) continue;
+					self.fail_at(member.line, member.column, string::format(self.allocator,
+						"`%s` is declared twice by `%s`", member.name, name.text));
+					return PARSE_ERROR~;
+				}
+				member.interface_member = true;
+				members.push(member);
+			}
+			self.expect(RBRACE, "expected `}` closing the interface body")!;
+			decl.interface_decl = { .members = members.array_view() };
+			return decl;
+		}
+
+		case PROVIDES:
+			self.advance();
+			Token target = self.expect(IDENT, "expected an interface name after `provides`")!;
+			self.expect(SEMICOLON, "expected `;` after the provided interface")!;
+			decl.kind     = DeclKind.PROVIDES;
+			decl.provider = { .interface_name = target.text };
+			return decl;
+
+		case IMPORT:
+			// `import` is text-level: resolve_imports splices the file in
+			// before the parser ever sees the module, so one here means the
+			// caller skipped that step.
+			self.fail("`import` is resolved before parsing - call shady::resolve_imports on the module's text first");
+			return PARSE_ERROR~;
+
 		case IDENT:
 			// `uniform`, `push_constant` and `buffer` used to be keywords.
 			// They are ordinary identifiers now, so catch the old shapes here
@@ -1020,7 +1101,16 @@ fn Ast? parse(String source, Parser* parser = null, LineMap* map = null)
 
 	while (!parser.check(EOF))
 	{
-		decls.push(parser.declaration()!);
+		Decl* declaration = parser.declaration()!;
+
+		// An interface's members are the module's declarations too: a call
+		// resolves through one and a definition fills it, so they stand on
+		// their own in the list rather than only inside the interface.
+		if (declaration.kind == DeclKind.INTERFACE)
+		{
+			foreach (member : declaration.interface_decl.members) decls.push(member);
+		}
+		decls.push(declaration);
 	}
 
 	ast.decls = decls.array_view();

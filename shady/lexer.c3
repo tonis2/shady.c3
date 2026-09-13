@@ -18,6 +18,9 @@ enum TokenKind : char
 	IDENT,
 	INTEGER,
 	FLOAT,
+	// A quoted file name, and nothing else: `import "lighting.shady";` is the
+	// only place the language has a string. No escapes - a name has no quotes.
+	STRING,
 
 	// Keywords
 	FN,
@@ -33,6 +36,9 @@ enum TokenKind : char
 	DISCARD,
 	TRUE,
 	FALSE,
+	INTERFACE,
+	PROVIDES,
+	IMPORT,
 	// Reserved: parsed as keywords so using one as a name is a clear error
 	// rather than a confusing syntax error later.
 	IN,
@@ -103,7 +109,7 @@ struct Token
 
 alias TokenList = List{Token};
 
-faultdef UNTERMINATED_COMMENT, UNEXPECTED_CHARACTER, MALFORMED_NUMBER, MALFORMED_DIRECTIVE;
+faultdef UNTERMINATED_COMMENT, UNEXPECTED_CHARACTER, MALFORMED_NUMBER, MALFORMED_DIRECTIVE, UNTERMINATED_STRING;
 
 struct Lexer
 {
@@ -355,6 +361,9 @@ fn TokenKind keyword_kind(String word) @local
 		case "discard":       return DISCARD;
 		case "true":          return TRUE;
 		case "false":         return FALSE;
+		case "interface":     return INTERFACE;
+		case "provides":      return PROVIDES;
+		case "import":        return IMPORT;
 		case "in":            return IN;
 		case "out":           return OUT;
 		case "switch":        return SWITCH;
@@ -514,6 +523,33 @@ fn double parse_number(String text, uint base, bool is_float) @local
 }
 
 <*
+ A quoted name, for `import "file.shady";`. The token's text is what is between
+ the quotes; there are no escapes, because an import names a file and a file
+ name with a quote in it has no spelling on disk worth supporting.
+*>
+fn Token? Lexer.string(&self)
+{
+	uint start_line   = self.line;
+	uint start_column = self.column;
+
+	self.advance(); // the opening quote
+	usz start = self.offset;
+	while (self.peek() != '"' && self.peek() != '\n' && self.peek() != 0) self.advance();
+
+	if (self.peek() != '"')
+	{
+		self.error        = "unterminated string";
+		self.error_line   = start_line;
+		self.error_column = start_column;
+		return UNTERMINATED_STRING~;
+	}
+
+	String text = self.source[start..self.offset - 1];
+	self.advance(); // the closing quote
+	return (Token) { .kind = STRING, .text = text, .line = start_line, .column = start_column };
+}
+
+<*
  Produce the next token. Returns an EOF token forever once the source runs out.
 *>
 fn Token? Lexer.next(&self)
@@ -532,6 +568,8 @@ fn Token? Lexer.next(&self)
 	char c = self.peek();
 
 	if (c.is_digit() || (c == '.' && self.peek(1).is_digit())) return self.number();
+
+	if (c == '"') return self.string();
 
 	if (is_ident_start(c))
 	{

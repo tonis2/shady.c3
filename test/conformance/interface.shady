@@ -1,0 +1,46 @@
+// `interface` and `provides`: a named set of declarations, and the module's
+// claim that it defines every member. The members are ordinary functions here,
+// so the refusals an interface adds are compile-time only - there is no
+// dispatch, no vtable, and nothing in the emitted module that would not be
+// there without it.
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+struct Surface
+{
+    float3 albedo;
+}
+
+interface Shading
+{
+    fn float3 diffuse(Surface s);
+    fn float3 ambient(Surface s);
+}
+
+fn float3 diffuse(Surface s)
+{
+    return s.albedo;
+}
+
+fn float3 ambient(Surface s)
+{
+    return s.albedo * 0.1;
+}
+
+provides Shading;
+
+fn float4 shade(FragmentIn input)
+{
+    Surface s;
+    s.albedo = input.color.rgb;
+    return float4(diffuse(s) + ambient(s), 1.0);
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    return shade(input);
+}

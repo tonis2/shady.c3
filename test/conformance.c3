@@ -34,6 +34,29 @@ const char[*] EMBED_POINTERS     = $embed("conformance/pointers.shady");
 const char[*] EMBED_BINDLESS     = $embed("conformance/bindless.shady");
 const char[*] EMBED_SPEC         = $embed("conformance/spec.shady");
 const char[*] EMBED_INT_BUILTINS = $embed("conformance/integer_builtins.shady");
+const char[*] EMBED_INTERFACE    = $embed("conformance/interface.shady");
+const char[*] EMBED_IMPORT       = $embed("conformance/import.shady");
+// Not a case of its own: `import.shady` pulls it in, and a module without an
+// entry point is not something to compile on its own.
+const char[*] EMBED_IMPORT_LIB   = $embed("conformance/import_lib.shady");
+
+faultdef NO_SUCH_CONFORMANCE_IMPORT;
+
+<*
+ The corpus's file supply: an imported name resolves to one of the embedded
+ sources. Anything else is a missing import, which is what a name the enum does
+ not know looks like to the compiler.
+*>
+fn String? conformance_import(String name, Allocator allocator)
+{
+	switch (name)
+	{
+		case "import_lib.shady":
+			return ((String)EMBED_IMPORT_LIB[..]).copy(allocator);
+		default:
+			return NO_SUCH_CONFORMANCE_IMPORT~;
+	}
+}
 
 struct Case
 {
@@ -58,6 +81,8 @@ const Case[*] CORPUS = {
 	{ "bindless",     (String)EMBED_BINDLESS[..],     false },
 	{ "spec",         (String)EMBED_SPEC[..],         false },
 	{ "int_builtins", (String)EMBED_INT_BUILTINS[..], false },
+	{ "interface",    (String)EMBED_INTERFACE[..],    false },
+	{ "import",       (String)EMBED_IMPORT[..],       false },
 };
 
 fn void the_conformance_corpus_compiles_and_validates() @test
@@ -81,8 +106,20 @@ fn void the_conformance_corpus_compiles_and_validates() @test
 *>
 fn bool conforms(Case entry) @private
 {
+	shady::Diagnostic import_diagnostic;
+	String? resolved = shady::resolve_imports(entry.source, entry.name, &conformance_import, &import_diagnostic);
+	if (catch resolved)
+	{
+		io::printfn("FAIL %s: %s", entry.name, import_diagnostic.render(tmem));
+		import_diagnostic.free();
+		return false;
+	}
+	import_diagnostic.free();
+	String source = resolved;
+	defer free(source);
+
 	shady::Diagnostic diagnostic;
-	char[]? spirv = shady::compile(entry.source, &diagnostic, scalar_layout: entry.scalar);
+	char[]? spirv = shady::compile(source, &diagnostic, scalar_layout: entry.scalar);
 	if (catch spirv)
 	{
 		io::printfn("FAIL %s: %s", entry.name, diagnostic.to_string(tmem));

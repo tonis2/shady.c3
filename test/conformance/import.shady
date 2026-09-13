@@ -1,0 +1,30 @@
+// One module, two files: the imported half arrives through `import`, included
+// once even though the line is written twice. `Lit` is declared where it is
+// imported from and provided here, and the interface check gathers both halves
+// of the module.
+//
+// The `#line` region the imported file gets is what a diagnostic would name;
+// a wrong line in a spliced blob is the thing that region exists to prevent.
+
+import "import_lib.shady";
+import "import_lib.shady";
+
+struct FragmentIn
+{
+    float4 position @position;
+    float4 color;
+}
+
+provides Lit;
+
+fn float3 lit(Surface s)
+{
+    return s.albedo;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    Surface s;
+    s.albedo = input.color.rgb;
+    return float4(shade_surface(s), 1.0);
+}

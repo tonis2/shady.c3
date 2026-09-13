@@ -168,8 +168,12 @@ through an address, matrix add/subtract, `InterlockedAdd`, combined
 `NonUniformResourceIndex`, the `Sample`/`SampleLevel`/`SampleGrad`/`SampleBias`/
 `SampleCmpLevelZero` variants, several descriptor sets in one module,
 specialization constants (`const bool X @spec(0) = true;`) for one module
-serving several variants, `#line` source maps for diagnostics on generated
-bodies, and warnings reported on the success path beside the fault.
+serving several variants, interfaces (`interface I { ... }` plus
+`provides I;`, a compile-time obligation with no vtables and no dispatch),
+`import "file.shady";` with the module's text as its import closure (each file
+in its own `#line` region, a cycle refused, a repeated import included once),
+`#line` source maps for diagnostics on generated bodies, and warnings reported
+on the success path beside the fault.
 
 Not yet: storage buffers and runtime-sized arrays of memory (as opposed to of
 descriptors). Each of these fails with a position and a message rather than

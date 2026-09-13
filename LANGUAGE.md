@@ -20,7 +20,7 @@ Source is UTF-8. Whitespace is insignificant except as a token separator.
 **Identifiers** match `[A-Za-z_][A-Za-z0-9_]*`.
 
 **Keywords**: `fn` `struct` `const` `return` `if` `else` `while` `for` `break`
-`continue` `discard` `true` `false`.
+`continue` `discard` `true` `false` `interface` `provides` `import`.
 Reserved for later: `in` `out` `switch` `case` `default` `do`.
 
 `uniform`, `buffer` and `push_constant` are *not* keywords — they used to be,
@@ -38,6 +38,10 @@ separators (`1_000`). Default type `int`; a `u` suffix makes it `uint`.
 **Float literals**: `1.0`, `.5`, `1e-3`, `2.5f`. Default type `float`. A digit
 is required before `e`. A bare `1` in a float context converts implicitly
 (see §5.3).
+
+**Quoted names**: `"lighting.shady"`, between double quotes, with no escapes
+and no newline. A quoted name is not a value and there is no string type: an
+`import` is the only thing that writes one.
 
 **Operators and punctuation**:
 ```
@@ -285,6 +289,81 @@ ids must be unique within a module.
 
 Only scalars, because a spec constant has to be a single replaceable literal;
 a composite or an expression is not.
+
+### 3.5 Interfaces
+
+```
+interface AreaAlgorithm
+{
+    fn AreaTerms area_terms(Light light, float3 position, float3 normal,
+                            float3 view, float3 f0, float f90, float a2,
+                            float k, float nv);
+    fn AreaTerms area_light_terms(...);
+}
+```
+
+An interface is a named set of function declarations and nothing else - no
+bodies, no data, no values.
+
+**It is static.** There is no `any`, no vtable, and no run-time dispatch in a
+shader; an interface names an obligation at compile time, and nothing in the
+emitted module would differ if its members had been declared one by one. What
+it buys is that a reader sees the whole set in one place, and the compiler
+checks it.
+
+Each member is a function declaration of the module, so a call resolves through
+it and a definition fills it exactly as it fills a plain declaration (§3.1).
+What the interface adds is the name for the set:
+
+```
+provides AreaAlgorithm;
+```
+
+`provides I;` states that this module defines every member of `I`. It is
+`@required` generalised from one declaration to a named set: the claim is
+checked once per module, whether or not anything calls the members, and a
+missing member is an error naming the interface and the member. Defining an
+overload of a member's name is not defining the member - the return type and
+parameter types have to match.
+
+A module that declares an interface without `provides` is not claiming
+anything: its members are ordinary declarations, refused only where they are
+called.
+
+A member is a plain function: no receiver, no attributes, no body.
+
+Where a module's text is more than one file (§3.6), the check runs on the
+module, not per file: one file may declare the interface, another define a
+member, and a third write `provides`.
+
+### 3.6 Imports
+
+```
+import "lighting.shady";
+```
+
+An import is a module-level statement and stands alone on its line. It joins
+the imported file's text to this module before the module is parsed: a module's
+text is its **import closure**.
+
+The imported file is resolved like every other source - the program embedding
+the compiler supplies it, disk first and its embedded copy as fallback in
+three.c3 - so the compiler itself never opens a file. Its input is one string;
+`shady::resolve_imports` is the pass that turns a root source plus a file supply
+into the closure.
+
+Each file keeps its own `#line` region (§1.1), so a diagnostic inside an
+imported file names *that* file and its own line rather than a line in the
+spliced module.
+
+- A file imported twice is included once: the closure is a set of files, so a
+  diamond import is one copy.
+- Imports may not form a cycle; one is an error naming the cycle.
+- Name resolution is unchanged by the splice. The closure is one flat module,
+  so an imported function, struct or constant resolves wherever it is written,
+  and a declaration in one file may be filled by a definition in another.
+- An import cannot be conditional, there is no include guard, and no other
+  directive exists - a `#` anywhere but a `#line` is an error (§1.1).
 
 ## 4. Attributes
 
