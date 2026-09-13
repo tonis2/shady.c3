@@ -1480,10 +1480,16 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 		// Matched by signature, not by name: a second function of the same name and
 		// a different signature is an overload, which was legal long before
 		// declarations were.
+		//
+		// A definition fills a declaration only when both are in the same module
+		// (LANGUAGE.md section 3.5): the module's files are the text a bodyless
+		// declaration may be satisfied from. A declaration in no module keeps the
+		// old rule - refused where it is called, checked by emit_function.
 		FunctionSig* earlier = null;
 		foreach (&existing : self.functions)
 		{
 			if (existing.decl.name != decl.name) continue;
+			if (existing.decl.module_name != decl.module_name) continue;
 			if (!signatures_agree(existing, &sig)) continue;
 			earlier = existing;
 			break;
@@ -1568,82 +1574,26 @@ fn void? Codegen.check_required(&self)
 }
 
 <*
- Every `implements I;` claim is met: each member of `I` has a definition in this
- module.
+ Every bodyless declaration a module carries has a definition in that module.
 
- An interface generalises `@required` from one declaration to a named set. The
- check is asked of the module, once, so it does not matter which file of the
- module's text declared the interface, which defined a member, or where the
- claim was written - see LANGUAGE.md section 3.5.
+ A module is one text made of several files (LANGUAGE.md section 3.5), so the
+ check runs when the whole text is in hand: one file declares a function,
+ another defines it, and both belong to the module. A declaration in no module
+ keeps the older rule - refused where it is called - and `@required` keeps its
+ own check, for the same reason it always had one.
 *>
-fn void? Codegen.check_interfaces(&self)
+fn void? Codegen.check_modules(&self)
 {
-	foreach (implemented : self.ast.decls)
-	{
-		if (implemented.kind != DeclKind.IMPLEMENTS) continue;
-
-		String name = implemented.implements_decl.interface_name;
-
-		Decl* contract = null;
-		foreach (candidate : self.ast.decls)
-		{
-			if (candidate.kind == DeclKind.INTERFACE && candidate.name == name)
-			{
-				contract = candidate;
-				break;
-			}
-		}
-		if (!contract)
-		{
-			self.fail(implemented.line, implemented.column,
-				string::format(self.allocator, "there is no interface named `%s`", name));
-			return CODEGEN_ERROR~;
-		}
-
-		foreach (member : contract.interface_decl.members)
-		{
-			bool? satisfied = self.member_defined(member);
-			if (catch err = satisfied) return err~;
-			if (satisfied) continue;
-
-			self.fail(member.line, member.column, string::format(self.allocator,
-				"`%s.%s` is declared by the interface, and this module implements `%s` without defining it",
-				name, member.name, name));
-			return CODEGEN_ERROR~;
-		}
-	}
-}
-
-<*
- Whether some definition in the module matches this interface member's
- signature. An overload of the same name is not a definition of the member, so
- the written types are compared rather than the name alone.
-*>
-fn bool? Codegen.member_defined(&self, Decl* member)
-{
-	Type* return_type = self.resolve_type(member.function.return_type, member.line, member.column)!;
-
 	foreach (&sig : self.functions)
 	{
-		if (sig.decl.name != member.name) continue;
-		if (!sig.decl.function.body) continue;
-		if (sig.has_receiver) continue;
-		if (sig.return_type != return_type) continue;
-		if (sig.params.len != member.function.params.len) continue;
+		if (sig.decl.function.body) continue;
+		if (!sig.decl.module_name.len) continue;
 
-		bool same = true;
-		foreach (i, &param : member.function.params)
-		{
-			Type* type = self.resolve_type(param.type, param.line, param.column)!;
-			if (sig.params[i] != type || sig.refs[i] != param.by_ref)
-			{
-				same = false;
-				break;
-			}
-		}
-		if (same) return true;
+		self.fail(sig.decl.line, sig.decl.column, string::format(self.allocator,
+			"`%s` is declared in module `%s`, and no file of `%s` defines it",
+			sig.decl.name, sig.decl.module_name, sig.decl.module_name));
+		return CODEGEN_ERROR~;
 	}
-	return false;
 }
 
 fn bool Codegen.has_function(&self, String name)

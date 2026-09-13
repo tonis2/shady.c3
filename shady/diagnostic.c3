@@ -150,6 +150,16 @@ fn LineDirective* LineMap.find(&self, uint physical)
 }
 
 <*
+ The region a physical line is reported in: the name of the last `#line`
+ directive before it, or empty when the source never named one.
+*>
+fn String LineMap.region(&self, uint physical)
+{
+	LineDirective* directive = self.find(physical);
+	return directive ? directive.name : "";
+}
+
+<*
  The text of one 1-based line, without its newline.
 
  An empty string for a line the source does not have, which is the answer a

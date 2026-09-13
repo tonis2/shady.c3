@@ -1,6 +1,9 @@
 // The imported half of `import.shady`. It is a file of its own so the test can
 // show that an imported name resolves, and that a diagnostic inside it names
-// this file rather than the module it was spliced into.
+// this file rather than the module it was spliced into. Same module as the
+// importing file: the declaration here is defined there.
+
+module lighting;
 
 struct Surface
 {

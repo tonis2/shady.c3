@@ -326,8 +326,8 @@ enum DeclKind : char
 	FUNCTION,
 	RESOURCE, // uniform blocks, textures, samplers
 	CONSTANT,
-	INTERFACE,  // a named set of function declarations
-	IMPLEMENTS, // `implements I;`: this module defines every member of I
+	INTERFACE, // a named set of function declarations
+	MODULE,    // `module lighting;`: which module the rest of a file belongs to
 }
 
 struct DeclStruct
@@ -367,24 +367,16 @@ struct DeclConstant
 
 <*
  A named set of function declarations and no bodies.
- 
+
  Each member is also registered as an ordinary top-level function declaration -
  one without a body - so a call resolves through it and a definition fills it
- exactly as it fills a plain declaration. `implements` is what turns a member's
- absence from "only wrong if called" into an error (LANGUAGE.md section 3.5).
+ exactly as it fills a plain declaration. The interface is a name for the set;
+ whether a bodyless declaration in a module is filled is decided by the module
+ rule, not by the interface (LANGUAGE.md section 3.5).
 *>
 struct DeclInterface
 {
 	Decl*[] members;
-}
-
-<*
- `implements I;`, a module-level statement that every member of `I` is defined
- in this module. Checked once, on the whole module's text.
-*>
-struct DeclImplements
-{
-	String interface_name;
 }
 
 struct Decl
@@ -394,6 +386,11 @@ struct Decl
 	Attribute[] attributes;
 	uint        line;
 	uint        column;
+
+	// Which module this declaration belongs to, from the `module` statement of
+	// the file it was written in; empty for a file that declares none. Set by
+	// the parser, which has the source's regions in hand.
+	String      module_name;
 
 	// Set on a function declared inside an interface. Two interfaces may share
 	// a member signature; these are not a duplicate declaration, so they fold
@@ -407,7 +404,6 @@ struct Decl
 		DeclResource resource;
 		DeclConstant constant;
 		DeclInterface interface_decl;
-		DeclImplements implements_decl;
 	}
 }
 

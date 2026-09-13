@@ -168,11 +168,12 @@ through an address, matrix add/subtract, `InterlockedAdd`, combined
 `NonUniformResourceIndex`, the `Sample`/`SampleLevel`/`SampleGrad`/`SampleBias`/
 `SampleCmpLevelZero` variants, several descriptor sets in one module,
 specialization constants (`const bool X @spec(0) = true;`) for one module
-serving several variants, interfaces (`interface I { ... }` plus
-`implements I;`, a compile-time obligation with no vtables and no dispatch),
-`import "file.shady";` and `import { I } from "file.shady";` with the module's
-text as its import closure (each file in its own `#line` region, a cycle
-refused, a repeated import included once),
+serving several variants, `module lighting;` file identities with a bodyless
+declaration required to be defined by a file of its module, interfaces
+(`interface I { ... }`, a named set of declarations with no vtables and no
+dispatch), `import "file.shady";` and `import { I } from "file.shady";` with
+the module's text as its import closure (each file in its own `#line` region, a
+cycle refused, a repeated import included once),
 `#line` source maps for diagnostics on generated bodies, and warnings reported
 on the success path beside the fault.
 

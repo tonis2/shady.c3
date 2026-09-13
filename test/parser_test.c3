@@ -243,3 +243,27 @@ fn void reports_position_of_syntax_errors() @test
 	}
 	test::@check(false, "a missing semicolon should be an error");
 }
+
+<*
+ A module statement is a file-level declaration, dotted names and all, and the
+ declarations after it carry its name.
+*>
+fn void module_statements_are_parsed() @test
+{
+	shady::Ast ast = shady::parse(`
+module three.render.lighting;
+
+fn float3 lit() { return float3(1.0); }
+`)!!;
+	defer ast.free();
+
+	test::@check(ast.decls.len == 2, "a module and a function is 2 declarations, got %d", ast.decls.len);
+
+	shady::Decl* statement = ast.find("three.render.lighting");
+	test::@check(statement != null && statement.kind == shady::DeclKind.MODULE,
+		"the module statement should be found under its dotted name");
+
+	shady::Decl* lit = ast.find("lit");
+	test::@check(lit.module_name == "three.render.lighting",
+		"the declaration after the statement should belong to it, got `%s`", lit.module_name);
+}

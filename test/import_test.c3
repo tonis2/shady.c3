@@ -53,9 +53,11 @@ const String CYCLE_B = `import "cycle_a.shady";
 fn float3 b() { return float3(2.0); }
 `;
 
-// An interface in one file, its definition and its claim in another: the check
-// is the module's, not a file's.
+// An interface in one file, its definition in another: the check is the
+// module's, not a file's.
 const String CONTRACT = `
+module lighting;
+
 struct Surface { float3 albedo; }
 
 interface Shading
@@ -245,17 +247,17 @@ fn float4 frag(FragmentIn input) @fragment
 }
 
 <*
- An interface declared in an imported file and implemented by the root: the
- check runs on the module, so the two halves meet. Both import forms name the
- same file, which is still included once.
+ An interface declared in an imported file and defined by the root, which
+ carries the same module name: the check runs on the module, so the two halves
+ meet. Both import forms name the same file, which is still included once.
 *>
 fn void an_interface_in_an_imported_file_is_checked_on_the_module() @test
 {
 	String error = compile_imports(shady_support::fragment(`
+module lighting;
+
 import "contract.shady";
 import { Shading } from "contract.shady";
-
-implements Shading;
 
 fn float3 shade(Surface s)
 {
@@ -280,14 +282,14 @@ fn float4 frag(FragmentIn input) @fragment
 
 <*
  The named form on its own: the interface it names is in the module, and the
- module can implement it.
+ module defines its member - no `implements` is written.
 *>
 fn void a_named_import_resolves_an_interface() @test
 {
 	String error = compile_imports(shady_support::fragment(`
-import { Shading } from "contract.shady";
+module lighting;
 
-implements Shading;
+import { Shading } from "contract.shady";
 
 fn float3 shade(Surface s)
 {
@@ -307,7 +309,7 @@ fn float4 frag(FragmentIn input) @fragment
 }
 `));
 
-	test::@check(error == "", "a named import should make its interface implementable; got `%s`", error);
+	test::@check(error == "", "a named import should bring its interface into the module; got `%s`", error);
 }
 
 <*
@@ -325,16 +327,16 @@ fn void a_named_import_the_file_does_not_declare_is_refused() @test
 }
 
 <*
- An interface brought in by name still carries the whole-module obligation: a
- member with no exact-signature definition is refused, naming the interface and
- the member.
+ An interface brought in by name still carries the module obligation: a member
+ with no exact-signature definition in the module is refused, naming the module
+ and the member. Nothing calls it here.
 *>
 fn void a_named_imports_missing_member_is_refused() @test
 {
 	String error = compile_imports(shady_support::fragment(`
-import { Shading } from "contract.shady";
+module lighting;
 
-implements Shading;
+import { Shading } from "contract.shady";
 
 fn float3 something_else(Surface s)
 {
@@ -347,8 +349,8 @@ fn float4 frag(FragmentIn input) @fragment
 }
 `));
 
-	test::@check(error.contains("Shading") && error.contains("shade"),
-		"the refusal should name the interface and the missing member; got `%s`", error);
+	test::@check(error.contains("lighting") && error.contains("shade"),
+		"the refusal should name the module and the missing member; got `%s`", error);
 }
 
 <*

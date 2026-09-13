@@ -1,10 +1,11 @@
 <*
- `interface` and `implements`: a named set of declarations, and a module's claim
- that it defines every one of them (LANGUAGE.md section 3.5).
+ `interface`: a named set of function declarations, and the module rule that
+ checks its members (LANGUAGE.md section 3.5).
 
- An interface is static - there is no `any`, no vtable, no run-time dispatch.
- It is `@required` generalised from one declaration to a named set, so the
- check is the same shape: asked of the module, once, at compile time.
+ The interface is static - there is no `any`, no vtable, no run-time dispatch.
+ Its members are declarations of the module, so each one is satisfied by a
+ definition in that module or refused at the declaration; no `implements`
+ statement exists.
 *>
 module interface_test;
 
@@ -18,6 +19,8 @@ import shady_support;
 fn void an_interface_the_module_defines_compiles() @test
 {
 	String error = shady_support::compile_error(shady_support::fragment(`
+module shading;
+
 struct Surface { float3 albedo; }
 
 interface Shading
@@ -28,8 +31,6 @@ interface Shading
 
 fn float3 diffuse(Surface s) { return s.albedo; }
 fn float3 ambient(Surface s) { return s.albedo * 0.1; }
-
-implements Shading;
 
 fn float4 shade(FragmentIn input)
 {
@@ -48,12 +49,14 @@ fn float4 frag(FragmentIn input) @fragment
 }
 
 <*
- A missing member is refused once, at the interface, even though nothing calls
- it - the difference between an interface and a plain declaration.
+ A missing member is refused at the declaration, naming the module and the
+ member - no call site needed.
 *>
-fn void a_missing_member_names_the_interface_and_the_member() @test
+fn void a_missing_member_names_the_module_and_the_member() @test
 {
 	String error = shady_support::compile_error(shady_support::fragment(`
+module shading;
+
 struct Surface { float3 albedo; }
 
 interface Shading
@@ -64,16 +67,14 @@ interface Shading
 
 fn float3 diffuse(Surface s) { return s.albedo; }
 
-implements Shading;
-
 fn float4 frag(FragmentIn input) @fragment
 {
 	return float4(input.color.rgb, 1.0);
 }
 `));
 
-	test::@check(error.contains("Shading") && error.contains("ambient"),
-		"the refusal should name the interface and the member; got `%s`", error);
+	test::@check(error.contains("shading") && error.contains("ambient"),
+		"the refusal should name the module and the member; got `%s`", error);
 }
 
 <*
@@ -83,6 +84,8 @@ fn float4 frag(FragmentIn input) @fragment
 fn void a_same_named_overload_does_not_satisfy_a_member() @test
 {
 	String error = shady_support::compile_error(shady_support::fragment(`
+module shading;
+
 interface Shading
 {
 	fn float3 tint(float3 color);
@@ -90,23 +93,21 @@ interface Shading
 
 fn float3 tint(float4 color) { return color.rgb; }
 
-implements Shading;
-
 fn float4 frag(FragmentIn input) @fragment
 {
 	return float4(input.color.rgb, 1.0);
 }
 `));
 
-	test::@check(error.contains("Shading") && error.contains("tint"),
+	test::@check(error.contains("shading") && error.contains("tint"),
 		"the missing member should be named even when an overload of it exists; got `%s`", error);
 }
 
 <*
- Declaring an interface is not claiming it: no `implements`, no obligation. A
- plain declaration keeps the same rule.
+ Declaring an interface with no module is not the module's claim: its members
+ keep the older rule, refused only where they are called.
 *>
-fn void an_interface_nobody_implements_is_not_an_error() @test
+fn void an_interface_without_a_module_is_not_an_error() @test
 {
 	String error = shady_support::compile_error(shady_support::fragment(`
 interface Optional
@@ -120,26 +121,12 @@ fn float4 frag(FragmentIn input) @fragment
 }
 `));
 
-	test::@check(error == "", "an unclaimed interface alone is not an error; got `%s`", error);
-}
-
-fn void providing_an_interface_that_does_not_exist_is_refused() @test
-{
-	String error = shady_support::compile_error(shady_support::fragment(`
-implements Nonesuch;
-
-fn float4 frag(FragmentIn input) @fragment
-{
-	return input.color;
-}
-`));
-
-	test::@check(error.contains("Nonesuch"), "the refusal should name the unknown interface; got `%s`", error);
+	test::@check(error == "", "a module-less interface alone is not an error; got `%s`", error);
 }
 
 <*
- Two interfaces may name the same signature - one obligation, one declaration,
- so the shared definition satisfies either claim.
+ Two interfaces may name the same signature - one declaration, so one
+ definition fills both.
 *>
 fn void two_interfaces_may_share_a_member() @test
 {
@@ -156,9 +143,6 @@ interface Bright
 
 fn float3 glow() { return float3(1.0); }
 
-implements Luminous;
-implements Bright;
-
 fn float4 frag(FragmentIn input) @fragment
 {
 	return float4(glow(), 1.0);
@@ -169,8 +153,8 @@ fn float4 frag(FragmentIn input) @fragment
 }
 
 <*
- A member is the declaration the provider fills, so it cannot also be a
- definition - two places to say the same thing.
+ A member is a declaration, so it cannot also be a definition - two places to
+ say the same thing.
 *>
 fn void an_interface_member_cannot_have_a_body() @test
 {

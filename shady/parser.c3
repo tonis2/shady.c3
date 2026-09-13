@@ -972,11 +972,11 @@ fn Decl*? Parser.declaration(&self)
 					return PARSE_ERROR~;
 				}
 				// A member is a declaration, not a definition: the obligation
-				// every module that implements the interface has to meet.
+				// a file of the module has to meet.
 				if (member.function.body)
 				{
 					self.fail_at(member.line, member.column, string::format(self.allocator,
-						"`%s` is an interface member, so it has no body - the module that implements the interface defines it",
+						"`%s` is an interface member, so it has no body - a file of its module defines it",
 						member.name));
 					return PARSE_ERROR~;
 				}
@@ -1005,13 +1005,25 @@ fn Decl*? Parser.declaration(&self)
 			return decl;
 		}
 
-		case IMPLEMENTS:
+		case MODULE:
+		{
 			self.advance();
-			Token target = self.expect(IDENT, "expected an interface name after `implements`")!;
-			self.expect(SEMICOLON, "expected `;` after the implemented interface")!;
-			decl.kind = DeclKind.IMPLEMENTS;
-			decl.implements_decl = { .interface_name = target.text };
+			Token first = self.expect(IDENT, "expected a module name after `module`")!;
+			String name = first.text;
+
+			// Dotted names: `module three.render.lighting;` is one name, matched
+			// whole. Nothing resolves by it yet - it is the file's identity.
+			while (self.match(DOT))
+			{
+				Token part = self.expect(IDENT, "expected a name after `.` in the module name")!;
+				name = string::format(self.allocator, "%s.%s", name, part.text);
+			}
+			self.expect(SEMICOLON, "expected `;` after the module name")!;
+
+			decl.kind = DeclKind.MODULE;
+			decl.name = name;
 			return decl;
+		}
 
 		case IMPORT:
 			// `import` is text-level: resolve_imports splices the file in
@@ -1041,7 +1053,7 @@ fn Decl*? Parser.declaration(&self)
 			return decl;
 
 		default:
-			self.fail("expected a declaration: `fn`, `struct`, `const`, or a module-level variable");
+			self.fail("expected a declaration: `fn`, `struct`, `const`, `module`, or a module-level variable");
 			return PARSE_ERROR~;
 	}
 }
@@ -1113,7 +1125,47 @@ fn Ast? parse(String source, Parser* parser = null, LineMap* map = null)
 		decls.push(declaration);
 	}
 
+	assign_modules(decls.array_view(), map);
+
 	ast.decls = decls.array_view();
 	ok = true;
 	return ast;
+}
+
+<*
+ Attribute every declaration to the module of the file it was written in.
+
+ A `module` statement is a file-level statement, and a module's text may be
+ several files (LANGUAGE.md section 3.6), so membership cannot be read off the
+ declaration order alone: the import that splices a file in says where one file
+ ends and the next begins. Where the source map did not come with the parse -
+ a caller that just wants the tree - the statements are taken in order, which is
+ the same answer for a single file.
+*>
+fn void assign_modules(Decl*[] decls, LineMap* map) @local
+{
+	if (!map)
+	{
+		String current = "";
+		foreach (declaration : decls)
+		{
+			if (declaration.kind == DeclKind.MODULE) current = declaration.name;
+			declaration.module_name = current;
+		}
+		return;
+	}
+
+	// The module a region declares, if any: the last statement in that region
+	// wins, which for one statement per file is the statement itself.
+	foreach (declaration : decls)
+	{
+		String region = map.region(declaration.line);
+		String module_name = "";
+		foreach (candidate : decls)
+		{
+			if (candidate.kind != DeclKind.MODULE) continue;
+			if (map.region(candidate.line) == region) module_name = candidate.name;
+		}
+		declaration.module_name = module_name;
+	}
 }

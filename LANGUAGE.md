@@ -20,7 +20,7 @@ Source is UTF-8. Whitespace is insignificant except as a token separator.
 **Identifiers** match `[A-Za-z_][A-Za-z0-9_]*`.
 
 **Keywords**: `fn` `struct` `const` `return` `if` `else` `while` `for` `break`
-`continue` `discard` `true` `false` `interface` `implements` `import`.
+`continue` `discard` `true` `false` `interface` `module` `import`.
 Reserved for later: `in` `out` `switch` `case` `default` `do`.
 
 `uniform`, `buffer` and `push_constant` are *not* keywords — they used to be,
@@ -153,6 +153,22 @@ a function parameter or return type - pass a device-address pointer instead.
 A shader is a flat list of declarations in any order. Forward references are
 allowed: the parser builds the whole list before names are resolved.
 
+A file may open with a **module statement**, naming the module it belongs to:
+
+```
+module lighting;
+module three.render.lighting;   // dotted names are one name, matched whole
+```
+
+The name is the file's identity. It is not a namespace yet: imports still name
+files by path and everything in the closure resolves in one flat scope (§3.6).
+What it decides is where a bodyless declaration may be defined, because a
+module's text is all of its files - the one that wrote the statement and every
+file an import brings beside it. A declaration in module `lighting` is an error
+unless some file of `lighting` defines it (§3.1, §3.5). A file that declares no
+module is not checked this way: its bodyless declarations are refused where
+they are called, as before.
+
 ### 3.1 Functions
 ```
 fn float4 tint(float4 base, float amount)
@@ -168,6 +184,13 @@ Functions may be **overloaded** by arity and parameter type. A call picks the
 one candidate whose parameters accept its arguments (exact type, or an integer
 literal where a float is wanted, or a scalar where a vector is wanted); a call
 that matches none, or more than one, is an error rather than a guess.
+
+A function may be declared without a body - `fn float4 tint(float4 base);` -
+when the definition is somewhere the text does not say. In a module, only the
+module's own files may define it (§3), and a declaration no file defines is an
+error at the declaration. In a file with no module the older rule stands:
+refused where it is called. `@required` is that same need made explicit, for
+text the module does not contain either way.
 
 A **method** is declared with a qualified name, C3-style:
 
@@ -306,40 +329,27 @@ An interface is a named set of function declarations and nothing else - no
 bodies, no data, no values.
 
 **It is static.** There is no `any`, no vtable, and no run-time dispatch in a
-shader; an interface names an obligation at compile time, and nothing in the
-emitted module would differ if its members had been declared one by one. What
-it buys is that a reader sees the whole set in one place, and the compiler
-checks it.
+shader; an interface names a group at compile time, and nothing in the emitted
+module would differ if its members had been declared one by one. What it buys
+is that a reader sees the whole set in one place, and can import the name
+beside the file it lives in (§3.6).
 
 Each member is a function declaration of the module, so a call resolves through
 it and a definition fills it exactly as it fills a plain declaration (§3.1).
-What the interface adds is the name for the set:
+The obligation is the module's, not the interface's: a member of an interface
+declared in module `lighting` must be defined by a file of `lighting`, or the
+declaration is an error naming the module and the member (§3). No `implements`
+statement is written for it, and none is needed - being a declaration in the
+module is the whole claim.
 
-```
-implements AreaAlgorithm;
-```
-
-`implements I;` states that this module defines every member of `I`. It is
-`@required` generalised from one declaration to a named set: the claim is
-checked once per module, whether or not anything calls the members, and a
-missing member is an error naming the interface and the member. Defining an
-overload of a member's name is not defining the member - the return type and
-parameter types have to match.
-
-The interface has to be part of the module: declared in its own text, or read
-out of an imported file by name (§3.6). `implements` is where a reader learns
-which interface the module answers for, beside the import that says where it
-lives.
-
-A module that declares an interface without `implements` is not claiming
-anything: its members are ordinary declarations, refused only where they are
-called.
+An interface declared in a file with no module claims nothing: its members are
+ordinary declarations, refused only where they are called.
 
 A member is a plain function: no receiver, no attributes, no body.
 
 Where a module's text is more than one file (§3.6), the check runs on the
-module, not per file: one file may declare the interface, another define a
-member, and a third write `implements`.
+module, not per file: one file may declare the interface and another define a
+member.
 
 ### 3.6 Imports
 
@@ -349,18 +359,17 @@ import { AreaAlgorithm } from "lighting.shady";
 ```
 
 An import is a module-level statement and stands alone on its line. Both forms
-join the imported file's text to this module before the module is parsed: a
-module's text is its **import closure**.
+join the imported file's text to the importing file before either is parsed:
+the text that reaches the compiler is the **import closure** of the root.
 
 The braces of the named form name what was read out of the file: every name
 must be an interface the file declares, and one the file does not declare is
-refused at the import. That is the form a module writes when it implements an
-interface (§3.5), so the interface is spelled next to the file it lives in:
+refused at the import. It is a readability check - the interface is spelled
+next to the file it lives in - and not a claim about the module: its members
+are checked by the module that declares them (§3.5), wherever they are defined.
 
 ```
 import { AreaAlgorithm } from "lighting.shady";
-
-implements AreaAlgorithm;
 ```
 
 A file named by both forms is included once: the closure is a set of files,
@@ -379,9 +388,10 @@ spliced module.
 - A file imported twice, by either form, is included once: the closure is a set
   of files, so a diamond import is one copy.
 - Imports may not form a cycle; one is an error naming the cycle.
-- Name resolution is unchanged by the splice. The closure is one flat module,
+- Name resolution is unchanged by the splice. The closure is one flat scope,
   so an imported function, struct or constant resolves wherever it is written,
-  and a declaration in one file may be filled by a definition in another.
+  and a declaration in one file may be filled by a definition in another file
+  of its module.
 - An import cannot be conditional, there is no include guard, and no other
   directive exists - a `#` anywhere but a `#line` is an error (§1.1).
 

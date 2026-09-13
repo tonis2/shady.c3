@@ -10,7 +10,7 @@
  module, each under its own `#line` region so a diagnostic names the file it is
  in rather than a line in a spliced blob. The named form additionally says what
  was read out of the file: every name in braces must be an interface the file
- declares, which is how a file can implement one and still name its home.
+ declares, which keeps the names a reader sees beside the file they came from.
 
  The compiler itself never touches the disk - a caller supplies the text of each
  name through an `ImportResolver`, and three.c3's `load_source` is one.
@@ -112,6 +112,11 @@ fn String? resolve_imports(
 	out.init(allocator, source.len + 64);
 	bool complete = false;
 	defer if (!complete) out.free();
+
+	// Every file gets a region of its own, the root included. Without this the
+	// root's first lines would be the only text outside one, and a `module`
+	// statement there would not name the declarations that follow an import.
+	if (name.len) out.appendf("#line 1 \"%s\"\n", name);
 
 	expand(&context, source, name, &out, diagnostic, allocator)!;
 
