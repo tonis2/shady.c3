@@ -9,7 +9,6 @@
 module lighting;
 
 import { Lit } from "import_lib.shady";
-import { Lit } from "import_lib.shady";
 
 struct FragmentIn
 {
