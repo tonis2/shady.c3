@@ -1,0 +1,53 @@
+name: Package
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shady-latest
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build shady.c3l
+        run: |
+          set -euo pipefail
+          rm -f shady.c3l
+          zip -qr shady.c3l shady manifest.json README.md LANGUAGE.md LICENSE
+          unzip -t shady.c3l
+
+          for required in manifest.json shady/compile.c3 README.md LANGUAGE.md LICENSE; do
+            unzip -Z1 shady.c3l | grep -Fxq "$required" || {
+              echo "Missing from shady.c3l: $required"
+              exit 1
+            }
+          done
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shady-${{ github.sha }}
+          path: shady.c3l
+          if-no-files-found: error
+
+      - name: Update latest release
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest
+          body: Automatically packaged from the latest commit on `main`.
+          files: shady.c3l
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+          overwrite_files: true
