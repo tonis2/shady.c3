@@ -1,0 +1,48 @@
+// Storage buffers: `@storage` blocks with a runtime-sized array tail.
+//
+// The shape every compute kernel starts from - one descriptor per buffer, the
+// thread index as the element index, and a push constant deciding where the
+// guard is. Three buffers, because reading one and writing another is the
+// thing a kernel does, and a struct element covers the case where the array's
+// stride has to be laid out rather than assumed.
+
+struct Row
+{
+    float2 value;
+    uint   tag;
+}
+
+struct Weights @storage
+{
+    Row rows[];
+}
+
+struct Push @pushconstant
+{
+    uint count;
+    uint bias;
+}
+
+Weights weights;
+float   data[];
+uint4   tags[];
+
+Push push;
+
+struct ComputeIn
+{
+    uint3 thread @builtin(global_invocation_id);
+}
+
+fn void main(ComputeIn input) @compute @threads(64, 1, 1)
+{
+    uint i = input.thread.x;
+    if (i >= push.count) return;
+
+    // Read through a struct-shaped element, write through a scalar one.
+    float2 row = weights.rows[i].value;
+    data[i] = row.x + row.y * float(push.bias);
+
+    // A vector element, indexed the same way.
+    tags[i] = uint4(i, push.count, push.bias, weights.rows[i].tag);
+}

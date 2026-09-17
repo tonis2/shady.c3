@@ -145,8 +145,10 @@ The length may sit on the type or after the name. Arrays may be locals or
 struct members, are indexed by a runtime value, and take an initialiser list:
 `float2 taps[2] = { float2(0, 0), float2(1, 1) };`.
 
-Reserved: runtime-sized arrays, needed for storage buffers. An array cannot be
-a function parameter or return type - pass a device-address pointer instead.
+`T[]` - no length - is a runtime-sized array, and it is only legal as the last
+member of a `@storage` block or as the short spelling of one (§3.2). An array
+cannot be a function parameter or return type - pass a device-address pointer
+instead.
 
 ## 3. Module-level declarations
 
@@ -234,6 +236,7 @@ struct's layout, its storage class, and whether it takes a descriptor binding.
 |---|---|---|---|
 | *(none)* | an ordinary struct — locals, parameters, stage I/O | — | — |
 | `@uniform` | a uniform buffer | std140 | yes |
+| `@storage` | a storage buffer | std430 | yes |
 | `@pushconstant` | the pipeline's push constants | std430 | no |
 | `@address` | the target of a device-address pointer (§10) | std430 | no |
 
@@ -259,11 +262,49 @@ struct Push @pushconstant
 }
 ```
 
-A struct carries at most one of these; two is an error. A `@uniform` or
-`@pushconstant` struct gets `Block` and per-member `Offset` decorations.
+A struct carries at most one of these; two is an error. A `@uniform`, `@storage`
+or `@pushconstant` struct gets `Block` and per-member `Offset` decorations.
 
 There is at most one `@pushconstant` block per shader, because Vulkan allows
 one push constant block per pipeline.
+
+#### Storage buffers
+
+A storage buffer is a `@storage` struct — the buffer's shape as a block, with a
+**runtime-sized array** as its last member:
+
+```
+struct Weights @storage
+{
+    float  scale;
+    float4 rows[];
+}
+Weights weights;
+```
+
+`T[]` has no length in the source because the host decides it: the descriptor's
+range says how many elements the buffer holds, and the shader only ever indexes
+(`weights.rows[i]`, `weights.scale`). The array has to be last — nothing may
+follow a member the shader cannot size — and its element may be a scalar,
+vector, matrix or struct. A struct element is laid out by the block that
+contains it, exactly as a nested struct is anywhere else; a runtime-sized
+descriptor array (§3.3) is a different thing and is not spelled this way.
+
+Storage buffers are laid out **std430 and nothing else**. A compile may ask for
+C3's own packing (`scalar_layout`), and every other block follows it, but a
+buffer's bytes are written and read by whoever uploaded them, so its layout
+cannot depend on a flag the shader alone was compiled with.
+
+A one-array buffer has a shorter spelling, and it is the one to reach for:
+
+```
+float4 rows[];      // the same block, with the array as its only member
+```
+
+The compiler generates the block SPIR-V requires and the shader never sees it —
+`rows[i]` reads and writes the array. Write the explicit form when the buffer
+carries anything beside its array, or when one struct type is shared by two
+buffers.
 
 ### 3.3 Module-level variables
 
@@ -282,9 +323,10 @@ comes entirely from the type — there are no `uniform`, `buffer` or
 Only some types may be bound: an opaque type (`texture2d`, `sampler`,
 `Sampler2D`, `Sampler2DShadow`) or an array of one - a descriptor array, `[]`
 for a runtime-sized one - a
-`@uniform` struct, or a `@pushconstant` struct. A plain struct has no layout
-and an `@address` struct is reached through a pointer, so neither can be a
-variable.
+`@uniform` struct, a `@storage` struct, or a `@pushconstant` struct. A plain
+struct has no layout and an `@address` struct is reached through a pointer, so
+neither can be a variable. A bare `T[]` is the short spelling of a `@storage`
+block (§3.2) and binds the same way.
 
 Bindings are assigned in declaration order within each set, starting at 0.
 An explicit `@set(n)` or `@binding(n)` pins that resource; auto-assignment
@@ -407,6 +449,7 @@ spliced module.
 | `@compute(name)` | function | …published under `name` |
 | `@threads(x, y, z)` | `@compute` function | Workgroup size, required on compute |
 | `@uniform` | struct | A uniform buffer: std140, takes a binding |
+| `@storage` | struct | A storage buffer: std430, takes a binding, ends in a runtime-sized array |
 | `@pushconstant` | struct | The pipeline's push constants: std430, no binding |
 | `@address` | struct | Reached through a device address: std430, no binding |
 | `@position` | struct member | `BuiltIn Position` instead of a location |
@@ -417,8 +460,8 @@ spliced module.
 | `@spec(n)` | module-level `const` | Specialization constant id (§3.4) |
 | `@flat` | struct member | `Flat` interpolation |
 
-A struct carries at most one of `@uniform`, `@pushconstant` and `@address`;
-two is an error. Attributes sit between a struct's name and its body, and
+A struct carries at most one of `@uniform`, `@storage`, `@pushconstant` and
+`@address`; two is an error. Attributes sit between a struct's name and its body, and
 after a function's signature, as in C3.
 
 Unknown attributes are an error, not a warning — a typo'd `@framgent` that

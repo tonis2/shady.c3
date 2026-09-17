@@ -276,9 +276,39 @@ fn void Module.capability(&self, Capability capability)
 
 fn void Module.extension(&self, String name)
 {
-	@pool() {
-		emit_slice(&self.extensions, Opcode.EXTENSION, string_words(name, tmem));
-	};
+	// The section is encoded instruction words, so an `OpExtension` is a word
+	// whose low half is the opcode and whose high half is the instruction's
+	// length - the same packing `build` writes out. A name already in the list
+	// is not written again: one extension emitted twice is the same module to a
+	// reader and a validator warning, and two features that each need one - a
+	// storage buffer and a runtime array both do - are how a second copy gets
+	// written.
+	if (self.has_extension(name)) return;
+	emit_slice(&self.extensions, Opcode.EXTENSION, string_words(name, tmem));
+}
+
+fn bool Module.has_extension(&self, String name)
+{
+	Id[] words = string_words(name, tmem);
+	Id[] section = self.extensions.array_view();
+
+	for (usz at = 0; at < section.len;)
+	{
+		usz length = (usz)(section[at] >> 16);
+		if (length == 0 || at + length > section.len) break;
+
+		if ((section[at] & 0xffff) == (uint)Opcode.EXTENSION && length == words.len + 1)
+		{
+			bool same = true;
+			foreach (i, word : words)
+			{
+				if (section[at + 1 + (usz)i] != word) same = false;
+			}
+			if (same) return true;
+		}
+		at += length;
+	}
+	return false;
 }
 
 fn Id Module.ext_inst_import(&self, String name)

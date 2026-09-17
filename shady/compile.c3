@@ -52,10 +52,14 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 		}
 
 		// The type is resolved the way a local's is, because a resource may be
-		// an array - the bindless texture table is `Sampler2D three_textures[]`.
+		// an array - the bindless texture table is `Sampler2D three_textures[]`,
+		// and a bare `float data[]` is a storage buffer written the short way.
+		// The two are told apart by what the array holds: an opaque element is
+		// a runtime-sized *descriptor* array, anything else a storage buffer.
 		Type* type = self.resolve_type(decl.resource.type, decl.line, decl.column)!;
 		resource.type  = type;
 		resource.block = type.kind == STRUCT ? type.block : BlockKind.NONE;
+		if (type.kind == ARRAY && type.runtime && !type.element.is_opaque()) resource.block = STORAGE;
 
 		if (resource.block == PUSH_CONSTANT)
 		{
@@ -188,8 +192,31 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 			Type* member_type = self.resolve_type(source.type, source.line, source.column)!;
 			if (member_type.kind == ARRAY && member_type.runtime)
 			{
-				self.fail(source.line, source.column, "a runtime-sized array cannot be a struct member");
-				return CODEGEN_ERROR~;
+				// A runtime-sized array is the tail of the block it lives in, so
+				// it is legal in exactly one place: the last member of a
+				// @storage struct, which is what a storage buffer is. Anywhere
+				// else there is nothing to stop the array, and the block that
+				// contains it has no size.
+				if (type.block != STORAGE)
+				{
+					self.fail(source.line, source.column, string::format(self.allocator,
+						"`%s[]` is a runtime-sized array, which is only a member of an @storage block",
+						member_type.element.name));
+					return CODEGEN_ERROR~;
+				}
+				if (i + 1 < decl.struct_decl.members.len)
+				{
+					self.fail(source.line, source.column,
+						"a runtime-sized array has no size, so nothing may follow it in the block");
+					return CODEGEN_ERROR~;
+				}
+				if (!member_type.element.may_back_a_runtime_array())
+				{
+					self.fail(source.line, source.column, string::format(self.allocator,
+						"`%s[]` cannot back a runtime-sized array - it is not a scalar, vector, matrix or struct",
+						member_type.element.name));
+					return CODEGEN_ERROR~;
+				}
 			}
 			members[i] = {
 				.name        = source.name,
@@ -430,10 +457,29 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 		{
 			case UNIFORM:
 			case PUSH_CONSTANT:
+			case STORAGE:
 				Layout layout = self.block_layout(resource.block);
 				storage = resource.block == BlockKind.UNIFORM
 					? StorageClass.UNIFORM
-					: StorageClass.PUSH_CONSTANT;
+					: resource.block == BlockKind.STORAGE
+						? StorageClass.STORAGE_BUFFER
+						: StorageClass.PUSH_CONSTANT;
+
+				// A bare runtime-sized array - `float data[];` - is a storage
+				// buffer written the short way: SPIR-V has no runtime array at
+				// the top level of a descriptor, so the declaration becomes the
+				// block it describes. A `@storage` struct is already one, and a
+				// runtime-sized descriptor array is a binding of its own.
+				//
+				// The wrapper is kept as the variable's type rather than only
+				// as the descriptor's, so that the variable's pointer and its
+				// pointee are the same type - and `index_expression` steps
+				// through the block again when the shader indexes the name.
+				if (type.kind == ARRAY && type.runtime)
+				{
+					type = self.types.wrap_runtime_array(type);
+					resource.type = type;
+				}
 
 				// Block layout has to be decided before the type id is emitted,
 				// because the decorations hang off that id.
@@ -447,6 +493,14 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 				}
 				resource.size = size;
 				Id type_id    = self.type_id(type);
+				if (resource.block == BlockKind.STORAGE)
+				{
+					// SPIR-V 1.3 folded the storage buffer storage class in; a
+					// 1.0 module declares the extension that added it. Emitted
+					// here rather than at the header because whether the module
+					// has one is only known once the resources are walked.
+					self.mod.extension("SPV_KHR_storage_buffer_storage_class");
+				}
 				self.mod.decorate(type_id, Decoration.BLOCK);
 				self.decorate_block_members(type_id, type, layout);
 
@@ -465,7 +519,7 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 				{
 					self.fail(decl.line, decl.column, element.kind == STRUCT
 						? string::format(self.allocator,
-							"`%s` is a plain struct - mark it @uniform or @pushconstant to bind it", element.name)
+							"`%s` is a plain struct - mark it @uniform, @storage or @pushconstant to bind it", element.name)
 						: string::format(self.allocator,
 							"`%s` cannot be a module-level variable", type.name));
 					return CODEGEN_ERROR~;
@@ -481,6 +535,7 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 				storage = StorageClass.UNIFORM_CONSTANT;
 				break;
 			}
+		default:
 		}
 
 		resource.storage = storage;

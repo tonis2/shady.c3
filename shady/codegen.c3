@@ -174,8 +174,18 @@ struct Codegen
  Which layout a block gets: the kind's own unless this compile asked for
  scalar, which overrides every kind the same way `-force-glsl-scalar-layout`
  does.
+
+ Storage buffers are the exception, and the reason is the host side of the
+ seam: a general-purpose compute buffer is written and read by whatever
+ uploaded it, so its layout has to be the one everyone can agree on. Scalar
+ packing would repack `float3` to 12 bytes and a struct of {float, float3} to
+ 16, which is not the layout any other tool lays data out in.
 *>
-fn Layout Codegen.block_layout(&self, BlockKind kind) => self.scalar_layout ? SCALAR : kind.layout();
+fn Layout Codegen.block_layout(&self, BlockKind kind)
+{
+	if (kind == STORAGE) return STD430;
+	return self.scalar_layout ? SCALAR : kind.layout();
+}
 
 fn void Codegen.fail(&self, uint line, uint column, String message, uint length = 0)
 {
@@ -335,7 +345,7 @@ fn Type*? Codegen.resolve_type(&self, TypeRef ref, uint line, uint column)
 		}
 		Type* array = self.types.array_of(type, ref.array_size);
 		// A length of zero is `T[]`: a runtime-sized array, which is only legal
-		// as a module-level resource.
+		// as a module-level resource or a member of an @storage block.
 		array.runtime = ref.array_size == 0;
 		return array;
 	}
@@ -704,9 +714,20 @@ fn Value? Codegen.member_expression(&self, Expr* expr)
 		return CODEGEN_ERROR~;
 	}
 
+	return self.member_value(base, (uint)index);
+}
+
+<*
+ One member of a struct value, by index.
+
+ The walk `member_expression` does once the member is resolved, so a caller
+ that already knows which one it wants - the implicit array of a bare storage
+ buffer - does not spell the access chain a second way.
+*>
+fn Value Codegen.member_value(&self, Value base, uint index)
+{
 	Type* member_type = base.type.members[index].type;
 
-	// Addressable base keeps the result addressable, so it can be assigned to.
 	if (base.pointer != NO_ID)
 	{
 		Id ptr = self.func.access_chain(self.mod.type_pointer(base.storage, self.type_id(member_type)),
@@ -714,7 +735,7 @@ fn Value? Codegen.member_expression(&self, Expr* expr)
 		return (Value) { .type = member_type, .pointer = ptr, .storage = base.storage };
 	}
 
-	return (Value) { .type = member_type, .id = self.func.composite_extract(self.type_id(member_type), base.id, (uint)index) };
+	return (Value) { .type = member_type, .id = self.func.composite_extract(self.type_id(member_type), base.id, index) };
 }
 
 <*
@@ -761,6 +782,15 @@ fn Value? Codegen.index_expression(&self, Expr* expr)
 	if (base.type.kind == POINTER)
 	{
 		return self.offset_address(base, index, expr);
+	}
+
+	// A bare runtime-sized array is bound as the block it describes, so the
+	// array is one member in - `data[i]` is the block's array indexed. The
+	// wrapper is the compiler's, not the shader's, so the step is taken here
+	// rather than asked of whoever wrote the declaration.
+	if (base.type.kind == STRUCT && base.type.runtime_array_block)
+	{
+		base = self.member_value(base, 0);
 	}
 
 	if (base.type.kind != VECTOR && base.type.kind != MATRIX && base.type.kind != ARRAY)
@@ -2545,7 +2575,8 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 			Type* type = self.resolve_type(stmt.decl.type, stmt.line, stmt.column)!;
 			if (type.kind == ARRAY && type.runtime)
 			{
-				self.fail(stmt.line, stmt.column, "a runtime-sized array is only a module-level resource");
+				self.fail(stmt.line, stmt.column,
+					"a runtime-sized array is only a member of an @storage block, where the host decides its length");
 				return CODEGEN_ERROR~;
 			}
 			Id pointer = self.func.local(self.pointer_to(StorageClass.FUNCTION, type));
