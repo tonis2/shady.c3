@@ -82,6 +82,19 @@ fn Id Function.emit(&self, Opcode opcode, Id result_type, Id... operands)
 }
 
 <*
+ `OpControlBarrier`: four operands and no result. It is the one instruction
+ with a hole where the result type and result id go, so the ordinary `emit` would write
+ two words the spec does not have.
+*>
+fn void Function.control_barrier(&self, Id exec, Id mem, Id sem, Id mask)
+{
+	self.body.push((4u << 16) | (uint)Opcode.CONTROL_BARRIER);
+	self.body.push(exec); // execution scope
+	self.body.push(mem);  // memory scope
+	self.body.push(sem);  // semantics
+}
+
+<*
  As `emit`, for operand lists built at runtime.
 *>
 fn Id Function.emit_slice(&self, Opcode opcode, Id result_type, Id[] operands)

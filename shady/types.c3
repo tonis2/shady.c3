@@ -123,6 +123,13 @@ fn Id Module.type_struct(&self, Id[] members)
 fn Id Module.const_u32(&self, Id type, uint bits) => self.unique_typed(Opcode.CONSTANT, type, bits);
 
 <*
+ The zero of a type: `OpConstantNull`. What a shared variable starts as, and
+ the honest spelling of "zeroes" for a composite whose zero is not a list of
+ scalar zeros in the source.
+*>
+fn Id Module.const_null(&self, Id type) => self.unique(Opcode.CONSTANT_NULL, type);
+
+<*
  A 64-bit constant. OpConstant carries a wide literal as two words, low first.
 *>
 fn Id Module.const_u64(&self, Id type, ulong value)

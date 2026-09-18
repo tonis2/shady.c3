@@ -39,6 +39,10 @@ enum TokenKind : char
 	INTERFACE,
 	IMPORT,
 	MODULE,
+	// `shared float tile[64];` - a workgroup-storage variable - and the
+	// `barrier` statement whose whole job is to make one safe to share.
+	SHARED,
+	BARRIER,
 	// Reserved: parsed as keywords so using one as a name is a clear error
 	// rather than a confusing syntax error later.
 	IN,
@@ -364,6 +368,8 @@ fn TokenKind keyword_kind(String word) @local
 		case "interface":     return INTERFACE;
 		case "import":        return IMPORT;
 		case "module":        return MODULE;
+		case "shared":        return SHARED;
+		case "barrier":       return BARRIER;
 		case "in":            return IN;
 		case "out":           return OUT;
 		case "switch":        return SWITCH;

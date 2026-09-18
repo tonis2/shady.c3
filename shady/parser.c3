@@ -500,6 +500,39 @@ fn Expr*? Parser.primary(&self)
 			node.ident = { .name = token.text };
 			return node;
 
+		case BARRIER:
+		{
+			// A bare `barrier` is the zero-argument call spelled without the
+			// parentheses, so it is parsed as one here. `barrier()` and
+			// `barrier(2)` arrive as CALL nodes through the ordinary grammar,
+			// which is where the arity diagnostic lives.
+			self.advance();
+
+			Expr* callee = self.new_expr(IDENT, token);
+			callee.ident = { .name = "barrier" };
+
+			// `barrier(2)` is a mistake the compiler should name, so the
+			// parentheses are parsed as arguments and handed on.
+			ExprPtrList args;
+			args.init(self.allocator, 2);
+			if (self.match(LPAREN))
+			{
+				if (!self.check(RPAREN))
+				{
+					while (true)
+					{
+						args.push(self.expression()!);
+						if (!self.match(COMMA)) break;
+					}
+				}
+				self.expect(RPAREN, "expected `)` closing the arguments")!;
+			}
+
+			Expr* call = self.new_expr(CALL, token);
+			call.call = { .callee = callee, .args = args.array_view() };
+			return call;
+		}
+
 		case LPAREN:
 			// `(type)value`, but only when the name is a type: `(x) - y` must
 			// stay a subtraction.
@@ -662,6 +695,14 @@ fn Stmt*? Parser.statement(&self)
 			self.advance();
 			self.expect(SEMICOLON, "expected `;` after `discard`")!;
 			return self.new_stmt(DISCARD, token);
+
+		case BARRIER:
+			// `barrier;` and `barrier(2);` both go down the expression path:
+			// the word is a call the compiler knows, and the statement is the
+			// call whose result nothing asks for. Parsing it as a call is what
+			// makes `barrier(2)` a diagnostic about the arguments instead of a
+			// syntax error about where the `(` is.
+			return self.declaration_or_expression();
 
 		case CONST:
 			self.advance();
@@ -1031,6 +1072,22 @@ fn Decl*? Parser.declaration(&self)
 			// caller skipped that step.
 			self.fail("`import` is resolved before parsing - call shady::resolve_imports on the module's text first");
 			return PARSE_ERROR~;
+
+		case SHARED:
+		{
+			// A workgroup-storage variable: the scratch space one workgroup's
+			// invocations share. Modules level because SPIR-V wants it there,
+			// and never a resource - it has no set and no binding.
+			self.advance();
+			decl.kind = DeclKind.SHARED;
+			decl.name = "";
+			decl.resource = { .type = self.type_ref()! };
+			Token name = self.expect(IDENT, "expected a name for the shared variable")!;
+			decl.name = name.text;
+			self.declarator_array(&decl.resource.type)!;
+			self.expect(SEMICOLON, "expected `;` after the shared variable")!;
+			return decl;
+		}
 
 		case IDENT:
 			// `uniform`, `push_constant` and `buffer` used to be keywords.

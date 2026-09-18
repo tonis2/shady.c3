@@ -210,6 +210,7 @@ fn Id Module.decl(&self, Opcode opcode, Id result_type, Id[] operands, bool dedu
 	self.declarations.push(result);
 	foreach (word : operands) self.declarations.push(word);
 
+
 	return result;
 }
 

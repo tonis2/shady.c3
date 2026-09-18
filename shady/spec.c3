@@ -66,6 +66,7 @@ constdef Opcode : uint
 	CONSTANT_FALSE            = 42,
 	CONSTANT                  = 43,
 	CONSTANT_COMPOSITE        = 44,
+	CONSTANT_NULL             = 46,
 	SPEC_CONSTANT_TRUE        = 48,
 	SPEC_CONSTANT_FALSE       = 49,
 	SPEC_CONSTANT             = 50,
@@ -159,6 +160,7 @@ constdef Opcode : uint
 	DPDX                      = 207,
 	DPDY                      = 208,
 
+	CONTROL_BARRIER           = 224,
 	ATOMIC_I_ADD              = 234,
 
 	LOOP_MERGE                = 246,

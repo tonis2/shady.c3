@@ -770,6 +770,48 @@ fn Type* Codegen.vector_of(&self, Type* element, uint count)
 }
 
 <*
+ `shared float tile[64];`: one workgroup's scratch space.
+
+ SPIR-V wants the variable at module scope with the Workgroup storage class,
+ and wants the array's length known - a workgroup has no unbounded memory to
+ put a runtime-sized array in, so the length is checked here rather than
+ discovered by a driver. Nothing else is needed: reads and writes go through
+ the ordinary pointer paths, and every access from an invocation that is not
+ the declaring one is the author's to serialise with `barrier`.
+
+ The variable is a `Resource` like any other module-level name, so identifiers
+ resolve through the one lookup the language already has.
+*>
+fn void? Codegen.declare_shared(&self, Ast* ast)
+{
+	foreach (decl : ast.decls)
+	{
+		if (decl.kind != DeclKind.SHARED) continue;
+
+		Type* type = self.resolve_type(decl.resource.type, decl.line, decl.column)!;
+		if (type.kind == ARRAY && type.runtime)
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"`%s` needs a length - a workgroup's memory is as big as the module says it is", decl.name));
+			return CODEGEN_ERROR~;
+		}
+
+		Id pointer_type = self.mod.type_pointer(StorageClass.WORKGROUP, self.type_id(type));
+
+		// No initialiser, because SPIR-V puts none on a Workgroup variable: the
+		// specification gives OpVariable in Workgroup storage no initialiser
+		// operand, and a driver handed one may read the variable as zeroes or
+		// as anything else. Everything a shared slot holds is written by an
+		// invocation that reached it, and the shader's own zeroing is the only
+		// one that is guaranteed.
+		Id id = self.mod.global_var(pointer_type, StorageClass.WORKGROUP);
+
+		self.resources.push({ .name = decl.name, .type = type, .id = id, .storage = StorageClass.WORKGROUP });
+	}
+	return;
+}
+
+<*
  The storage class a pointer id was declared with. Tracked by asking the
  resources and locals, since SPIR-V ids carry no type information here.
 *>
@@ -1964,10 +2006,48 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 
 	if (name == "mul") return self.mul_call(expr);
 	if (name == "select") return self.select_call(expr);
+	if (name == "barrier" || name == "workgroup_barrier") return self.workgroup_barrier(expr);
 	if (name == "InterlockedAdd") return self.atomic_add_call(expr);
 	if (name == "NonUniformResourceIndex") return self.non_uniform_call(expr);
 
 	return self.builtin_call(expr, name);
+}
+
+<*
+ `barrier()`: every invocation in the workgroup reaches this point, and every
+ write to shared memory before it is visible after it.
+
+ The three operands are the ones the SPIR-V environment wants spelled out: the
+ execution scope that synchronises, the memory scope whose writes are ordered,
+ and the semantics of that ordering. Workgroup for the first two because a
+ workgroup is the only thing that can meet at a barrier, and `AcquireRelease`
+ with `WorkgroupMemory` for the third, which is what HLSL's
+ `GroupMemoryBarrierWithGroupSync` lowers to. The ordering carries into the
+ function rather than inlining, so a body can put the barrier in a helper.
+
+ The result is void: an expression statement is the only place this call can
+ be written, which is the point of it being a statement in the language.
+*>
+fn Value? Codegen.workgroup_barrier(&self, Expr* expr)
+{
+	if (expr.call.args.len != 0)
+	{
+		self.fail(expr.line, expr.column, "`barrier` takes no arguments");
+		return CODEGEN_ERROR~;
+	}
+
+	Type* uint_t = self.types.find("uint");
+	Id scope_execution = self.mod.const_u32(self.type_id(uint_t), 2); // Workgroup
+	Id scope_memory    = self.mod.const_u32(self.type_id(uint_t), 2);
+	Id semantics       = self.mod.const_u32(self.type_id(uint_t), 0x108); // AcquireRelease | WorkgroupMemory
+
+	// OpControlBarrier carries no result type and no result id, so it is
+	// emitted by hand rather than through `Function.emit`.
+	self.func.control_barrier(scope_execution, scope_memory, semantics, semantics);
+
+	// A barrier has no value; the statement is the only place it can be.
+	Type* void_t = self.types.find("void");
+	return (Value) { .type = void_t, .id = NO_ID };
 }
 
 <*

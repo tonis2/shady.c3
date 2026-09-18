@@ -1,0 +1,52 @@
+// Shared memory and the barrier that makes it usable: a workgroup reduction.
+//
+// The shared array is the scratch both halves of the reduction meet in, and
+// `barrier;` is what orders the writes against the reads - without it the
+// second half reads whatever the first half happened to have left, which is
+// the bug the language is supposed to make unwritable rather than rare.
+//
+// The histogram loop is the other shape: an atomic add into a counter every
+// invocation can reach, which is what `InterlockedAdd` is for.
+
+struct Push @pushconstant
+{
+    uint count;
+}
+
+shared float  scratch[64];
+shared uint   bins[16];
+
+float input[];
+float output[];
+
+Push push;
+
+struct ComputeIn
+{
+    uint3 group @builtin(workgroup_id);
+    uint3 local @builtin(local_invocation_id);
+}
+
+fn void main(ComputeIn at) @compute @threads(64, 1, 1)
+{
+    uint i = at.local.x;
+    uint base = at.group.x * 64u;
+
+    scratch[i] = input[base + i];
+    barrier;
+
+    // A tree reduction: every step halves the live range, and the barrier
+    // between steps is what makes the next read see the previous write.
+    for (uint step = 32u; step > 0u; step = step / 2u)
+    {
+        if (i < step) scratch[i] = scratch[i] + scratch[i + step];
+        barrier;
+    }
+
+    if (i == 0u)
+    {
+        output[at.group.x] = scratch[0];
+    }
+
+    InterlockedAdd(bins[at.group.x % 16u], 1u);
+}

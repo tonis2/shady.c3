@@ -334,7 +334,45 @@ skips numbers already taken by explicit ones. Mixing the two is allowed;
 a collision is an error rather than a silent overwrite. A `@pushconstant`
 block takes no binding and does not consume one.
 
-### 3.4 Constants
+### 3.4 Shared memory
+
+```
+shared float tile[64];      // one workgroup's scratch
+shared uint  bins[16];
+```
+
+`shared Type name;` is a workgroup-storage variable: the scratch space the
+invocations of one workgroup share. It is a module-level declaration because
+SPIR-V wants it there, and it is not a resource - it has no set, no binding,
+and nothing outside the workgroup can reach it.
+
+The length has to be a constant the module can state. A workgroup's memory is
+as big as the declaration says it is, so `shared float tile[];` is refused.
+
+**Nothing is guaranteed about what a shared slot holds before it is written**,
+and the language cannot promise otherwise: SPIR-V gives a Workgroup variable
+nowhere to put an initialiser, and a driver handed one is free to read the
+variable as zeroes or as anything else. A loop that accumulates into shared
+memory zeroes it first, or writes before it reads.
+
+### 3.4.1 Barriers
+
+```
+barrier;        // every invocation has reached this point
+barrier();      // the same
+```
+
+`barrier` synchronises the workgroup and orders workgroup-memory writes before
+it against reads after it. Every invocation of the workgroup has to reach it -
+a barrier inside a branch half the workgroup takes leaves the other half
+waiting, and a driver that notices reports a hang rather than a wrong number.
+
+It is what makes shared memory usable, so the two travel together: write,
+`barrier`, read. A loop that reduces through shared memory needs one barrier
+per step, not one per loop, because the next step's read has to see the
+previous step's write.
+
+### 3.5 Constants
 ```
 const float PI = 3.14159;              // an ordinary constant
 const bool  SHADOWS  @spec(0) = true;  // a specialization constant
@@ -355,7 +393,7 @@ ids must be unique within a module.
 Only scalars, because a spec constant has to be a single replaceable literal;
 a composite or an expression is not.
 
-### 3.5 Interfaces
+### 3.6 Interfaces
 
 ```
 interface AreaAlgorithm
@@ -393,7 +431,7 @@ Where a module's text is more than one file (§3.6), the check runs on the
 module, not per file: one file may declare the interface and another define a
 member.
 
-### 3.6 Imports
+### 3.7 Imports
 
 ```
 import "lighting.shady";
@@ -705,7 +743,13 @@ condition)`.
 
 **Device memory**: `InterlockedAdd(dest, value)` - an atomic add on a device
 address, yielding the value the destination held before. Device scope, relaxed
-ordering; anything stronger is a barrier rather than an increment.
+ordering; anything stronger is a barrier rather than an increment. The
+destination may be shared memory - `InterlockedAdd(bins[i], 1)` is how a
+histogram in a workgroup is built - and the same relaxation applies: reach for
+`barrier` when the order of the increments against other reads matters.
+
+**Workgroup**: `barrier` (`barrier;` or `barrier()`) - workgroup
+synchronisation, described in §3.4.1.
 
 **Texture** (method syntax on the texture):
 

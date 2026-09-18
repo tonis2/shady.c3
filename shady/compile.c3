@@ -913,6 +913,7 @@ fn void? Codegen.build(&self)
 	self.check_required()!;
 	self.assign_bindings(self.ast)!;
 	self.emit_resources(self.ast)!;
+	self.declare_shared(self.ast)!;
 
 	// One module can hold as many entry points as it likes, of any stage. The
 	// host picks between them by name, through `pName` in

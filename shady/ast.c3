@@ -325,6 +325,7 @@ enum DeclKind : char
 	STRUCT,
 	FUNCTION,
 	RESOURCE, // uniform blocks, textures, samplers
+	SHARED,   // `shared float tile[64];` - a workgroup-storage variable
 	CONSTANT,
 	INTERFACE, // a named set of function declarations
 	MODULE,    // `module lighting;`: which module the rest of a file belongs to
