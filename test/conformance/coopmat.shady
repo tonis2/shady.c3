@@ -1,0 +1,56 @@
+// Cooperative matrices: one tile per workgroup, the shape the hardware
+// computes a matrix product with.
+//
+// Three tiles - A, B and the accumulator - are loaded from shared memory,
+// multiplied with `coop_muladd`, and stored back. The last argument of the
+// type is which side of the product the tile is, because the hardware lays
+// the three out differently; the load's stride is the step between rows,
+// because a tile is a window onto a bigger array rather than an array of its
+// own.
+//
+// The barriers around the loads and after the store are the two the tile
+// needs: the first orders the shared writes against the loads, the second
+// stops an invocation overwriting a tile another has not read yet.
+
+struct Push @pushconstant
+{
+    uint dim;
+}
+
+shared float a_tile[256];
+shared float b_tile[256];
+shared float acc[256];
+
+float a[];
+float b[];
+
+Push push;
+
+struct ComputeIn
+{
+    uint3 local @builtin(local_invocation_id);
+}
+
+fn void main(ComputeIn at) @compute @threads(64, 1, 1)
+{
+    uint i = at.local.x;
+    a_tile[i] = a[i];
+    b_tile[i] = b[i];
+    barrier;
+
+    coopmat<float, 16, 16, workgroup, a> a_mat;
+    coopmat<float, 16, 16, workgroup, b> b_mat;
+    coopmat<float, 16, 16, workgroup, accumulator> acc_mat;
+
+    coop_load(a_mat, &a_tile[0], 16u);
+    coop_load(b_mat, &b_tile[0], 16u);
+    coop_load(acc_mat, &acc[0], 16u);
+
+    coop_muladd(a_mat, b_mat, acc_mat, acc_mat);
+    barrier;
+
+    coop_store(&acc[0], acc_mat, 16u);
+    barrier;
+
+    a[i] = acc[i];
+}

@@ -372,6 +372,46 @@ It is what makes shared memory usable, so the two travel together: write,
 per step, not one per loop, because the next step's read has to see the
 previous step's write.
 
+### 3.4.2 Cooperative matrices
+
+```
+coopmat<float, 16, 16, workgroup, a>           a_mat;
+coopmat<float, 16, 16, workgroup, b>           b_mat;
+coopmat<float, 16, 16, workgroup, accumulator> acc;
+
+coop_load(a_mat, &tile[0], 16u);   // tile, pointer, stride
+coop_load(b_mat, &tile[0], 16u);
+coop_load(acc,   &tile[0], 16u);
+coop_muladd(a_mat, b_mat, acc, acc);   // acc = a * b + acc
+coop_store(&tile[0], acc, 16u);
+```
+
+A cooperative matrix is a tile one workgroup computes together - the shape the
+hardware has an instruction for, rather than a grid of scalar multiplies. The
+type names the element, the rows, the columns, the scope (`workgroup` or
+`subgroup`), and which side of a product the tile is (`a`, `b` or
+`accumulator`). The last one is part of the tile's identity: the hardware lays
+the three out differently, so two tiles that differ only in use are two types.
+
+`coop_load(tile, pointer, stride)` reads a tile through a pointer - usually
+into shared memory - and the stride is the step between rows, because a tile is
+a window onto a bigger array. `coop_store(pointer, tile, stride)` is its
+mirror. `coop_muladd(a, b, c, result)` is `result = a * b + c`; the four
+arguments are three tiles and the tile the answer goes in, which may be the
+accumulator itself.
+
+Its shape rules are matrix multiplication's: `a`'s columns against `b`'s rows,
+and the result's shape against the accumulator's. A mismatch is refused by name
+rather than left for the driver.
+
+The layout is row-major, and there is no spelling for anything else yet.
+
+A module with a cooperative matrix in it is a **Vulkan-memory-model module**:
+the SPIR-V capability is only legal next to `SPV_KHR_vulkan_memory_model`, so
+the compiler declares it, raises the module to SPIR-V 1.3 and switches the
+memory model for the whole module. A barrier in such a module is still spelled
+`barrier`, and still means the same thing.
+
 ### 3.5 Constants
 ```
 const float PI = 3.14159;              // an ordinary constant

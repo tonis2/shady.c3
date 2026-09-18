@@ -28,6 +28,15 @@ struct TypeRef
 	bool   is_pointer; // `T*`, a buffer device address
 	uint   line;
 	uint   column;
+
+	// `coopmat<float, 16, 16, workgroup>`: the name is "coopmat" and these are
+	// what the angle brackets carried.
+	bool   is_coopmat;
+	String coopmat_element;
+	uint   coopmat_rows;
+	uint   coopmat_columns;
+	String coopmat_scope;
+	String coopmat_use; // `a`, `b` or `accumulator`
 }
 
 // --- Attributes --------------------------------------------------------------
@@ -78,6 +87,7 @@ enum ExprKind : char
 	CAST,
 	UPDATE,
 	INITIALIZER,
+	REFERENCE, // `&x`, the address of an lvalue
 }
 
 struct ExprLiteral

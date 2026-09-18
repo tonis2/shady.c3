@@ -129,6 +129,31 @@ fn TypeRef? Parser.type_ref(&self)
 
 	TypeRef type = { .name = name.text, .line = name.line, .column = name.column };
 
+	// `coopmat<float, 16, 16, workgroup>`: a cooperative matrix is a type
+	// family, not a name, so it carries its shape the way an array carries a
+	// length.
+	if (name.text == "coopmat")
+	{
+		self.expect(LT, "expected `<` after `coopmat`")!;
+		Token element = self.expect(IDENT, "expected the element type of a coopmat")!;
+		self.expect(COMMA, "expected `,` after the element type")!;
+		Token rows = self.expect(INTEGER, "expected the row count")!;
+		self.expect(COMMA, "expected `,` after the row count")!;
+		Token columns = self.expect(INTEGER, "expected the column count")!;
+		self.expect(COMMA, "expected `,` after the column count")!;
+		Token scope = self.expect(IDENT, "expected the scope, `workgroup` or `subgroup`")!;
+		self.expect(COMMA, "expected `,` after the scope")!;
+		Token use = self.expect(IDENT, "expected the use, `a`, `b` or `accumulator`")!;
+		self.expect(GT, "expected `>` closing the coopmat type")!;
+
+		type.is_coopmat      = true;
+		type.coopmat_element = element.text;
+		type.coopmat_rows    = (uint)rows.number;
+		type.coopmat_columns = (uint)columns.number;
+		type.coopmat_scope   = scope.text;
+		type.coopmat_use     = use.text;
+	}
+
 	if (self.match(LBRACKET))
 	{
 		type.is_array = true;
@@ -360,6 +385,19 @@ fn Expr*? Parser.unary(&self)
 		return node;
 	}
 
+	if (op == AMP)
+	{
+		// `&x`: the address of an lvalue, which is what a cooperative matrix
+		// load reads and a store writes. Everything else that names an
+		// address in the language is a declaration's receiver, so this is the
+		// one place the operator is spelled.
+		Token token   = self.advance();
+		Expr* operand = self.unary()!;
+		Expr* node    = self.new_expr(REFERENCE, token);
+		node.unary    = { .op = AMP, .operand = operand };
+		return node;
+	}
+
 	if (op == MINUS || op == BANG || op == PLUS)
 	{
 		Token token   = self.advance();
@@ -583,6 +621,19 @@ fn bool Parser.at_declaration(&self)
 {
 	if (!self.check(IDENT)) return false;
 	if (self.peek(1).kind == IDENT) return true;
+
+	// `coopmat<float, 16, 16, workgroup> tile;`: the shape sits between the
+	// type and the name, so the lookahead walks past the closing `>`.
+	if (self.peek().text == "coopmat" && self.peek(1).kind == LT)
+	{
+		usz at = 2;
+		while (self.peek(at).kind != GT && self.peek(at).kind != EOF)
+		{
+			if (self.peek(at).kind == SEMICOLON || self.peek(at).kind == LBRACE) return false;
+			at++;
+		}
+		return self.peek((usz)at).kind == GT && self.peek((usz)at + 1).kind == IDENT;
+	}
 
 	if (self.peek(1).kind == LBRACKET && self.peek(2).kind == INTEGER
 		&& self.peek(3).kind == RBRACKET && self.peek(4).kind == IDENT)

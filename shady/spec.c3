@@ -160,6 +160,11 @@ constdef Opcode : uint
 	DPDX                      = 207,
 	DPDY                      = 208,
 
+	TYPE_COOPERATIVE_MATRIX_KHR = 4456,
+	COOPERATIVE_MATRIX_LOAD_KHR = 4457,
+	COOPERATIVE_MATRIX_STORE_KHR = 4458,
+	COOPERATIVE_MATRIX_MUL_ADD_KHR = 4459,
+
 	CONTROL_BARRIER           = 224,
 	ATOMIC_I_ADD              = 234,
 
@@ -176,6 +181,8 @@ constdef Opcode : uint
 // --- Enumerants --------------------------------------------------------------
 constdef Capability : uint
 {
+	COOPERATIVE_MATRIX_KHR    = 6022,
+	VULKAN_MEMORY_MODEL       = 5345,
 	MATRIX                             = 0,
 	SHADER                             = 1,
 	INT64                              = 11,
@@ -193,6 +200,7 @@ constdef AddressingModel : uint
 constdef MemoryModel : uint
 {
 	GLSL450 = 1,
+	VULKAN  = 3,
 }
 
 constdef ExecutionModel : uint

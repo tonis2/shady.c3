@@ -95,6 +95,19 @@ fn void Function.control_barrier(&self, Id exec, Id mem, Id sem, Id mask)
 }
 
 <*
+ A void instruction carrying operands: `OpCooperativeMatrixStoreKHR` and its
+ kind, which define nothing and are written for their effect.
+*>
+fn void Function.emit_void3(&self, Opcode opcode, Id a, Id b, Id c, Id d)
+{
+	self.body.push((5u << 16) | (uint)opcode);
+	self.body.push(a);
+	self.body.push(b);
+	self.body.push(c);
+	self.body.push(d);
+}
+
+<*
  As `emit`, for operand lists built at runtime.
 *>
 fn Id Function.emit_slice(&self, Opcode opcode, Id result_type, Id[] operands)

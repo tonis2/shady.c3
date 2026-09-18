@@ -31,6 +31,7 @@ enum TypeKind : char
 	SAMPLER,
 	SAMPLED_IMAGE, // a combined image and sampler, `Sampler2D`
 	POINTER, // a buffer device address; `element` is the pointee
+	COOPMAT, // a cooperative matrix: one tile per workgroup, `coopmat<float, 16, 16, workgroup>`
 }
 
 struct StructMember
@@ -78,6 +79,12 @@ struct Type
 	 `@storage` or `@address` attribute. NONE for an ordinary struct.
 	*>
 	BlockKind block;
+
+	// COOPMAT only: the tile's shape. The element type is `element`, `count`
+	// is the column count, and the row count is `rows`.
+	uint rows;
+	uint scope;    // COOPMAT: the SPIR-V scope id (Workgroup 2, Subgroup 3)
+	uint use;      // COOPMAT: MatrixAKHR 0, MatrixBKHR 1, MatrixAccumulatorKHR 2
 
 	Id id;         // cached SPIR-V id, 0 until emitted
 	Id pointer_id; // ADDRESS only: the PhysicalStorageBuffer pointer to it
@@ -173,6 +180,30 @@ fn Type* TypeTable.pointer_to(&self, Type* pointee)
 	String name = string::format(self.allocator, "%s*", pointee.name);
 	if (Type* existing = self.find(name)) return existing;
 	return self.add(POINTER, name, pointee);
+}
+
+<*
+ A cooperative matrix type, interned under its own name so two declarations of
+ the same shape are one `OpTypeCooperativeMatrixKHR`.
+
+ The name is built from the shape rather than looked up by symbol, which is
+ what keeps `coopmat<float, 16, 16, workgroup>` and `coopmat<float, 16, 8,
+> group>` two types the moment their shapes differ.
+*>
+fn Type* TypeTable.coopmat_of(&self, Type* element, uint rows, uint columns, uint scope, uint use,
+	String scope_name, String use_name)
+{
+	String name = string::format(self.allocator, "coopmat<%s, %d, %d, %s, %s>",
+		element.name, rows, columns, scope_name, use_name);
+	if (Type* existing = self.find(name)) return existing;
+
+	Type* type = self.add(COOPMAT, name);
+	type.element = element;
+	type.rows    = rows;
+	type.count   = columns;
+	type.scope   = scope;
+	type.use     = use;
+	return type;
 }
 
 fn Type* TypeTable.find(&self, String name)

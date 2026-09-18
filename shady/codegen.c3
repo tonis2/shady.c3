@@ -284,6 +284,19 @@ fn Id Codegen.type_id(&self, Type* type)
 			// it is decorated by decorate_block_members, not here.
 			self.mod.name(type.id, type.name);
 		}
+		case COOPMAT:
+		{
+			// The KHR shape of the type: component type, scope, rows,
+			// columns. The Vulkan binding for this hardware is built from the
+			// same four numbers, which is why the shape is in the name.
+			Id scope_id = self.scope_constant(type.scope);
+			type.id = self.mod.declare(Opcode.TYPE_COOPERATIVE_MATRIX_KHR,
+				self.type_id(type.element), scope_id,
+				self.mod.const_u32(self.type_id(self.types.find("uint")), type.rows),
+				self.mod.const_u32(self.type_id(self.types.find("uint")), type.count),
+				self.mod.const_u32(self.type_id(self.types.find("uint")), type.use));
+			self.coopmat_capability();
+		}
 		case SAMPLER: type.id = self.mod.type_sampler();
 		case SAMPLED_IMAGE:
 			type.id = self.mod.type_sampled_image(
@@ -329,6 +342,8 @@ fn Id Codegen.pointer_to(&self, StorageClass storage_class, Type* type)
 *>
 fn Type*? Codegen.resolve_type(&self, TypeRef ref, uint line, uint column)
 {
+	if (ref.is_coopmat) return self.resolve_coopmat(ref, line, column);
+
 	Type* type = self.types.find(ref.name);
 	if (!type)
 	{
@@ -648,6 +663,7 @@ fn Value? Codegen.expression(&self, Expr* expr)
 			return self.call_expression(expr);
 
 		case UNARY:
+		case REFERENCE:
 			return self.unary_expression(expr);
 
 		case BINARY:
@@ -812,6 +828,76 @@ fn void? Codegen.declare_shared(&self, Ast* ast)
 }
 
 <*
+ The shape of a `coopmat<T, M, N, scope>`.
+
+ Only the float tiles this hardware actually computes with are accepted, and
+ the list is small on purpose: a cooperative matrix is a promise about what
+ the hardware can do, not a general type, and a shader that names a shape the
+ driver does not implement is refused here with a sentence about the shape
+ rather than three frames later in the driver.
+
+ The shape's promise is checked against the device by the host, which asks
+ `VK_KHR_cooperative_matrix` for the supported combinations before a pipeline
+ is built. Everything below assumes the caller did that.
+*>
+fn Type*? Codegen.resolve_coopmat(&self, TypeRef ref, uint line, uint column)
+{
+	Type* element = self.types.find(ref.coopmat_element);
+	if (!element)
+	{
+		self.fail(line, column, string::format(self.allocator, "unknown coopmat element type `%s`", ref.coopmat_element));
+		return CODEGEN_ERROR~;
+	}
+	if (element.kind != FLOAT || element.count != 0 || ref.coopmat_rows == 0 || ref.coopmat_columns == 0)
+	{
+		self.fail(line, column, "a coopmat is `coopmat<float, rows, columns, scope>` with a whole-number shape");
+		return CODEGEN_ERROR~;
+	}
+
+	uint scope;
+	if (ref.coopmat_scope == "workgroup")
+	{
+		scope = 2;
+	}
+	else if (ref.coopmat_scope == "subgroup")
+	{
+		scope = 3;
+	}
+	else
+	{
+		self.fail(line, column, string::format(self.allocator,
+			"`%s` is not a coopmat scope - write `workgroup` or `subgroup`", ref.coopmat_scope));
+		return CODEGEN_ERROR~;
+	}
+
+	// Which side of the product the tile is: A, B, or the accumulator. It is
+	// part of the tile's identity rather than a property of the call, because
+	// the hardware lays the three out differently.
+	uint use;
+	if (ref.coopmat_use == "a")
+	{
+		use = 0;
+	}
+	else if (ref.coopmat_use == "b")
+	{
+		use = 1;
+	}
+	else if (ref.coopmat_use == "accumulator")
+	{
+		use = 2;
+	}
+	else
+	{
+		self.fail(line, column, string::format(self.allocator,
+			"`%s` is not a coopmat use - write `a`, `b` or `accumulator`", ref.coopmat_use));
+		return CODEGEN_ERROR~;
+	}
+
+	return self.types.coopmat_of(element, ref.coopmat_rows, ref.coopmat_columns, scope, use,
+		ref.coopmat_scope, ref.coopmat_use);
+}
+
+<*
  The storage class a pointer id was declared with. Tracked by asking the
  resources and locals, since SPIR-V ids carry no type information here.
 *>
@@ -867,6 +953,20 @@ fn Value? Codegen.unary_expression(&self, Expr* expr)
 			return (Value) { .type = operand.type, .id = self.func.unop(is_float ? Opcode.F_NEGATE : Opcode.S_NEGATE, type, id) };
 		case BANG:
 			return (Value) { .type = operand.type, .id = self.func.unop(Opcode.LOGICAL_NOT, type, id) };
+		case AMP:
+		{
+			// `&x` is an address, and an address in this language is a
+			// Function-storage pointer to the value. An lvalue already has
+			// one; a temporary gets a local to live in, so the address is
+			// still of something that exists.
+			if (operand.pointer != NO_ID)
+			{
+				return (Value) { .type = operand.type, .pointer = operand.pointer, .storage = operand.storage };
+			}
+			Id local = self.func.local(self.pointer_to(StorageClass.FUNCTION, operand.type));
+			self.func.store(local, id);
+			return (Value) { .type = operand.type, .pointer = local, .storage = StorageClass.FUNCTION };
+		}
 		default:
 			self.fail(expr.line, expr.column, "unsupported unary operator");
 			return CODEGEN_ERROR~;
@@ -2006,6 +2106,9 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 
 	if (name == "mul") return self.mul_call(expr);
 	if (name == "select") return self.select_call(expr);
+	if (name == "coop_load") return self.coop_load_call(expr);
+	if (name == "coop_store") return self.coop_store_call(expr);
+	if (name == "coop_muladd") return self.coop_muladd_call(expr);
 	if (name == "barrier" || name == "workgroup_barrier") return self.workgroup_barrier(expr);
 	if (name == "InterlockedAdd") return self.atomic_add_call(expr);
 	if (name == "NonUniformResourceIndex") return self.non_uniform_call(expr);
@@ -2048,6 +2151,177 @@ fn Value? Codegen.workgroup_barrier(&self, Expr* expr)
 	// A barrier has no value; the statement is the only place it can be.
 	Type* void_t = self.types.find("void");
 	return (Value) { .type = void_t, .id = NO_ID };
+}
+
+<*
+ The scope id a coopmat names, as the constant SPIR-V wants.
+*>
+fn Id Codegen.scope_constant(&self, uint scope)
+{
+	Type* uint_t = self.types.find("uint");
+	return self.mod.const_u32(self.type_id(uint_t), scope);
+}
+
+<*
+ Declare the cooperative-matrix capability and, for a module older than 1.6,
+ the extension that added the opcodes. Asked once per module it matters to.
+*>
+fn void Codegen.coopmat_capability(&self)
+{
+	if (!self.mod.has_extension("SPV_KHR_cooperative_matrix"))
+	{
+		self.mod.extension("SPV_KHR_cooperative_matrix");
+	}
+	self.mod.capability(Capability.COOPERATIVE_MATRIX_KHR);
+
+	// The capability is only legal next to the Vulkan memory model: SPIR-V
+	// says so in one sentence, and the validator quotes it back at anyone who
+	// declares one without the other. A module that has a coopmat in it is
+	// therefore a Vulkan-memory-model module, which also means its barriers
+	// carry release-acquire semantics rather than "everything".
+	self.mod.extension("SPV_KHR_vulkan_memory_model");
+	self.mod.capability(Capability.VULKAN_MEMORY_MODEL);
+	self.mod.set_memory_model(AddressingModel.LOGICAL, MemoryModel.VULKAN);
+
+	// SPV_KHR_vulkan_memory_model wants a 1.3 module, and a coopmat module is
+	// the only kind that has one, so the version is raised here rather than at
+	// the top of every compile.
+	if (self.mod.version < VERSION_1_3) self.mod.version = VERSION_1_3;
+}
+
+<*
+ `coop_load(matrix, pointer)`: one tile of a cooperative matrix, read through a
+ pointer - `coop_load(tile, &tile_array[0])`.
+
+ The matrix type is the destination's, because the tile's shape is the
+ compiler's to know and the pointer's to not; the load reads `OpCooperativeMatrixLoadKHR`
+ with no memory operand, which is the memory-model-free spelling.
+*>
+fn Value? Codegen.coop_load_call(&self, Expr* expr)
+{
+	if (expr.call.args.len != 3)
+	{
+		self.fail(expr.line, expr.column, "`coop_load` takes a matrix, a pointer and a stride");
+		return CODEGEN_ERROR~;
+	}
+	Value target = self.expression(expr.call.args[0])!;
+	Value source = self.expression(expr.call.args[1])!;
+	Value stride = self.expression(expr.call.args[2])!;
+
+	if (target.type.kind != COOPMAT)
+	{
+		self.fail(expr.line, expr.column, "`coop_load` writes a coopmat");
+		return CODEGEN_ERROR~;
+	}
+	if (source.pointer == NO_ID)
+	{
+		self.fail(expr.line, expr.column, "`coop_load` reads through a pointer");
+		return CODEGEN_ERROR~;
+	}
+
+	if (stride.type.kind != UINT && target.type.kind != COOPMAT)
+	{
+		self.fail(expr.line, expr.column, "`coop_load` wants a whole-number stride");
+		return CODEGEN_ERROR~;
+	}
+
+	// OpCooperativeMatrixLoadKHR: pointer, layout, stride. The layout is
+	// RowMajor - the tiles this language builds are rows of a shared array -
+	// and the stride is the caller's, because a tile is a window onto an array
+	// rather than an array of its own.
+	// The layout is RowMajorKHR 0, and it travels as a constant id rather than
+	// as a literal zero: SPIR-V reads a literal 0 in an operand position as
+	// "no id", and the validator says so.
+	Id layout = self.mod.const_u32(self.type_id(self.types.find("uint")), 0);
+	Id result = self.func.emit(Opcode.COOPERATIVE_MATRIX_LOAD_KHR, self.type_id(target.type),
+		source.pointer, layout, self.rvalue(stride));
+	self.coopmat_capability();
+	self.store(target, result);
+	return (Value) { .type = target.type, .id = result };
+}
+
+<*
+ `coop_store(pointer, matrix)`: the mirror of `coop_load`, one tile written
+ through a pointer.
+*>
+fn Value? Codegen.coop_store_call(&self, Expr* expr)
+{
+	if (expr.call.args.len != 3)
+	{
+		self.fail(expr.line, expr.column, "`coop_store` takes a pointer, a matrix and a stride");
+		return CODEGEN_ERROR~;
+	}
+	Value target = self.expression(expr.call.args[0])!;
+	Value value  = self.expression(expr.call.args[1])!;
+	Value stride = self.expression(expr.call.args[2])!;
+
+	if (value.type.kind != COOPMAT)
+	{
+		self.fail(expr.line, expr.column, "`coop_store` writes a coopmat");
+		return CODEGEN_ERROR~;
+	}
+	if (target.pointer == NO_ID)
+	{
+		self.fail(expr.line, expr.column, "`coop_store` writes through a pointer");
+		return CODEGEN_ERROR~;
+	}
+
+	Id layout = self.mod.const_u32(self.type_id(self.types.find("uint")), 0); // RowMajorKHR
+	self.func.emit_void3(Opcode.COOPERATIVE_MATRIX_STORE_KHR, target.pointer, self.rvalue(value),
+		layout, self.rvalue(stride));
+	self.coopmat_capability();
+
+	Type* void_t = self.types.find("void");
+	return (Value) { .type = void_t, .id = NO_ID };
+}
+
+<*
+ `coop_muladd(a, b, c, result)`: `result = a * b + c`, the whole point of a
+ cooperative matrix.
+
+ The four arguments are the three operand tiles and the tile the answer goes
+ in, in that order, and every one of them is a coopmat local. The shape check
+ is the one matrix multiplication requires - `a`'s columns against `b`'s rows
+ - done here so the driver is handed a valid instruction rather than left to
+ say so.
+*>
+fn Value? Codegen.coop_muladd_call(&self, Expr* expr)
+{
+	if (expr.call.args.len != 4)
+	{
+		self.fail(expr.line, expr.column, "`coop_muladd` takes a, b, c and the result tile");
+		return CODEGEN_ERROR~;
+	}
+	Value a = self.expression(expr.call.args[0])!;
+	Value b = self.expression(expr.call.args[1])!;
+	Value c = self.expression(expr.call.args[2])!;
+	Value r = self.expression(expr.call.args[3])!;
+
+	foreach (tile : (Value[]) { a, b, c, r })
+	{
+		if (tile.type.kind != COOPMAT)
+		{
+			self.fail(expr.line, expr.column, "`coop_muladd` works on coopmat tiles");
+			return CODEGEN_ERROR~;
+		}
+	}
+	if (a.type.count != b.type.rows || r.type.rows != a.type.rows || r.type.count != b.type.count
+		|| c.type.rows != r.type.rows || c.type.count != r.type.count)
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"`coop_muladd` cannot multiply %s by %s into %s", a.type.name, b.type.name, r.type.name));
+		return CODEGEN_ERROR~;
+	}
+
+	// The trailing operand is the cooperative-matrix operand mask; zero is
+	// "nothing special", and the signed-component bits are a host-side
+	// property of the data rather than of the multiply.
+	uint no_operands = 0;
+	Id result = self.func.emit(Opcode.COOPERATIVE_MATRIX_MUL_ADD_KHR, self.type_id(r.type),
+		self.rvalue(a), self.rvalue(b), self.rvalue(c), no_operands);
+	self.coopmat_capability();
+	self.store(r, result);
+	return (Value) { .type = r.type, .id = result };
 }
 
 <*

@@ -154,3 +154,65 @@ fn void store(uint i)
 `);
 	test::@check(error == "", "a shared scalar and a barrier should compile; got '%s'", error);
 }
+
+<*
+ Cooperative matrices: `coopmat<T, M, N, scope, use>` is a type family, and
+ the use is part of the identity - A, B and the accumulator are laid out
+ differently, so two shapes that differ only in use are two types.
+*>
+fn void a_coopmat_type_declares_its_shape() @test
+{
+	String error = rejection(`
+shared float tile[256];
+`, `
+fn void store(uint i)
+{
+    coopmat<float, 16, 16, workgroup, a>   a_mat;
+    coopmat<float, 16, 16, workgroup, b>   b_mat;
+    coopmat<float, 16, 16, workgroup, accumulator> acc_mat;
+
+    coop_load(a_mat, &tile[0], 16u);
+    coop_load(b_mat, &tile[0], 16u);
+    coop_load(acc_mat, &tile[0], 16u);
+    coop_muladd(a_mat, b_mat, acc_mat, acc_mat);
+}
+`);
+
+	test::@check(error == "", "a coopmat should compile; got '%s'", error);
+}
+
+fn void a_coopmat_refuses_a_bad_use() @test
+{
+	String error = rejection(`
+shared float tile[256];
+`, `
+fn void store(uint i)
+{
+    coopmat<float, 16, 16, workgroup, wrong> mat;
+    coop_load(mat, &tile[0], 16u);
+}
+`);
+
+	test::@check(error.contains("not a coopmat use"), "the refusal should name the use; got '%s'", error);
+}
+
+fn void a_coopmat_refuses_a_shape_that_does_not_multiply() @test
+{
+	String error = rejection(`
+shared float tile[256];
+`, `
+fn void store(uint i)
+{
+    coopmat<float, 16, 8, workgroup, a>   a_mat;
+    coopmat<float, 16, 16, workgroup, b>  b_mat;
+    coopmat<float, 16, 16, workgroup, accumulator> acc_mat;
+
+    coop_load(a_mat, &tile[0], 16u);
+    coop_load(b_mat, &tile[0], 16u);
+    coop_load(acc_mat, &tile[0], 16u);
+    coop_muladd(a_mat, b_mat, acc_mat, acc_mat);
+}
+`);
+
+	test::@check(error.contains("cannot multiply"), "a shape mismatch should be refused; got '%s'", error);
+}
