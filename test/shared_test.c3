@@ -216,3 +216,108 @@ fn void store(uint i)
 
 	test::@check(error.contains("cannot multiply"), "a shape mismatch should be refused; got '%s'", error);
 }
+
+<*
+ A byte tile has to be reachable: `uint8(x)` is the narrowing, and the element
+ type says what the array's elements are.
+*>
+fn void a_byte_tile_compiles() @test
+{
+	String error = rejection(`
+shared uint8 tile[64];
+`, `
+fn void store(uint i)
+{
+    uint word = 0x1234u;
+    tile[i] = uint8(word >> 8u);
+    tile[i] = uint8(0u);
+}
+`);
+
+	test::@check(error == "", "a byte tile should compile; got '%s'", error);
+}
+
+<*
+ An assignment is not a conversion. A 32-bit value landing in a byte slot by
+ way of `=` is refused, and the refusal names the conversion that was meant.
+*>
+fn void a_byte_cannot_be_assigned_from_a_wider_integer() @test
+{
+	String error = rejection(`
+shared uint8 tile[64];
+`, `
+fn void store(uint i)
+{
+    uint word = 0x1234u;
+    tile[i] = word;
+}
+`);
+
+	test::@check(error.contains("write `uint8(x)` to narrow it"),
+		"the refusal should name the conversion; got '%s'", error);
+}
+
+<*
+ The same rule where the value is an `int` rather than a `uint`: the bitcast
+ that carries `uint i = 0;` is only the identity when both sides are 32 bits.
+*>
+fn void a_byte_cannot_be_assigned_from_a_wider_int() @test
+{
+	String error = rejection(`
+shared uint8 tile[64];
+`, `
+fn void store(uint i)
+{
+    int value = -3;
+    tile[i] = value;
+}
+`);
+
+	test::@check(error.contains("write `uint8(x)` to narrow it"),
+		"the refusal should name the conversion; got '%s'", error);
+}
+
+<*
+ A coopmat of bytes is a shape the hardware has, and it is spelled with the
+ byte element rather than a float one.
+*>
+fn void a_coopmat_holds_byte_tiles() @test
+{
+	String error = rejection(`
+shared uint8 tile[256];
+`, `
+fn void store(uint i)
+{
+    coopmat<uint8, 16, 16, subgroup, a>   a_mat;
+    coopmat<uint8, 16, 16, subgroup, b>   b_mat;
+    coopmat<uint, 16, 16, subgroup, accumulator> acc;
+
+    coop_load(a_mat, &tile[0], 16u);
+    coop_load(b_mat, &tile[0], 16u);
+    coop_load(acc, &tile[0], 16u);
+    coop_muladd(a_mat, b_mat, acc, acc);
+}
+`);
+
+	test::@check(error == "", "a byte coopmat should compile; got '%s'", error);
+}
+
+
+<*
+ A byte array as a storage block: the shape a quantised weight tensor has,
+ and the thing every `uint8` in this language is ultimately for.
+*>
+fn void a_byte_storage_block_compiles() @test
+{
+	String error = rejection(`
+uint8 weights[];
+`, `
+fn void store(uint i)
+{
+    uint word = uint(weights[i]);
+    weights[i] = uint8(word);
+}
+`);
+
+	test::@check(error == "", "a byte storage block should compile; got '%s'", error);
+}

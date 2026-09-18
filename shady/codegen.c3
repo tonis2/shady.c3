@@ -264,9 +264,17 @@ fn Id Codegen.type_id(&self, Type* type)
 	{
 		case VOID:    type.id = self.mod.type_void();
 		case BOOL:    type.id = self.mod.type_bool();
-		case INT:     type.id = self.mod.type_int(32, true);
-		case UINT:    type.id = self.mod.type_int(32, false);
-		case FLOAT:   type.id = self.mod.type_float(32);
+		case INT:
+		{
+			type.id = self.mod.type_int(type.width(), true);
+			if (type.width() == 8) self.mod.capability(Capability.INT8);
+		}
+		case UINT:
+		{
+			type.id = self.mod.type_int(type.width(), false);
+			if (type.width() == 8) self.mod.capability(Capability.INT8);
+		}
+		case FLOAT:   type.id = self.mod.type_float(type.width());
 		case VECTOR:  type.id = self.mod.type_vector(self.type_id(type.element), type.count);
 		case MATRIX:  type.id = self.mod.type_matrix(self.type_id(type.element), type.count);
 		case ARRAY:
@@ -814,6 +822,10 @@ fn void? Codegen.declare_shared(&self, Ast* ast)
 
 		Id pointer_type = self.mod.type_pointer(StorageClass.WORKGROUP, self.type_id(type));
 
+		// No `ArrayStride` on the array: standalone SPIR-V validation refuses
+		// an explicit layout on a Workgroup type at all, and the element type
+		// already says how big the elements are.
+
 		// No initialiser, because SPIR-V puts none on a Workgroup variable: the
 		// specification gives OpVariable in Workgroup storage no initialiser
 		// operand, and a driver handed one may read the variable as zeroes or
@@ -830,15 +842,14 @@ fn void? Codegen.declare_shared(&self, Ast* ast)
 <*
  The shape of a `coopmat<T, M, N, scope>`.
 
- Only the float tiles this hardware actually computes with are accepted, and
- the list is small on purpose: a cooperative matrix is a promise about what
- the hardware can do, not a general type, and a shader that names a shape the
- driver does not implement is refused here with a sentence about the shape
- rather than three frames later in the driver.
+ What a tile may hold is small on purpose: the byte integers the hardware's
+ integer matmul takes, and the float the graphics hardware takes. A cooperative
+ matrix is a promise about what the hardware can do, not a general type, and a
+ shader that names a shape no driver implements is refused here with a sentence
+ about the shape rather than three frames later.
 
- The shape's promise is checked against the device by the host, which asks
- `VK_KHR_cooperative_matrix` for the supported combinations before a pipeline
- is built. Everything below assumes the caller did that.
+ Which of those shapes a driver actually has is the host's question, answered
+ through `VK_KHR_cooperative_matrix` before a pipeline is built.
 *>
 fn Type*? Codegen.resolve_coopmat(&self, TypeRef ref, uint line, uint column)
 {
@@ -848,9 +859,14 @@ fn Type*? Codegen.resolve_coopmat(&self, TypeRef ref, uint line, uint column)
 		self.fail(line, column, string::format(self.allocator, "unknown coopmat element type `%s`", ref.coopmat_element));
 		return CODEGEN_ERROR~;
 	}
-	if (element.kind != FLOAT || element.count != 0 || ref.coopmat_rows == 0 || ref.coopmat_columns == 0)
+	// What the tile may hold: the byte integers and the 32-bit accumulator
+	// they multiply into are the hardware's integer matmul, and float is the
+	// other family. Nothing else is a shape a driver implements, so nothing
+	// else is spellable.
+	bool numeric = element.kind == FLOAT || element.kind == INT || element.kind == UINT;
+	if (!numeric || element.count != 0 || ref.coopmat_rows == 0 || ref.coopmat_columns == 0)
 	{
-		self.fail(line, column, "a coopmat is `coopmat<float, rows, columns, scope>` with a whole-number shape");
+		self.fail(line, column, "a coopmat holds a scalar - `uint8`, `int8` or `float`");
 		return CODEGEN_ERROR~;
 	}
 
@@ -1456,14 +1472,37 @@ fn Id? Codegen.coerce(&self, Value value, Type* expected, Expr* expr)
 	}
 	// int and uint are both 32 bits, so moving between them is a reinterpretation
 	// and not a conversion - which is why `uint i = 0;` is allowed, as in C.
+	//
+	// The widths must match for that to be true. Assigning a 32-bit value to an
+	// 8-bit slot is a *narrowing*, and one spelled by an assignment rather than
+	// a conversion is one nobody asked for; `uint8(x)` is how a shader says it
+	// means it.
 	if ((expected.kind == UINT && value.type.kind == INT)
 		|| (expected.kind == INT && value.type.kind == UINT))
 	{
+		if (expected.width() != value.type.width())
+		{
+			self.fail(expr.line, expr.column, string::format(self.allocator,
+				"cannot use a %s where a %s is expected - write `%s(x)` to narrow it",
+				value.type.name, expected.name, expected.name));
+			return CODEGEN_ERROR~;
+		}
 		return self.func.unop(Opcode.BITCAST, self.type_id(expected), self.rvalue(value));
 	}
 	if (expected.kind == VECTOR && value.type.is_scalar())
 	{
 		return self.splat(expected, self.rvalue(value));
+	}
+
+	// A narrower integer slot is the one of these a shader hits by writing an
+	// assignment it meant as a conversion, so the refusal says which
+	// conversion.
+	if (expected.is_numeric() && value.type.is_numeric() && expected.width() < value.type.width())
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"cannot use a %s where a %s is expected - write `%s(x)` to narrow it",
+			value.type.name, expected.name, expected.name));
+		return CODEGEN_ERROR~;
 	}
 
 	self.fail(expr.line, expr.column,
@@ -2306,7 +2345,8 @@ fn Value? Codegen.coop_muladd_call(&self, Expr* expr)
 		}
 	}
 	if (a.type.count != b.type.rows || r.type.rows != a.type.rows || r.type.count != b.type.count
-		|| c.type.rows != r.type.rows || c.type.count != r.type.count)
+		|| c.type.rows != r.type.rows || c.type.count != r.type.count
+		|| r.type.element != c.type.element)
 	{
 		self.fail(expr.line, expr.column, string::format(self.allocator,
 			"`coop_muladd` cannot multiply %s by %s into %s", a.type.name, b.type.name, r.type.name));
@@ -2458,19 +2498,17 @@ fn Value? Codegen.construct(&self, Expr* expr, Type* type)
 		return CODEGEN_ERROR~;
 	}
 
-	// Scalar conversion: float(i), int(f), uint(i).
+	// Scalar conversion: float(i), int(f), uint(i), uint8(i).
+	//
+	// The same path a `(uint8)x` cast takes, so a narrowing is a narrowing
+	// whichever spelling reaches it - and `int` to `uint` stays the
+	// reinterpretation it is rather than becoming a conversion here and a
+	// reinterpretation there.
 	if (type.is_scalar())
 	{
 		Value source = self.expression(args[0])!;
 		if (source.type == type) return (Value) { .type = type, .id = self.rvalue(source) };
-
-		Opcode opcode;
-		Type* from = source.type.scalar();
-		if (type.kind == FLOAT)     { opcode = from.kind == UINT ? Opcode.CONVERT_U_TO_F : Opcode.CONVERT_S_TO_F; }
-		else if (from.kind == FLOAT) { opcode = type.kind == UINT ? Opcode.CONVERT_F_TO_U : Opcode.CONVERT_F_TO_S; }
-		else                        { opcode = Opcode.BITCAST; }
-
-		return (Value) { .type = type, .id = self.func.unop(opcode, self.type_id(type), self.rvalue(source)) };
+		return (Value) { .type = type, .id = self.convert_scalar(self.rvalue(source), source.type.scalar(), type) };
 	}
 
 	if (type.kind == MATRIX)
@@ -2554,6 +2592,15 @@ fn Id Codegen.convert_scalar(&self, Id id, Type* from, Type* to)
 	// int and uint are both 32 bits, so the bits move unchanged.
 	if (to.kind != FLOAT && from.kind != FLOAT && to != from && to.is_scalar() && from.is_scalar())
 	{
+		if (to.width() != from.width())
+		{
+			// A different width is a real conversion, not a reinterpretation:
+			// `uint8(300)` keeps the low byte, and sign matters on the way up.
+			// `OpUConvert` and `OpSConvert` are the same instruction whichever
+			// way the width moves - the result type says which.
+			return self.func.unop(to.kind == INT ? Opcode.S_CONVERT : Opcode.U_CONVERT,
+				self.type_id(to), id);
+		}
 		return self.func.unop(Opcode.BITCAST, self.type_id(to), id);
 	}
 	return id;

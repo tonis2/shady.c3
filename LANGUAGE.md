@@ -406,6 +406,18 @@ rather than left for the driver.
 
 The layout is row-major, and there is no spelling for anything else yet.
 
+What a tile holds is the hardware's business: `uint8` and `int8` tiles are the
+integer matmul (a product of byte tiles accumulates in `uint` or `int`), and
+`float` is the other family. A driver that has none of the shapes refuses the
+pipeline, which is the host's to check - `GpuLimits.cooperative_matrix` says
+whether the device has the extension at all.
+
+The byte types exist for exactly this. They are spellable anywhere - as a
+shared array's element, in a conversion, as a storage block's member - and an
+assignment does not narrow: `tile[i] = word;` is refused in favour of
+`tile[i] = uint8(word);`, because a truncation nobody wrote down is a kernel
+that computes the wrong thing quietly.
+
 A module with a cooperative matrix in it is a **Vulkan-memory-model module**:
 the SPIR-V capability is only legal next to `SPV_KHR_vulkan_memory_model`, so
 the compiler declares it, raises the module to SPIR-V 1.3 and switches the

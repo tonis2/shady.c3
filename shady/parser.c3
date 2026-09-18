@@ -486,6 +486,8 @@ fn bool is_builtin_type_name(String name) @local
 		case "int":
 		case "uint":
 		case "float":
+		case "int8":
+		case "uint8":
 		case "float2":
 		case "float3":
 		case "float4":

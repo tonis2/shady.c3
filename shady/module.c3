@@ -272,6 +272,15 @@ fn Id Module.declare_typed(&self, Opcode opcode, Id result_type, Id... operands)
 
 fn void Module.capability(&self, Capability capability)
 {
+	// One `OpCapability` per capability, for the same reason `extension`
+	// writes one `OpExtension` per name: the compiler reaches for a capability
+	// at whatever instruction needs it, and several instructions needing the
+	// same one is the ordinary case rather than a mistake. A module with the
+	// same capability eight times over is still legal, and still noise.
+	foreach (word : self.capabilities.array_view())
+	{
+		if (word == (Id)capability) return;
+	}
 	emit(&self.capabilities, Opcode.CAPABILITY, (Id)capability);
 }
 

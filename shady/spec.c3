@@ -99,6 +99,8 @@ constdef Opcode : uint
 	CONVERT_F_TO_S            = 110,
 	CONVERT_S_TO_F            = 111,
 	CONVERT_U_TO_F            = 112,
+	// One conversion opcode per signedness: the result type carries the width,
+	// so widening and narrowing are the same instruction.
 	U_CONVERT                 = 113,
 	S_CONVERT                 = 114,
 	CONVERT_PTR_TO_U          = 117,
@@ -182,6 +184,9 @@ constdef Opcode : uint
 constdef Capability : uint
 {
 	COOPERATIVE_MATRIX_KHR    = 6022,
+	INT8                      = 39,
+	STORAGE_BUFFER_8BIT_ACCESS = 4448,
+	UNIFORM_AND_STORAGE_BUFFER_8BIT_ACCESS = 4449,
 	VULKAN_MEMORY_MODEL       = 5345,
 	MATRIX                             = 0,
 	SHADER                             = 1,

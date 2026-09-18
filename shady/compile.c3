@@ -500,6 +500,17 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 					// here rather than at the header because whether the module
 					// has one is only known once the resources are walked.
 					self.mod.extension("SPV_KHR_storage_buffer_storage_class");
+
+					// Bytes in a buffer are the one place the language reaches
+					// 8-bit memory, and the capability is what says the host
+					// enabled the device feature for it. Without this the
+					// module is one a driver may refuse - or worse, accept and
+					// misread.
+					if (type.contains_byte_integer()) self.mod.capability(Capability.STORAGE_BUFFER_8BIT_ACCESS);
+				}
+				else if (type.contains_byte_integer())
+				{
+					self.mod.capability(Capability.UNIFORM_AND_STORAGE_BUFFER_8BIT_ACCESS);
 				}
 				self.mod.decorate(type_id, Decoration.BLOCK);
 				self.decorate_block_members(type_id, type, layout);

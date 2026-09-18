@@ -59,6 +59,10 @@ struct Type
 	StructMember[] members; // STRUCT only
 	Dim            dim;     // TEXTURE and SAMPLED_IMAGE: the OpTypeImage dimension
 
+	// INT, UINT and FLOAT: the width in bits. Zero means 32, which is what
+	// every scalar was before cooperative matrices needed a byte tile.
+	uint bits;
+
 	// SAMPLED_IMAGE only: the OpTypeImage Depth operand, 1 for a comparison
 	// sampler such as Sampler2DShadow.
 	uint depth;
@@ -293,6 +297,12 @@ fn void TypeTable.init(&self, Allocator allocator)
 	Type* uint_t  = self.add(UINT, "uint");
 	Type* float_t = self.add(FLOAT, "float");
 
+	// The byte-width integers exist for cooperative matrices: the hardware's
+	// integer matmul takes 8-bit operands and accumulates in 32. Everything
+	// outside a coopmat keeps to the 32-bit spelling.
+	self.add(INT, "int8").bits   = 8;
+	self.add(UINT, "uint8").bits = 8;
+
 	Type*[4] float_vectors;
 	float_vectors[0] = float_t;
 
@@ -333,6 +343,29 @@ fn void TypeTable.init(&self, Allocator allocator)
 // --- Queries -----------------------------------------------------------------
 
 fn bool Type.is_scalar(&self) => self.kind == BOOL || self.kind == INT || self.kind == UINT || self.kind == FLOAT;
+
+<*
+ Whether a byte-width integer appears anywhere inside this type: the question a
+ block asks before it needs an 8-bit access capability, and the only place in
+ the language those types are reached from - a buffer's bytes.
+*>
+fn bool Type.contains_byte_integer(&self)
+{
+	if ((self.kind == INT || self.kind == UINT) && self.width() == 8) return true;
+	if (self.kind == ARRAY || self.kind == VECTOR) return self.element.contains_byte_integer();
+	if (self.kind == STRUCT)
+	{
+		foreach (&m : self.members)
+		{
+			if (m.type.contains_byte_integer()) return true;
+		}
+	}
+	return false;
+}
+
+// The width in bits, with the default spelled out: a scalar that names no
+// width is 32 bits, which is every scalar but the byte integers.
+fn uint Type.width(&self) => self.bits == 0 ? 32 : self.bits;
 fn bool Type.is_numeric(&self) => self.kind == INT || self.kind == UINT || self.kind == FLOAT;
 
 <*
@@ -422,10 +455,11 @@ fn uint Type.align(&self, Layout layout)
 	switch (self.kind)
 	{
 		case BOOL:
+			return 4;
 		case INT:
 		case UINT:
 		case FLOAT:
-			return 4;
+			return self.width() / 8;
 		case VECTOR:
 			// A vector aligns as its component under scalar layout; std140 and
 			// std430 round a 3-vector up to 16.
@@ -467,12 +501,15 @@ fn uint Type.size(&self, Layout layout)
 	switch (self.kind)
 	{
 		case BOOL:
+			return 4;
 		case INT:
 		case UINT:
 		case FLOAT:
-			return 4;
+			// The width is the byte count divided by eight, and 32 bits is
+			// what a scalar that names no width has.
+			return self.width() / 8;
 		case VECTOR:
-			return 4 * self.count;
+			return self.element.size(layout) * self.count;
 		case MATRIX:
 			return self.matrix_stride(layout) * self.count;
 		case ARRAY:
