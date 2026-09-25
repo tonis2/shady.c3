@@ -1,0 +1,51 @@
+// Half: the float16 scalar the float matrix cores take.
+//
+// A float16 product into a float32 accumulator is the float cooperative matrix
+// hardware has (RADV lists no float32 one), so the tiles here are half with a
+// float accumulator. Around them, half is an ordinary scalar: `half(x)` rounds a
+// float, `float(h)` widens one back, and half arithmetic stays half. A storage
+// block holding halves declares the 16-bit access capability, the way bytes
+// declare the 8-bit one.
+
+shared half a_tile[256];
+shared half b_tile[256];
+shared float acc[256];
+
+float src[];
+half packed[];
+float dst[];
+
+struct ComputeIn
+{
+    uint3 local @builtin(local_invocation_id);
+}
+
+fn void main(ComputeIn at) @compute @threads(64, 1, 1)
+{
+    uint i = at.local.x;
+    for (uint j = i; j < 256u; j += 64u)
+    {
+        half h = half(src[j]);
+        a_tile[j] = h * h + half(1.0);
+        b_tile[j] = packed[j];
+        acc[j] = 0.0;
+    }
+    barrier;
+
+    coopmat<half, 16, 16, subgroup, a> a_mat;
+    coopmat<half, 16, 16, subgroup, b> b_mat;
+    coopmat<float, 16, 16, subgroup, accumulator> acc_mat;
+
+    coop_load(a_mat, &a_tile[0], 16u);
+    coop_load(b_mat, &b_tile[0], 16u);
+    coop_load(acc_mat, &acc[0], 16u);
+    coop_muladd(a_mat, b_mat, acc_mat, acc_mat);
+    coop_store(&acc[0], acc_mat, 16u);
+    barrier;
+
+    for (uint j = i; j < 256u; j += 64u)
+    {
+        dst[j] = acc[j] + float(a_tile[j]);
+        packed[j] = half(dst[j]);
+    }
+}

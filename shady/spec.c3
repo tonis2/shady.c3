@@ -103,6 +103,7 @@ constdef Opcode : uint
 	// so widening and narrowing are the same instruction.
 	U_CONVERT                 = 113,
 	S_CONVERT                 = 114,
+	F_CONVERT                 = 115,
 	CONVERT_PTR_TO_U          = 117,
 	CONVERT_U_TO_PTR          = 120,
 	BITCAST                   = 124,
@@ -185,6 +186,9 @@ constdef Capability : uint
 {
 	COOPERATIVE_MATRIX_KHR    = 6022,
 	INT8                      = 39,
+	FLOAT16                   = 9,
+	STORAGE_BUFFER_16BIT_ACCESS = 4433,
+	UNIFORM_AND_STORAGE_BUFFER_16BIT_ACCESS = 4434,
 	STORAGE_BUFFER_8BIT_ACCESS = 4448,
 	UNIFORM_AND_STORAGE_BUFFER_8BIT_ACCESS = 4449,
 	VULKAN_MEMORY_MODEL       = 5345,

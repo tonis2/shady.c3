@@ -82,8 +82,15 @@ the wrong token.
 ### 2.1 Scalars
 `bool` `int` `uint` `float`
 
-`int` and `uint` are 32-bit. `float` is 32-bit. `half` and `double` are
-*reserved*.
+`int` and `uint` are 32-bit. `float` is 32-bit. `half` is a 16-bit float,
+and `int8` / `uint8` are bytes; all three exist for cooperative matrices (3.4.2)
+but work anywhere a scalar does. `double` is *reserved*.
+
+`half(x)` rounds a float to the nearest half and `float(h)` widens one back.
+Half arithmetic stays half, so `h * 2.0` is refused in favour of
+`h * half(2.0)`. A storage block with halves in it declares the 16-bit storage
+capability, which the host enables with `storageBuffer16BitAccess`; any use of
+`half` needs `shaderFloat16`.
 
 ### 2.2 Vectors and matrices
 ```
@@ -408,7 +415,9 @@ The layout is row-major, and there is no spelling for anything else yet.
 
 What a tile holds is the hardware's business: `uint8` and `int8` tiles are the
 integer matmul (a product of byte tiles accumulates in `uint` or `int`), and
-`float` is the other family. A driver that has none of the shapes refuses the
+`half` and `float` are the other family - `coopmat<half, 16, 16, subgroup, a>`
+times a `b` of the same into a `float` accumulator is the float product RDNA3
+and most other hardware has. A driver that has none of the shapes refuses the
 pipeline, which is the host's to check - `GpuLimits.cooperative_matrix` says
 whether the device has the extension at all.
 

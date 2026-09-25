@@ -38,6 +38,7 @@ const char[*] EMBED_INTERFACE    = $embed("conformance/interface.shady");
 const char[*] EMBED_STORAGE      = $embed("conformance/storage.shady");
 const char[*] EMBED_SHARED       = $embed("conformance/shared.shady");
 const char[*] EMBED_COOPMAT      = $embed("conformance/coopmat.shady");
+const char[*] EMBED_HALF         = $embed("conformance/half.shady");
 const char[*] EMBED_IMPORT       = $embed("conformance/import.shady");
 // Not a case of its own: `import.shady` pulls it in, and a module without an
 // entry point is not something to compile on its own.
@@ -88,6 +89,7 @@ const Case[*] CORPUS = {
 	{ "storage",      (String)EMBED_STORAGE[..],      false },
 	{ "shared",       (String)EMBED_SHARED[..],       false },
 	{ "coopmat",      (String)EMBED_COOPMAT[..],      false },
+	{ "half",         (String)EMBED_HALF[..],         false },
 	{ "import",       (String)EMBED_IMPORT[..],       false },
 };
 

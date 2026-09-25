@@ -303,6 +303,11 @@ fn void TypeTable.init(&self, Allocator allocator)
 	self.add(INT, "int8").bits   = 8;
 	self.add(UINT, "uint8").bits = 8;
 
+	// `half` exists for the same reason: the float cooperative matrix a GPU
+	// has is float16 operands into a float32 accumulator. It is an ordinary
+	// scalar besides - arithmetic, conversions, shared arrays, storage.
+	self.add(FLOAT, "half").bits = 16;
+
 	Type*[4] float_vectors;
 	float_vectors[0] = float_t;
 
@@ -358,6 +363,24 @@ fn bool Type.contains_byte_integer(&self)
 		foreach (&m : self.members)
 		{
 			if (m.type.contains_byte_integer()) return true;
+		}
+	}
+	return false;
+}
+
+<*
+ Whether a 16-bit scalar appears anywhere inside this type: the `half` that a
+ block needs a 16-bit access capability for, as the bytes need an 8-bit one.
+*>
+fn bool Type.contains_16bit(&self)
+{
+	if (self.kind == FLOAT && self.width() == 16) return true;
+	if (self.kind == ARRAY || self.kind == VECTOR) return self.element.contains_16bit();
+	if (self.kind == STRUCT)
+	{
+		foreach (&m : self.members)
+		{
+			if (m.type.contains_16bit()) return true;
 		}
 	}
 	return false;

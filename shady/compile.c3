@@ -507,10 +507,20 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 					// module is one a driver may refuse - or worse, accept and
 					// misread.
 					if (type.contains_byte_integer()) self.mod.capability(Capability.STORAGE_BUFFER_8BIT_ACCESS);
+					if (type.contains_16bit())
+					{
+						self.mod.extension("SPV_KHR_16bit_storage");
+						self.mod.capability(Capability.STORAGE_BUFFER_16BIT_ACCESS);
+					}
 				}
-				else if (type.contains_byte_integer())
+				else
 				{
-					self.mod.capability(Capability.UNIFORM_AND_STORAGE_BUFFER_8BIT_ACCESS);
+					if (type.contains_byte_integer()) self.mod.capability(Capability.UNIFORM_AND_STORAGE_BUFFER_8BIT_ACCESS);
+					if (type.contains_16bit())
+					{
+						self.mod.extension("SPV_KHR_16bit_storage");
+						self.mod.capability(Capability.UNIFORM_AND_STORAGE_BUFFER_16BIT_ACCESS);
+					}
 				}
 				self.mod.decorate(type_id, Decoration.BLOCK);
 				self.decorate_block_members(type_id, type, layout);

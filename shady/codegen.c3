@@ -274,7 +274,11 @@ fn Id Codegen.type_id(&self, Type* type)
 			type.id = self.mod.type_int(type.width(), false);
 			if (type.width() == 8) self.mod.capability(Capability.INT8);
 		}
-		case FLOAT:   type.id = self.mod.type_float(type.width());
+		case FLOAT:
+		{
+			type.id = self.mod.type_float(type.width());
+			if (type.width() == 16) self.mod.capability(Capability.FLOAT16);
+		}
 		case VECTOR:  type.id = self.mod.type_vector(self.type_id(type.element), type.count);
 		case MATRIX:  type.id = self.mod.type_matrix(self.type_id(type.element), type.count);
 		case ARRAY:
@@ -860,13 +864,13 @@ fn Type*? Codegen.resolve_coopmat(&self, TypeRef ref, uint line, uint column)
 		return CODEGEN_ERROR~;
 	}
 	// What the tile may hold: the byte integers and the 32-bit accumulator
-	// they multiply into are the hardware's integer matmul, and float is the
-	// other family. Nothing else is a shape a driver implements, so nothing
+	// they multiply into are the hardware's integer matmul, and half and float
+	// are the other family. Nothing else is a shape a driver implements, so nothing
 	// else is spellable.
 	bool numeric = element.kind == FLOAT || element.kind == INT || element.kind == UINT;
 	if (!numeric || element.count != 0 || ref.coopmat_rows == 0 || ref.coopmat_columns == 0)
 	{
-		self.fail(line, column, "a coopmat holds a scalar - `uint8`, `int8` or `float`");
+		self.fail(line, column, "a coopmat holds a scalar - `uint8`, `int8`, `half` or `float`");
 		return CODEGEN_ERROR~;
 	}
 
@@ -1404,8 +1408,10 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 	// (LANGUAGE.md 5.3), so a `uint` next to a `float` is refused here rather
 	// than carried into an instruction whose operands do not match its type.
 	// That mismatch is invalid SPIR-V, and a driver that is handed one may do
-	// anything - RADV crashes rather than reporting it.
-	if (lt.scalar().kind != rt.scalar().kind)
+	// anything - RADV crashes rather than reporting it. The width is part of
+	// the type: a half next to a float, or a byte next to a uint, is the same
+	// mismatch as a uint next to a float.
+	if (lt.scalar().kind != rt.scalar().kind || lt.scalar().width() != rt.scalar().width())
 	{
 		self.fail(expr.line, expr.column, string::format(self.allocator,
 			"cannot use a %s and a %s in one operation - convert one side explicitly",
@@ -2581,6 +2587,12 @@ fn Value? Codegen.construct(&self, Expr* expr, Type* type)
 fn Id Codegen.convert_scalar(&self, Id id, Type* from, Type* to)
 {
 	if (from == to) return id;
+	// `half(x)` and `float(h)`: a float to a float of another width rounds or
+	// widens, and `OpFConvert` is both, the result type saying which.
+	if (to.kind == FLOAT && from.kind == FLOAT && to.width() != from.width())
+	{
+		return self.func.unop(Opcode.F_CONVERT, self.type_id(to), id);
+	}
 	if (to.kind == FLOAT && from.kind != FLOAT)
 	{
 		return self.func.unop(from.kind == UINT ? Opcode.CONVERT_U_TO_F : Opcode.CONVERT_S_TO_F, self.type_id(to), id);

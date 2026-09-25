@@ -238,6 +238,67 @@ fn void store(uint i)
 }
 
 <*
+ Half is a scalar like the others: `half(x)` rounds a float to it, `float(h)`
+ widens it back, and a shared array of halves is what a float16 tile is loaded
+ from.
+*>
+fn void a_half_tile_compiles() @test
+{
+	String error = rejection(`
+shared half tile[64];
+`, `
+fn void store(uint i)
+{
+    float x = 1.5;
+    tile[i] = half(x) * half(2.0);
+    float back = float(tile[i]) + 1.0;
+}
+`);
+
+	test::@check(error == "", "a half tile should compile; got '%s'", error);
+}
+
+<*
+ A float landing in a half slot by way of `=` is a narrowing nobody wrote, and
+ is refused the way a word landing in a byte is.
+*>
+fn void a_half_cannot_be_assigned_from_a_float() @test
+{
+	String error = rejection(`
+shared half tile[64];
+`, `
+fn void store(uint i)
+{
+    float x = 1.5;
+    tile[i] = x;
+}
+`);
+
+	test::@check(error.contains("write `half(x)` to narrow it"),
+		"the refusal should name the conversion; got '%s'", error);
+}
+
+<*
+ A half and a float in one operation are two widths, and an instruction takes
+ one: the float literal is not narrowed quietly, the refusal asks for `half()`.
+*>
+fn void a_half_and_a_float_do_not_mix() @test
+{
+	String error = rejection(`
+shared half tile[64];
+`, `
+fn void store(uint i)
+{
+    half h = tile[i];
+    tile[i] = h * 2.0;
+}
+`);
+
+	test::@check(error.contains("cannot use a half and a float in one operation"),
+		"mixing widths should be refused; got '%s'", error);
+}
+
+<*
  An assignment is not a conversion. A 32-bit value landing in a byte slot by
  way of `=` is refused, and the refusal names the conversion that was meant.
 *>
