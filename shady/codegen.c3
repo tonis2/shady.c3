@@ -2235,6 +2235,29 @@ fn void Codegen.coopmat_capability(&self)
 }
 
 <*
+ The layout operand of a tile load or store: row-major unless a fourth
+ argument names `column_major` (or says `row_major` outright). SPIR-V wants
+ the layout as a constant id, and a literal 0 in that position would read as
+ "no id", so it travels as a constant either way.
+*>
+fn Id? Codegen.coop_layout(&self, Expr* expr, String verb)
+{
+	uint layout = 0; // RowMajorKHR
+	if (expr.call.args.len == 4)
+	{
+		Expr* arg = expr.call.args[3];
+		if (arg.kind != IDENT || (arg.ident.name != "column_major" && arg.ident.name != "row_major"))
+		{
+			self.fail(arg.line, arg.column,
+				string::format(self.allocator, "`%s`'s fourth argument is `row_major` or `column_major`", verb));
+			return CODEGEN_ERROR~;
+		}
+		if (arg.ident.name == "column_major") layout = 1; // ColumnMajorKHR
+	}
+	return self.mod.const_u32(self.type_id(self.types.find("uint")), layout);
+}
+
+<*
  `coop_load(matrix, pointer)`: one tile of a cooperative matrix, read through a
  pointer - `coop_load(tile, &tile_array[0])`.
 
@@ -2244,9 +2267,9 @@ fn void Codegen.coopmat_capability(&self)
 *>
 fn Value? Codegen.coop_load_call(&self, Expr* expr)
 {
-	if (expr.call.args.len != 3)
+	if (expr.call.args.len != 3 && expr.call.args.len != 4)
 	{
-		self.fail(expr.line, expr.column, "`coop_load` takes a matrix, a pointer and a stride");
+		self.fail(expr.line, expr.column, "`coop_load` takes a matrix, a pointer, a stride and optionally a layout");
 		return CODEGEN_ERROR~;
 	}
 	Value target = self.expression(expr.call.args[0])!;
@@ -2270,14 +2293,10 @@ fn Value? Codegen.coop_load_call(&self, Expr* expr)
 		return CODEGEN_ERROR~;
 	}
 
-	// OpCooperativeMatrixLoadKHR: pointer, layout, stride. The layout is
-	// RowMajor - the tiles this language builds are rows of a shared array -
-	// and the stride is the caller's, because a tile is a window onto an array
-	// rather than an array of its own.
-	// The layout is RowMajorKHR 0, and it travels as a constant id rather than
-	// as a literal zero: SPIR-V reads a literal 0 in an operand position as
-	// "no id", and the validator says so.
-	Id layout = self.mod.const_u32(self.type_id(self.types.find("uint")), 0);
+	// OpCooperativeMatrixLoadKHR: pointer, layout, stride. The stride is the
+	// caller's, because a tile is a window onto an array rather than an array
+	// of its own: the step between rows, or between columns when column-major.
+	Id layout = self.coop_layout(expr, "coop_load")!;
 	Id result = self.func.emit(Opcode.COOPERATIVE_MATRIX_LOAD_KHR, self.type_id(target.type),
 		source.pointer, layout, self.rvalue(stride));
 	self.coopmat_capability();
@@ -2291,9 +2310,9 @@ fn Value? Codegen.coop_load_call(&self, Expr* expr)
 *>
 fn Value? Codegen.coop_store_call(&self, Expr* expr)
 {
-	if (expr.call.args.len != 3)
+	if (expr.call.args.len != 3 && expr.call.args.len != 4)
 	{
-		self.fail(expr.line, expr.column, "`coop_store` takes a pointer, a matrix and a stride");
+		self.fail(expr.line, expr.column, "`coop_store` takes a pointer, a matrix, a stride and optionally a layout");
 		return CODEGEN_ERROR~;
 	}
 	Value target = self.expression(expr.call.args[0])!;
@@ -2311,7 +2330,7 @@ fn Value? Codegen.coop_store_call(&self, Expr* expr)
 		return CODEGEN_ERROR~;
 	}
 
-	Id layout = self.mod.const_u32(self.type_id(self.types.find("uint")), 0); // RowMajorKHR
+	Id layout = self.coop_layout(expr, "coop_store")!;
 	self.func.emit_void3(Opcode.COOPERATIVE_MATRIX_STORE_KHR, target.pointer, self.rvalue(value),
 		layout, self.rvalue(stride));
 	self.coopmat_capability();

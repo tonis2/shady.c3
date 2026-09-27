@@ -411,7 +411,10 @@ Its shape rules are matrix multiplication's: `a`'s columns against `b`'s rows,
 and the result's shape against the accumulator's. A mismatch is refused by name
 rather than left for the driver.
 
-The layout is row-major, and there is no spelling for anything else yet.
+The layout is row-major unless a fourth argument says `column_major`, and then
+the stride is the step between columns: `coop_load(b_mat, &tile[0], 40u,
+column_major)` reads a `b` tile whose columns are the contiguous runs, which is
+how a weight matrix stored a row per output already lies.
 
 What a tile holds is the hardware's business: `uint8` and `int8` tiles are the
 integer matmul (a product of byte tiles accumulates in `uint` or `int`), and

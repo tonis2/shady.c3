@@ -181,6 +181,47 @@ fn void store(uint i)
 	test::@check(error == "", "a coopmat should compile; got '%s'", error);
 }
 
+<*
+ A column-major tile: the fourth argument names the layout.
+*>
+fn void a_coopmat_loads_column_major() @test
+{
+	String error = rejection(`
+shared half tile[512];
+shared float sums[256];
+`, `
+fn void store(uint i)
+{
+    coopmat<half, 16, 16, subgroup, a> a_mat;
+    coopmat<half, 16, 16, subgroup, b> b_mat;
+    coopmat<float, 16, 16, subgroup, accumulator> acc;
+
+    coop_load(a_mat, &tile[0], 16u, row_major);
+    coop_load(b_mat, &tile[256], 16u, column_major);
+    coop_load(acc, &sums[0], 16u);
+    coop_muladd(a_mat, b_mat, acc, acc);
+    coop_store(&sums[0], acc, 16u, column_major);
+}
+`);
+
+	test::@check(error == "", "a column-major tile should compile; got '%s'", error);
+}
+
+fn void a_coopmat_refuses_a_bad_layout() @test
+{
+	String error = rejection(`
+shared half tile[256];
+`, `
+fn void store(uint i)
+{
+    coopmat<half, 16, 16, subgroup, b> b_mat;
+    coop_load(b_mat, &tile[0], 16u, sideways);
+}
+`);
+
+	test::@check(error.contains("row_major` or `column_major"), "the refusal should name the layouts; got '%s'", error);
+}
+
 fn void a_coopmat_refuses_a_bad_use() @test
 {
 	String error = rejection(`
