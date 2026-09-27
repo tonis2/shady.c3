@@ -48,6 +48,7 @@ struct Module
 	WordList entry_points;
 	WordList execution_modes;
 	WordList debug_names;
+	WordList processed_notes;
 	WordList annotations;
 	WordList declarations; // types, constants, and non-function variables
 	WordList functions;
@@ -66,6 +67,7 @@ fn Module* Module.init(&self, Allocator allocator = mem, uint version = VERSION_
 	self.entry_points.init(allocator);
 	self.execution_modes.init(allocator);
 	self.debug_names.init(allocator);
+	self.processed_notes.init(allocator);
 	self.annotations.init(allocator);
 	self.declarations.init(allocator);
 	self.functions.init(allocator);
@@ -86,6 +88,7 @@ fn void Module.free(&self)
 	self.entry_points.free();
 	self.execution_modes.free();
 	self.debug_names.free();
+	self.processed_notes.free();
 	self.annotations.free();
 	self.declarations.free();
 	self.functions.free();
@@ -389,6 +392,23 @@ fn void Module.member_name(&self, Id target, uint member, String text)
 	};
 }
 
+<*
+ An `OpModuleProcessed` line: a note about how the module was made, which a
+ driver ignores and a host may read. It is where a requirement with no SPIR-V
+ spelling in a Vulkan module travels - a compute entry's subgroup size is
+ chosen when the pipeline is created, not by the module. The instruction is
+ SPIR-V 1.1's, so the version is raised to that.
+*>
+fn void Module.module_processed(&self, String text)
+{
+	if (self.version < VERSION_1_1) self.version = VERSION_1_1;
+	@pool() {
+		Id[] words = string_words(text, tmem);
+		self.processed_notes.push(((uint)(1 + words.len) << 16) | (uint)Opcode.MODULE_PROCESSED);
+		foreach (word : words) self.processed_notes.push(word);
+	};
+}
+
 // --- Decorations -------------------------------------------------------------
 
 fn void Module.decorate(&self, Id target, Decoration decoration, Id... operands)
@@ -434,6 +454,7 @@ fn char[] Module.build(&self, Allocator allocator = mem)
 	out.push_all(self.entry_points.array_view());
 	out.push_all(self.execution_modes.array_view());
 	out.push_all(self.debug_names.array_view());
+	out.push_all(self.processed_notes.array_view());
 	out.push_all(self.annotations.array_view());
 	out.push_all(self.declarations.array_view());
 	out.push_all(self.functions.array_view());

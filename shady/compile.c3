@@ -788,6 +788,20 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 		}
 		self.mod.execution_mode(function.id, ExecutionMode.LOCAL_SIZE,
 			(uint)threads.args[0].number, (uint)threads.args[1].number, (uint)threads.args[2].number);
+
+		// A kernel whose tiles are laid out for so many lanes a subgroup says so;
+		// the host asks the pipeline for it (LANGUAGE.md 6.2).
+		Attribute* lanes = decl.attributes.find("subgroup_size");
+		if (lanes)
+		{
+			uint n = lanes.args.len == 1 ? (uint)lanes.args[0].number : 0;
+			if (n < 4 || n > 128 || (n & (n - 1)) != 0)
+			{
+				self.fail(decl.line, decl.column, "@subgroup_size takes one power of two from 4 to 128");
+				return CODEGEN_ERROR~;
+			}
+			self.mod.module_processed(string::tformat("shady.subgroup_size %d", n));
+		}
 	}
 }
 

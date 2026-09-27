@@ -550,6 +550,7 @@ spliced module.
 | `@compute` | function | Compute entry point |
 | `@compute(name)` | function | …published under `name` |
 | `@threads(x, y, z)` | `@compute` function | Workgroup size, required on compute |
+| `@subgroup_size(n)` | `@compute` function | The subgroup size the kernel is written for (below) |
 | `@uniform` | struct | A uniform buffer: std140, takes a binding |
 | `@storage` | struct | A storage buffer: std430, takes a binding, ends in a runtime-sized array |
 | `@pushconstant` | struct | The pipeline's push constants: std430, no binding |
@@ -561,6 +562,12 @@ spliced module.
 | `@binding(n)` | module-level variable | Binding within the set |
 | `@spec(n)` | module-level `const` | Specialization constant id (§3.4) |
 | `@flat` | struct member | `Flat` interpolation |
+
+`@subgroup_size(n)` is for a kernel whose tiles are laid out for so many lanes
+a subgroup - a cooperative-matrix kernel written for wave32, say. Vulkan chooses
+the size when the pipeline is created, not in the module, so the module carries
+it as an `OpModuleProcessed` line reading `shady.subgroup_size n` and the host
+asks the pipeline for it. `n` is a power of two from 4 to 128.
 
 A struct carries at most one of `@uniform`, `@storage`, `@pushconstant` and
 `@address`; two is an error. Attributes sit between a struct's name and its body, and

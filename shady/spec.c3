@@ -27,6 +27,7 @@ const uint MAGIC = 0x07230203;
 // a deliberate choice - buffer device address will need 1.3 or the
 // SPV_KHR_physical_storage_buffer extension.
 const uint VERSION_1_0 = 0x00010000;
+const uint VERSION_1_1 = 0x00010100;
 const uint VERSION_1_3 = 0x00010300;
 const uint VERSION_1_5 = 0x00010500;
 // Khronos has not assigned this project a generator id, so use 0 ("unknown").
@@ -38,6 +39,7 @@ constdef Opcode : uint
 	UNDEF                     = 1,
 	NAME                      = 5,
 	MEMBER_NAME               = 6,
+	MODULE_PROCESSED          = 330,
 	EXTENSION                 = 10,
 	EXT_INST_IMPORT           = 11,
 	EXT_INST                  = 12,

@@ -423,3 +423,63 @@ fn void store(uint i)
 
 	test::@check(error == "", "a byte storage block should compile; got '%s'", error);
 }
+
+<*
+ A kernel laid out for a subgroup size says so, and the module carries it as an
+ `OpModuleProcessed` line the host reads - Vulkan SPIR-V has no execution mode
+ for it.
+*>
+fn void a_subgroup_size_is_carried_in_the_module() @test
+{
+	String source = `
+struct ComputeIn { uint3 thread @builtin(global_invocation_id); }
+uint data[];
+fn void main(ComputeIn input) @compute @threads(64, 1, 1) @subgroup_size(32)
+{
+    data[input.thread.x] = 1u;
+}
+`;
+	String error = shady_support::compile_error(source);
+	test::@check(error == "", "@subgroup_size should compile; got '%s'", error);
+
+	char[] spirv = shady_support::build(source);
+	defer free(spirv);
+	test::@check(module_processed(spirv) == "shady.subgroup_size 32",
+		"the module should say its subgroup size; got '%s'", module_processed(spirv));
+}
+
+fn void a_subgroup_size_must_be_a_power_of_two() @test
+{
+	String error = shady_support::compile_error(`
+struct ComputeIn { uint3 thread @builtin(global_invocation_id); }
+uint data[];
+fn void main(ComputeIn input) @compute @threads(64, 1, 1) @subgroup_size(48)
+{
+    data[input.thread.x] = 1u;
+}
+`);
+	test::@check(error.contains("power of two"), "@subgroup_size(48) should be refused; got '%s'", error);
+}
+
+// The first OpModuleProcessed string, or "" when there is none.
+fn String module_processed(char[] spirv)
+{
+	uint* words = (uint*)spirv.ptr;
+	usz   count = (usz)spirv.len / 4;
+	usz   i     = 5;
+	while (i < count)
+	{
+		uint word = words[i];
+		usz  len  = (usz)(word >> 16);
+		if ((word & 0xffff) == (uint)shady::Opcode.MODULE_PROCESSED)
+		{
+			char* text = (char*)&words[i + 1];
+			usz n = 0;
+			while (n < (len - 1) * 4 && text[n] != 0) n++;
+			return (String)text[:n];
+		}
+		if (len == 0) break;
+		i += len;
+	}
+	return "";
+}
