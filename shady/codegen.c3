@@ -93,6 +93,18 @@ struct FunctionSig
 	// signature rather than read off the declaration, because the declaration is
 	// what the definition replaces.
 	bool    required;
+
+	// `@fallback`: a definition another one of the same signature replaces.
+	bool    fallback;
+
+	// The name is a template's hole - `@required` or `@fallback` - so every
+	// definition of it must have the hole's signature rather than overload it.
+	// Survives the definition that fills or replaces the hole.
+	bool    hole;
+	// The template's own declaration of that hole, kept when a definition takes
+	// the signature's place, so a message can quote the hole rather than the
+	// text that filled it.
+	Decl*   hole_decl;
 }
 
 alias FunctionSigList = List{FunctionSig};
@@ -130,6 +142,10 @@ struct Codegen
 	TypeTable* types;
 	Ast*       ast;
 	Allocator  allocator;
+	// The `#line` regions, so a message about one declaration can name where
+	// another one is - "already defined at material:3". Null when a caller
+	// compiles without one; positions are then plain line numbers.
+	LineMap*   map;
 
 	ResourceList resources;
 	ConstantList constants;
@@ -194,6 +210,23 @@ fn void Codegen.fail(&self, uint line, uint column, String message, uint length 
 	self.error_line   = line;
 	self.error_column = column;
 	self.error_length = length;
+}
+
+<*
+ Where a physical line is, as a reader would name it: `material:3` inside a
+ `#line` region, `line 40` outside one. For a message about one declaration
+ that has to point at another.
+*>
+fn String Codegen.where(&self, uint physical)
+{
+	if (self.map)
+	{
+		if (LineDirective* directive = self.map.find(physical))
+		{
+			return string::format(self.allocator, "%s:%d", directive.name, (int)physical + directive.offset);
+		}
+	}
+	return string::format(self.allocator, "line %d", physical);
 }
 
 <*
@@ -1668,18 +1701,18 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 			at++;
 		}
 
+		// The shape of `@required` and `@fallback` - body or none, never an entry
+		// point, never both - was checked when the tree was parsed.
 		bool has_body = decl.function.body != null;
-		if (decl.attributes.find("required") && has_body)
-		{
-			self.fail(decl.line, decl.column, string::format(self.allocator,
-				"`%s` is @required, so it cannot have a body here - the body is what the text spliced into this module provides",
-				decl.name));
-			return CODEGEN_ERROR~;
-		}
+		bool required = decl.attributes.find("required") != null;
+		bool fallback = decl.attributes.find("fallback") != null;
 
 		FunctionSig sig = {
 			.decl          = decl,
-			.required      = decl.attributes.find("required") != null,
+			.required      = required,
+			.fallback      = fallback,
+			.hole          = required || fallback,
+			.hole_decl     = required || fallback ? decl : null,
 			.return_type   = return_type,
 			.params        = params,
 			.names         = names,
@@ -1689,6 +1722,59 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 			.receiver_ref  = receiver_ref,
 			.receiver_name = receiver_name,
 		};
+
+		// Two bodies of one signature. Calls resolve across the whole program, not
+		// per module, so this is asked of every definition rather than of the
+		// module's own: a second body is refused where it is written - which is the
+		// author's line when the second one is a spliced body - instead of as an
+		// ambiguous call somewhere neither definition is. The one exception is a
+		// `@fallback`, which exists to be replaced.
+		if (has_body)
+		{
+			FunctionSig* twin = null;
+			foreach (&existing : self.functions)
+			{
+				if (existing.decl.name != decl.name) continue;
+				if (!existing.decl.function.body) continue;
+				if (!signatures_agree(existing, &sig)) continue;
+				twin = existing;
+				break;
+			}
+
+			if (twin)
+			{
+				if (twin.fallback && fallback)
+				{
+					self.fail(decl.line, decl.column, string::format(self.allocator,
+						"`%s` already has a @fallback with this signature at %s - a hole has one fallback",
+						decl.name, self.where(twin.decl.line)));
+					return CODEGEN_ERROR~;
+				}
+				if (!twin.fallback && !fallback)
+				{
+					self.fail(decl.line, decl.column, string::format(self.allocator,
+						"`%s` is already defined with this signature at %s",
+						decl.name, self.where(twin.decl.line)));
+					return CODEGEN_ERROR~;
+				}
+				// One of the two is the fallback, and the other one wins whichever
+				// came first - in the fallback's place, so the hole keeps its
+				// position in the module.
+				if (twin.fallback)
+				{
+					sig.hole      = true;
+					sig.hole_decl = twin.hole_decl;
+					sig.required  = twin.required;
+					*twin = sig;
+				}
+				else
+				{
+					twin.hole      = true;
+					twin.hole_decl = decl;
+				}
+				continue;
+			}
+		}
 
 		// One function, declared and then defined - or one of the two, when the
 		// text that defines it is spliced in from elsewhere. The two spellings
@@ -1724,11 +1810,24 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 		// The declaration's marker survives the fill: it is a claim about the
 		// module, and the definition does not withdraw it.
 		sig.required = sig.required || earlier.required;
+		sig.hole     = sig.hole || earlier.hole;
+		if (!sig.hole_decl) sig.hole_decl = earlier.hole_decl;
+
+		// A fallback is an answer the template already has, and `@required` says
+		// the text must bring its own. Filling one with the other would make a
+		// required hole optional without saying so.
+		if ((sig.fallback || earlier.fallback) && sig.required)
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"`%s` is @required at %s, so a @fallback cannot fill it - drop @required to make the hole optional",
+				decl.name, self.where(earlier.required ? earlier.decl.line : decl.line)));
+			return CODEGEN_ERROR~;
+		}
 
 		if (earlier_has_body && declared_has_body)
 		{
-			// Two definitions of one signature: refused where a call matches both,
-			// which is where it always was - not here.
+			// Unreachable since the twin check above, which refuses or folds every
+			// pair of bodies; kept so the three cases below stay exhaustive.
 			self.functions.push(sig);
 			continue;
 		}
@@ -1771,6 +1870,37 @@ fn bool signatures_agree(FunctionSig* declared, FunctionSig* defined) @private
 }
 
 <*
+ A template's hole has one signature, and every definition of its name has it.
+
+ Without this a mistyped hole is an overload: `fn float4 shade(Surface s)` next
+ to a `@fallback` `fn float3 shade(Surface s)` compiles, and the fallback is what
+ runs - the author's function is never called and nothing says so. With a
+ `@required` hole the same mistake was "nothing defines it", at the template's
+ line, about a function the author can see they wrote. Both are refused at the
+ author's definition instead, quoting the signature it has to have.
+
+ Holes are matched by name within the module, as filling is.
+*>
+fn void? Codegen.check_holes(&self)
+{
+	foreach (&hole : self.functions)
+	{
+		if (!hole.hole) continue;
+		foreach (&other : self.functions)
+		{
+			if (other == hole) continue;
+			if (other.decl.name != hole.decl.name) continue;
+			if (other.decl.module_name != hole.decl.module_name) continue;
+			if (signatures_agree(hole, other)) continue;
+			self.fail(other.decl.line, other.decl.column, string::format(self.allocator,
+				"`%s` is a hole the template declares as `%s` (%s), so a definition of it must have that signature",
+				hole.decl.name, hole.hole_decl.signature_text(self.allocator), self.where(hole.hole_decl.line)));
+			return CODEGEN_ERROR~;
+		}
+	}
+}
+
+<*
  Every `@required` function has a definition.
 
  Asked of the signatures and not of the call sites, which is the difference
@@ -1784,6 +1914,8 @@ fn void? Codegen.check_required(&self)
 	foreach (&sig : self.functions)
 	{
 		if (!sig.required || sig.decl.function.body) continue;
+		// `check_holes` ran first, so a definition of this name with another
+		// signature has already been named; this is the case where there is none.
 		self.fail(sig.decl.line, sig.decl.column, string::format(self.allocator,
 			"`%s` is @required, and nothing in this module defines it", sig.decl.name));
 		return CODEGEN_ERROR~;

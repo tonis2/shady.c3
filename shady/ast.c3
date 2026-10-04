@@ -328,6 +328,9 @@ struct Param
 
 	// `out` / `inout`: a by-reference parameter that is not the receiver.
 	bool        is_out;
+	// Which of the two was written. They compile alike; the spelling is kept
+	// so a signature can be quoted back the way its author wrote it.
+	bool        is_inout;
 }
 
 enum DeclKind : char

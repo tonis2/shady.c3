@@ -199,8 +199,8 @@ fn float4 frag(FragmentIn input) @fragment
 }
 `));
 
-	test::@check(error.contains("matches more than one"),
-		"two definitions of one function should be refused; got `%s`", error);
+	test::@check(error.starts_with("lib_two.shady:2:1:") && error.contains("already defined with this signature at lib.shady:2"),
+		"two definitions of one function should be refused at the second, naming the first; got `%s`", error);
 }
 
 fn void an_unknown_import_is_refused() @test

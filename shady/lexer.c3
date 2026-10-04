@@ -348,6 +348,12 @@ fn void? Lexer.skip_trivia(&self)
 	}
 }
 
+<*
+ Whether a word is one of the language's keywords, and so cannot name a
+ variable, a member, a parameter or a function.
+*>
+fn bool is_keyword(String word) => keyword_kind(word) != IDENT;
+
 fn TokenKind keyword_kind(String word) @local
 {
 	switch (word)

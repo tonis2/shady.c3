@@ -986,8 +986,8 @@ fn Decl*? Parser.declaration(&self)
 
 					// `out` / `inout`: a by-reference parameter. Both arrive as a
 					// pointer; `out` is the one that need not be initialised.
-					bool is_out = self.check(OUT)
-						|| (self.check(IDENT) && self.peek().text == "inout");
+					bool is_inout = self.check(IDENT) && self.peek().text == "inout";
+					bool is_out = self.check(OUT) || is_inout;
 					if (is_out) self.advance();
 
 					TypeRef type        = self.type_ref()!;
@@ -1000,6 +1000,7 @@ fn Decl*? Parser.declaration(&self)
 						.attributes = attributes,
 						.by_ref     = is_out,
 						.is_out     = is_out,
+						.is_inout   = is_inout,
 						.line       = param_token.line,
 						.column     = param_token.column,
 					});
@@ -1237,10 +1238,141 @@ fn Ast? parse(String source, Parser* parser = null, LineMap* map = null)
 	}
 
 	assign_modules(decls.array_view(), map);
+	validate_attributes(parser, decls.array_view())!;
 
 	ast.decls = decls.array_view();
 	ok = true;
 	return ast;
+}
+
+<*
+ The attributes each kind of declaration takes. Anything else is refused where
+ it is written, because the alternative - a consumer that looks up the names it
+ knows and ignores the rest - is a misspelt `@framgent` that compiles into a
+ module with no fragment stage and says nothing.
+*>
+const String[*] FUNCTION_ATTRIBUTES @local = { "vertex", "fragment", "compute", "threads", "subgroup_size", "required", "fallback" };
+const String[*] STRUCT_ATTRIBUTES @local   = { "uniform", "pushconstant", "storage", "address" };
+const String[*] MEMBER_ATTRIBUTES @local   = { "position", "location", "builtin", "flat" };
+const String[*] RESOURCE_ATTRIBUTES @local = { "set", "binding" };
+const String[*] CONSTANT_ATTRIBUTES @local = { "spec" };
+
+<*
+ Every attribute a declaration carries is one its kind takes, and the two that
+ describe a template's holes - `@required` and `@fallback` - have the shape they
+ promise. Run once the whole tree is in hand, so a caller that only parses (the
+ host introspecting a template) is held to the same rules as a compile.
+*>
+fn void? validate_attributes(Parser* parser, Decl*[] decls) @local
+{
+	foreach (decl : decls)
+	{
+		switch (decl.kind)
+		{
+			case STRUCT:
+				check_attributes(parser, decl.attributes, STRUCT_ATTRIBUTES[..], "a struct")!;
+				foreach (member : decl.struct_decl.members)
+				{
+					check_attributes(parser, member.attributes, MEMBER_ATTRIBUTES[..], "a struct member")!;
+				}
+			case FUNCTION:
+				check_attributes(parser, decl.attributes, FUNCTION_ATTRIBUTES[..], "a function")!;
+				foreach (param : decl.function.params)
+				{
+					check_attributes(parser, param.attributes, {}, "a parameter")!;
+				}
+				check_hole_shape(parser, decl)!;
+			case RESOURCE:
+				check_attributes(parser, decl.attributes, RESOURCE_ATTRIBUTES[..], "a module-level variable")!;
+			case CONSTANT:
+				check_attributes(parser, decl.attributes, CONSTANT_ATTRIBUTES[..], "a constant")!;
+			default:
+				break;
+		}
+	}
+}
+
+fn bool is_listed(String name, String[] names) @local
+{
+	foreach (candidate : names) if (candidate == name) return true;
+	return false;
+}
+
+fn void? check_attributes(Parser* parser, Attribute[] attributes, String[] allowed, String what) @local
+{
+	foreach (attribute : attributes)
+	{
+		if (is_listed(attribute.name, allowed)) continue;
+
+		// Two different mistakes: a name the language has, on the wrong kind of
+		// declaration, and a name it does not have at all - most often a typo.
+		bool known = is_listed(attribute.name, FUNCTION_ATTRIBUTES[..])
+			|| is_listed(attribute.name, STRUCT_ATTRIBUTES[..])
+			|| is_listed(attribute.name, MEMBER_ATTRIBUTES[..])
+			|| is_listed(attribute.name, RESOURCE_ATTRIBUTES[..])
+			|| is_listed(attribute.name, CONSTANT_ATTRIBUTES[..]);
+
+		DString takes;
+		takes.init(mem, 64);
+		defer takes.free();
+		if (allowed.len == 0)
+		{
+			takes.append_string("none");
+		}
+		else
+		{
+			foreach (i, name : allowed)
+			{
+				if (i > 0) takes.append_string(", ");
+				takes.appendf("@%s", name);
+			}
+		}
+
+		String message = known
+			? string::tformat("`@%s` does not apply to %s; %s takes %s", attribute.name, what, what, takes.str_view())
+			: string::tformat("unknown attribute `@%s`; %s takes %s", attribute.name, what, takes.str_view());
+		parser.fail_at(attribute.line, attribute.column, message);
+		parser.error_length = (uint)attribute.name.len + 1;
+		return PARSE_ERROR~;
+	}
+}
+
+<*
+ `@required` is a hole the text must fill: a declaration, never a definition.
+ `@fallback` is a hole with an answer already in it: a definition another one
+ may replace. Neither is an entry point, and one function cannot be both.
+*>
+fn void? check_hole_shape(Parser* parser, Decl* decl) @local
+{
+	Attribute* required = decl.attributes.find("required");
+	Attribute* fallback = decl.attributes.find("fallback");
+	if (!required && !fallback) return;
+
+	Attribute* at = required ? required : fallback;
+	bool entry = decl.attributes.find("vertex") || decl.attributes.find("fragment") || decl.attributes.find("compute");
+	String message;
+	if (required && fallback)
+	{
+		message = string::tformat("`%s` cannot be both @required and @fallback - @required says the text must supply it, @fallback that it need not", decl.name);
+	}
+	else if (entry)
+	{
+		message = string::tformat("`%s` is an entry point, so it cannot be @%s - a hole is a function the entry points call", decl.name, at.name);
+	}
+	else if (required && decl.function.body)
+	{
+		message = string::tformat("`%s` is @required, so it cannot have a body here - the body is what the text spliced into this module provides", decl.name);
+	}
+	else if (fallback && !decl.function.body)
+	{
+		message = string::tformat("`%s` is @fallback, so it needs a body - the fallback is the answer used when nothing replaces it", decl.name);
+	}
+	else
+	{
+		return;
+	}
+	parser.fail_at(at.line, at.column, message);
+	return PARSE_ERROR~;
 }
 
 <*

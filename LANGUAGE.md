@@ -201,6 +201,42 @@ error at the declaration. In a file with no module the older rule stands:
 refused where it is called. `@required` is that same need made explicit, for
 text the module does not contain either way.
 
+Two **definitions** with the same name and the same signature are an error at
+the second one, naming where the first is - whichever modules they are in,
+because a call resolves across the whole program. The one exception is
+`@fallback` (§3.1.1).
+
+#### 3.1.1 Holes: `@required` and `@fallback`
+
+```
+fn float3 shade(Surface s) @fallback { return standard(s); }
+fn void displace(inout Vertex v) @fallback { }
+fn float4 mesh_fragment(VertexOutput input, bool front_facing) @required;
+```
+
+A **template** is a module with holes in it: functions its own code calls and
+some other text - spliced in by the program embedding the compiler - defines.
+
+- `@required` is a hole that text must fill. It is a declaration and never a
+  definition, and it is refused once, at the declaration, if nothing fills it -
+  whether or not anything calls it.
+- `@fallback` is a hole with a default already in it. It is a definition, and a
+  definition of the same signature anywhere in the program replaces it,
+  whether it comes before or after. A hole has one fallback, and a fallback
+  cannot fill a `@required` hole: drop `@required` to make a hole optional.
+
+Neither is an entry point, and a function is not both.
+
+**A hole's name is not overloadable.** Every definition of the name in the
+hole's module must have the hole's signature, or it is refused at that
+definition, quoting the signature it must have. Without the rule a mistyped
+`fn float4 shade(Surface s)` would be a new overload, the fallback would run,
+and nothing would say so.
+
+`shady::holes(source, allocator)` lists a template's holes with their
+signatures written back out, which is what a host needs to wrap a bare body in
+one; `shady::defines_functions(text)` tells a bare body from whole functions.
+
 A **method** is declared with a qualified name, C3-style:
 
 ```
@@ -557,11 +593,13 @@ spliced module.
 | `@address` | struct | Reached through a device address: std430, no binding |
 | `@position` | struct member | `BuiltIn Position` instead of a location |
 | `@location(n)` | struct member | Pin the location; others auto-assign around it |
-| `@builtin(name)` | struct member / parameter | A SPIR-V builtin (§6.4) |
+| `@builtin(name)` | struct member | A SPIR-V builtin (§6.4) |
 | `@set(n)` | module-level variable | Descriptor set |
 | `@binding(n)` | module-level variable | Binding within the set |
 | `@spec(n)` | module-level `const` | Specialization constant id (§3.4) |
 | `@flat` | struct member | `Flat` interpolation |
+| `@required` | function, no body | A hole the module's text must fill (§3.1.1) |
+| `@fallback` | function, with a body | A hole with a default another definition replaces (§3.1.1) |
 
 `@subgroup_size(n)` is for a kernel whose tiles are laid out for so many lanes
 a subgroup - a cooperative-matrix kernel written for wave32, say. Vulkan chooses
@@ -574,7 +612,10 @@ A struct carries at most one of `@uniform`, `@storage`, `@pushconstant` and
 after a function's signature, as in C3.
 
 Unknown attributes are an error, not a warning — a typo'd `@framgent` that
-silently produced no entry point would be a miserable thing to debug.
+silently produced no entry point would be a miserable thing to debug. So is a
+known attribute on a declaration it does not apply to (`@binding` on a
+function), and a parameter takes none. Both are refused when the text is parsed,
+at the attribute.
 
 ## 5. Expressions
 
