@@ -874,6 +874,7 @@ fn char[]? compile(
 	codegen.mod       = &mod;
 	codegen.types     = &types;
 	codegen.ast       = &ast;
+	codegen.map       = &map;
 	codegen.scalar_layout = scalar_layout;
 	codegen.warnings  = &findings;
 	codegen.resources.init(&arena, 8);
@@ -944,6 +945,7 @@ fn void? Codegen.build(&self)
 	self.declare_structs(self.ast)!;
 	self.declare_constants(self.ast)!;
 	self.declare_functions(self.ast)!;
+	self.check_holes()!;
 	self.check_modules()!;
 	self.check_required()!;
 	self.assign_bindings(self.ast)!;

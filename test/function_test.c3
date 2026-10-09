@@ -174,14 +174,30 @@ fn float4 f(float4 color) { return f(color); }
 
 fn void rejects_an_ambiguous_call() @test
 {
+	// Two overloads that each accept a scalar: the call is the ambiguity, not
+	// either declaration.
 	String error = shady_support::compile_error(shady_support::fragment(`
-fn float4 frag(FragmentIn input) @fragment { return pick(input.color); }
-fn float4 pick(float4 color) { return color; }
-fn float4 pick(float4 color) { return color * 2.0; }
+fn float4 frag(FragmentIn input) @fragment { return float4(pick(1.0), 0.0, 1.0); }
+fn float2 pick(float2 v) { return v; }
+fn float2 pick(float3 v) { return v.xy; }
 `));
 
 	test::@check(error.contains("overload"),
 		"an ambiguous overload should be named as one; got '%s'", error);
+}
+
+fn void rejects_a_second_definition_where_it_is_written() @test
+{
+	// Not at a call: the second body is the mistake, and it is refused on its
+	// own line, naming where the first one is.
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment { return input.color; }
+fn float4 pick(float4 color) { return color; }
+fn float4 pick(float4 color) { return color * 2.0; }
+`));
+
+	test::@check(error.starts_with("11:1:") && error.contains("already defined with this signature at line 10"),
+		"a second definition should be refused at its own line, naming the first; got '%s'", error);
 }
 
 fn void rejects_a_missing_return() @test
