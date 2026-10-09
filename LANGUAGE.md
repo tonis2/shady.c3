@@ -809,7 +809,8 @@ Mapped to GLSL.std.450 unless noted.
 product spelled the HLSL way.
 
 **Conversion and selection**: `asuint` `asint` `asfloat` (bit-preserving, same
-shape), `any` `all` (a bool vector to a bool), `select(when_false, when_true,
+shape), `ashalf(bits)` (the half whose bits are the low 16 of a 32-bit int or
+uint), `any` `all` (a bool vector to a bool), `select(when_false, when_true,
 condition)`.
 
 **Device memory**: `InterlockedAdd(dest, value)` - an atomic add on a device

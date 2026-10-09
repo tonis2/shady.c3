@@ -52,6 +52,34 @@ fn float4 frag(FragmentIn input) @fragment
 	test::@check(error == "", "asuint should bitcast a float or vector to its uint shape; got '%s'", error);
 }
 
+fn void ashalf_reads_the_low_16_bits() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+    uint bits = asuint(input.color.x);
+    half h = ashalf(bits & 65535u);
+    half one = ashalf(0x3C00);
+    return float4(float(h * one));
+}
+`));
+
+	test::@check(error == "", "ashalf should make a half of a word's low 16 bits; got '%s'", error);
+}
+
+fn void ashalf_refuses_a_float() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+    half h = ashalf(input.color.x);
+    return float4(float(h));
+}
+`));
+
+	test::@check(error.contains("ashalf"), "ashalf of a float should be refused; got '%s'", error);
+}
+
 fn void lerp_and_rsqrt_are_aliases() @test
 {
 	String error = shady_support::compile_error(shady_support::fragment(`

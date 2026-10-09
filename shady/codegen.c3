@@ -2848,6 +2848,21 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 			Type*  result  = first.components() > 1 ? self.vector_of(scalar, first.components()) : scalar;
 			return (Value) { .type = result, .id = self.func.unop(Opcode.BITCAST, self.type_id(result), args[0]) };
 		}
+		case "ashalf":
+		{
+			// A half from the low 16 bits of a 32-bit int: a bitcast wants equal
+			// widths, so the word becomes a pair of halves and the low one (the
+			// first component) is kept. No 16-bit integer type is needed.
+			if ((first.kind != INT && first.kind != UINT) || first.width() != 32)
+			{
+				self.fail(expr.line, expr.column, "`ashalf` takes a 32-bit int or uint, the half in its low 16 bits");
+				return CODEGEN_ERROR~;
+			}
+			Type* half_t = self.types.find("half");
+			Id    pair   = self.mod.type_vector(self.type_id(half_t), 2);
+			Id    cast   = self.func.unop(Opcode.BITCAST, pair, args[0]);
+			return (Value) { .type = half_t, .id = self.func.composite_extract(self.type_id(half_t), cast, 0) };
+		}
 		case "any":
 		case "all":
 		{
