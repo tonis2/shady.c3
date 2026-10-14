@@ -283,7 +283,11 @@ the receiver as the first argument.
 `&self` arrives as a pointer into the caller's storage, so a write through it
 is visible to the caller when the receiver is addressable (a local, or a
 parameter). A temporary is copied into a local first, which makes `&self` on
-one read-only.
+one read-only. A member or an array element of a local - `maps.base.Sample(uv)`
+- is copied into a local too, and the copy is written back when the call
+returns: SPIR-V does not let a call take a pointer into a variable, only to
+one. The writes still reach the caller, at the return rather than as they
+happen.
 
 A member call prefers a declared method over a free function spelled the same
 way; a bare call still reaches a by-value method, passing the receiver as its
@@ -293,7 +297,9 @@ have a method of the same name and the receiver type picks between them.
 A parameter may be `out` or `inout`, which pass it by reference: the callee
 writes through a pointer to the caller's variable. `out` need not be
 initialised; `inout` is copied in and out. The matching argument at a call site
-must be a variable, not a temporary.
+must be a variable, not a temporary. A member or an element of a variable
+counts, and goes through a copy that is written back when the call returns, as
+a `&self` receiver does.
 
 Recursion is not supported: a function that reaches itself is an error, since a
 shader has no stack to recurse on.
@@ -510,15 +516,27 @@ memory model for the whole module. A barrier in such a module is still spelled
 
 ### 3.5 Constants
 ```
-const float PI = 3.14159;              // an ordinary constant
-const bool  SHADOWS  @spec(0) = true;  // a specialization constant
-const uint  PCF_TAPS @spec(1) = 4u;
+const float  PI = 3.14159;                         // an ordinary constant
+const float3 UP = float3(0.0, 1.0, 0.0);           // a vector constant
+const float  ROUGH[4] = { 0.2, 0.45, 0.7, -0.1 };  // a table
+const bool   SHADOWS  @spec(0) = true;             // a specialization constant
+const uint   PCF_TAPS @spec(1) = 4u;
 ```
-A module-level `const` is a scalar whose initialiser is a literal, and its name
-resolves wherever it is written. It lowers to an `OpConstant` - except with
-`@spec`: a `@spec(id)` constant lowers to an `OpSpecConstant`, or
-`OpSpecConstantTrue`/`False` for a bool, decorated with `SpecId`, so the host
-may replace its value when it creates the pipeline.
+A module-level `const` is a scalar, a vector, or a fixed-length array of either,
+and its name resolves wherever it is written. Its initialiser is made of
+literals: a number, `true` or `false`, or a negated number. A vector is its
+constructor over those, with one literal per component or one for all of them.
+An array is an initialiser list holding exactly its length of them.
+
+A scalar lowers to an `OpConstant`, and a vector or array to one
+`OpConstantComposite`. An array indexed by a literal (`ROUGH[2]`) is an extract,
+and an index past the end is refused. An array indexed by a runtime value is
+read through a local copy, because SPIR-V indexes a composite only through a
+pointer. Either way the element is a value, and assigning to it is refused.
+
+With `@spec` a constant is a scalar: a `@spec(id)` constant lowers to an
+`OpSpecConstant`, or `OpSpecConstantTrue`/`False` for a bool, decorated with
+`SpecId`, so the host may replace its value when it creates the pipeline.
 
 That is how one module serves several variants without recompiling: a bool that
 folds a pass away, a uint that bounds a loop, a float that scales a kernel. A
@@ -526,8 +544,8 @@ spec constant cannot add or remove a descriptor, change a varying, change an
 entry point or change a stage interface - those need a separate module. Spec
 ids must be unique within a module.
 
-Only scalars, because a spec constant has to be a single replaceable literal;
-a composite or an expression is not.
+A spec constant is only ever a scalar, because it has to be a single
+replaceable literal, and a composite or an expression is not one.
 
 ### 3.6 Interfaces
 

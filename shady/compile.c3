@@ -311,8 +311,12 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
  how one module serves several variants without recompiling. Without `@spec` it
  is an ordinary constant.
 
- Only scalars, and only literal initialisers: a spec constant has to be a single
- SPIR-V literal to be replaceable, and anything else would need constant folding
+ An ordinary constant may also be a vector, `float3(0.0, 1.0, 0.0)`, or a table,
+ `const float WEIGHTS[4] = { ... };`, which lowers to one OpConstantComposite.
+ A spec constant stays a scalar: it has to be a single SPIR-V literal to be
+ replaceable.
+
+ Only literal initialisers, because anything else would need constant folding
  first.
 *>
 fn void? Codegen.declare_constants(&self, Ast* ast)
@@ -326,19 +330,24 @@ fn void? Codegen.declare_constants(&self, Ast* ast)
 	{
 		if (decl.kind != DeclKind.CONSTANT) continue;
 
-		Type* type = decl.constant.type.is_image
-			? self.resolve_type(decl.constant.type, decl.line, decl.column)!
-			: self.types.find(decl.constant.type.name);
-		if (!type)
-		{
-			self.fail(decl.line, decl.column,
-				string::format(self.allocator, "unknown type `%s`", decl.constant.type.name));
-			return CODEGEN_ERROR~;
-		}
-		if (!type.is_scalar())
+		Type* type    = self.resolve_type(decl.constant.type, decl.line, decl.column)!;
+		bool  array   = type.kind == ARRAY;
+		Type* element = array ? type.element : type;
+		if (array && type.runtime)
 		{
 			self.fail(decl.line, decl.column, string::format(self.allocator,
-				"`%s` cannot be a constant; only bool, int, uint and float can", type.name));
+				"the constant `%s` needs a length: `%s %s[%d]`",
+				decl.name, element.name, decl.name, decl.constant.value.kind == INITIALIZER
+					? decl.constant.value.initializer.elements.len : 1));
+			return CODEGEN_ERROR~;
+		}
+		if (!element.is_scalar() && element.kind != VECTOR)
+		{
+			self.fail(decl.line, decl.column, array
+				? string::format(self.allocator,
+					"`%s` cannot be a constant; a table holds bool, int, uint, float or their vectors", type.name)
+				: string::format(self.allocator,
+					"`%s` cannot be a constant; only bool, int, uint, float and their vectors can", type.name));
 			return CODEGEN_ERROR~;
 		}
 
@@ -349,6 +358,13 @@ fn void? Codegen.declare_constants(&self, Ast* ast)
 			if (spec.args.len != 1 || spec.args[0].is_name)
 			{
 				self.fail(spec.line, spec.column, "@spec takes one number");
+				return CODEGEN_ERROR~;
+			}
+			if (!type.is_scalar())
+			{
+				self.fail(spec.line, spec.column, string::format(self.allocator,
+					"`%s` cannot be a specialization constant - only a scalar is one replaceable literal",
+					type.name));
 				return CODEGEN_ERROR~;
 			}
 			is_spec = true;
@@ -365,60 +381,9 @@ fn void? Codegen.declare_constants(&self, Ast* ast)
 			spec_ids.push(spec_id);
 		}
 
-		Expr* value = decl.constant.value;
-		Id    id;
-
-		switch (type.kind)
-		{
-			case BOOL:
-				if (value.kind != ExprKind.BOOL_LITERAL)
-				{
-					self.fail(decl.line, decl.column, "a bool constant needs `true` or `false`");
-					return CODEGEN_ERROR~;
-				}
-				id = is_spec
-					? self.mod.spec_constant_bool(self.type_id(type), value.boolean.value, spec_id)
-					: (value.boolean.value
-						? self.mod.const_true(self.type_id(type))
-						: self.mod.const_false(self.type_id(type)));
-
-			case INT:
-				if (value.kind != ExprKind.INT_LITERAL)
-				{
-					self.fail(decl.line, decl.column, "an int constant needs an integer literal");
-					return CODEGEN_ERROR~;
-				}
-				id = is_spec
-					? self.mod.spec_constant_i32(self.type_id(type), (int)value.literal.value, spec_id)
-					: self.mod.const_i32(self.type_id(type), (int)value.literal.value);
-
-			case UINT:
-				if (value.kind != ExprKind.INT_LITERAL)
-				{
-					self.fail(decl.line, decl.column, "a uint constant needs an integer literal");
-					return CODEGEN_ERROR~;
-				}
-				id = is_spec
-					? self.mod.spec_constant_u32(self.type_id(type), (uint)value.literal.value, spec_id)
-					: self.mod.const_u32(self.type_id(type), (uint)value.literal.value);
-
-			case FLOAT:
-				if (value.kind != ExprKind.FLOAT_LITERAL && value.kind != ExprKind.INT_LITERAL)
-				{
-					self.fail(decl.line, decl.column, "a float constant needs a number");
-					return CODEGEN_ERROR~;
-				}
-				float number = value.kind == ExprKind.FLOAT_LITERAL
-					? (float)value.literal.value
-					: (float)((int)value.literal.value);
-				id = is_spec
-					? self.mod.spec_constant_f32(self.type_id(type), number, spec_id)
-					: self.mod.const_f32(self.type_id(type), number);
-
-			default:
-				self.fail(decl.line, decl.column, "only scalars can be constants");
-				return CODEGEN_ERROR~;
-		}
+		Id id = array
+			? self.constant_table(type, decl.constant.value)!
+			: self.literal_constant(type, decl.constant.value, is_spec, spec_id)!;
 
 		self.mod.name(id, decl.name);
 		self.constants.push({
@@ -429,6 +394,114 @@ fn void? Codegen.declare_constants(&self, Ast* ast)
 			.line    = decl.line,
 			.column  = decl.column,
 		});
+	}
+}
+
+<*
+ `{ a, b, ... }` as one OpConstantComposite of `type`, an array: as many
+ elements as its length, each a literal of its element type.
+*>
+fn Id? Codegen.constant_table(&self, Type* type, Expr* value)
+{
+	if (value.kind != INITIALIZER)
+	{
+		self.fail(value.line, value.column, string::format(self.allocator,
+			"a %s constant is a list: `{ a, b, ... }`", type.name));
+		return CODEGEN_ERROR~;
+	}
+	Expr*[] elements = value.initializer.elements;
+	if ((usz)type.count != elements.len)
+	{
+		self.fail(value.line, value.column, string::format(self.allocator,
+			"a %s initialiser needs %d elements, got %d", type.name, type.count, elements.len));
+		return CODEGEN_ERROR~;
+	}
+	@pool()
+	{
+		Id[] parts = alloc::alloc_array(tmem, Id, elements.len);
+		foreach (i, element : elements) parts[i] = self.literal_constant(type.element, element)!;
+		return self.mod.const_composite(self.type_id(type), parts);
+	};
+}
+
+<*
+ The constant a literal stands for, as `type`: a number, a negated number,
+ `true` or `false` - or for a vector, its constructor over those, one for every
+ component or one for all of them.
+*>
+fn Id? Codegen.literal_constant(&self, Type* type, Expr* value, bool is_spec = false, uint spec_id = 0)
+{
+	if (type.kind == VECTOR)
+	{
+		usz given = value.kind == CALL ? value.call.args.len : 0;
+		if (value.kind != CALL || value.call.callee.kind != IDENT || value.call.callee.ident.name != type.name
+			|| (given != 1 && given != type.count))
+		{
+			self.fail(value.line, value.column, string::format(self.allocator,
+				"a %s constant needs `%s(...)` of %d numbers, or of one", type.name, type.name, type.count));
+			return CODEGEN_ERROR~;
+		}
+		@pool()
+		{
+			Id[] parts = alloc::alloc_array(tmem, Id, type.count);
+			foreach (i, &part : parts)
+			{
+				*part = self.literal_constant(type.element, value.call.args[given == 1 ? 0 : i])!;
+			}
+			return self.mod.const_composite(self.type_id(type), parts);
+		};
+	}
+
+	// `-0.5` is a negation of a literal, folded here rather than by the parser.
+	bool  negated = value.kind == UNARY && value.unary.op == MINUS;
+	Expr* number  = negated ? value.unary.operand : value;
+
+	switch (type.kind)
+	{
+		case BOOL:
+			if (negated || number.kind != ExprKind.BOOL_LITERAL)
+			{
+				self.fail(value.line, value.column, "a bool constant needs `true` or `false`");
+				return CODEGEN_ERROR~;
+			}
+			if (is_spec) return self.mod.spec_constant_bool(self.type_id(type), number.boolean.value, spec_id);
+			return number.boolean.value ? self.mod.const_true(self.type_id(type)) : self.mod.const_false(self.type_id(type));
+
+		case INT:
+			if (number.kind != ExprKind.INT_LITERAL)
+			{
+				self.fail(value.line, value.column, "an int constant needs an integer literal");
+				return CODEGEN_ERROR~;
+			}
+			int whole = negated ? -(int)number.literal.value : (int)number.literal.value;
+			if (is_spec) return self.mod.spec_constant_i32(self.type_id(type), whole, spec_id);
+			return self.mod.const_i32(self.type_id(type), whole);
+
+		case UINT:
+			if (negated || number.kind != ExprKind.INT_LITERAL)
+			{
+				self.fail(value.line, value.column, "a uint constant needs an integer literal");
+				return CODEGEN_ERROR~;
+			}
+			if (is_spec) return self.mod.spec_constant_u32(self.type_id(type), (uint)number.literal.value, spec_id);
+			return self.mod.const_u32(self.type_id(type), (uint)number.literal.value);
+
+		case FLOAT:
+			if (number.kind != ExprKind.FLOAT_LITERAL && number.kind != ExprKind.INT_LITERAL)
+			{
+				self.fail(value.line, value.column, "a float constant needs a number");
+				return CODEGEN_ERROR~;
+			}
+			float real = number.kind == ExprKind.FLOAT_LITERAL
+				? (float)number.literal.value
+				: (float)((int)number.literal.value);
+			if (negated) real = -real;
+			if (is_spec) return self.mod.spec_constant_f32(self.type_id(type), real, spec_id);
+			return self.mod.const_f32(self.type_id(type), real);
+
+		default:
+			self.fail(value.line, value.column, "only scalars and vectors can be constants");
+			return CODEGEN_ERROR~;
 	}
 }
 

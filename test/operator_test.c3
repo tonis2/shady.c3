@@ -232,6 +232,77 @@ fn float4 frag(FragmentIn input) @fragment
 }
 
 <*
+ An integer vector times a scalar is an integer multiply of a splat.
+
+ `OpVectorTimesScalar` is for floats only. `int2 * 4` emitted with it is
+ invalid SPIR-V, and RADV ran it as a zero: every `corner = id.xy * 4` in a
+ kernel landed on texel (0, 0).
+*>
+fn void an_integer_vector_times_a_scalar_is_an_integer_multiply() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	int2 cell = int2(int(input.color.x), int(input.color.y)) * 4;
+	uint2 step = uint2(uint(input.color.z), 3u) * 2u;
+	return float4(float2(cell), float2(step));
+}
+`));
+	defer free(spirv);
+
+	test::@check(!shady_support::has_opcode(spirv, shady::Opcode.VECTOR_TIMES_SCALAR),
+		"an int2 or uint2 times a scalar is not OpVectorTimesScalar");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.I_MUL), "it is OpIMul of a splat");
+}
+
+<*
+ A float vector times a float is still the one instruction, and a float vector
+ times a `uint` is refused like any other mix of kinds - it used to reach the
+ same float-only shortcut and come out as invalid SPIR-V instead.
+*>
+fn void a_float_vector_times_a_scalar_is_one_instruction() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	return float4(input.color.xy * 2.0, 0.0, 1.0);
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.VECTOR_TIMES_SCALAR),
+		"a float2 times a float is OpVectorTimesScalar");
+}
+
+<*
+ A scalar of another kind beside a vector is refused on either side, and for
+ any operator. The broadcast used to come first and made the scalar look like
+ the vector, so a `uint` was splatted into a `float2` the module then refused.
+*>
+fn void a_float_vector_times_a_uint_is_refused() @test
+{
+	String right = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	uint count = 3u;
+	return float4(input.color.xy * count, 0.0, 1.0);
+}
+`));
+	test::@check(right.contains("convert one side explicitly"),
+		"a float2 times a uint is refused; got `%s`", right);
+
+	String left = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	uint count = 3u;
+	return float4(count + input.color.xy, 0.0, 1.0);
+}
+`));
+	test::@check(left.contains("convert one side explicitly"),
+		"a uint plus a float2 is refused; got `%s`", left);
+}
+
+<*
  `%` is C3's remainder: the result takes the sign of the left side, so
  `-7 % 3` is -1. That is OpSRem and OpFRem; OpSMod and OpFMod are GLSL's
  floored `mod()`, which takes the sign of the right side instead.

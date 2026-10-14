@@ -66,6 +66,34 @@ fn float2 tint(float2 color, float amount)
     return color * amount;
 }
 
+// A struct that holds maps, the way a material's surface holds its textures.
+// A method on one of its members, or an `inout` argument that is one of its
+// members, reaches the callee through a pointer into the struct - which SPIR-V
+// does not allow as a call argument, so it goes through a copy.
+struct Maps
+{
+    Map base;
+    Map detail[2];
+    float weight;
+}
+
+fn void Map.shift(&self, int by)
+{
+    self.at = self.at + by;
+}
+
+fn void halve(inout float value)
+{
+    value = value * 0.5;
+}
+
+fn float4 sample_both(Maps maps, float2 uv)
+{
+    maps.detail[1].shift(2);
+    halve(maps.weight);
+    return maps.base.Sample(uv) + maps.detail[1].Sample(uv) * maps.weight;
+}
+
 fn FragmentIn vert(VertexIn input) @vertex(main)
 {
     FragmentIn output;
@@ -77,5 +105,11 @@ fn FragmentIn vert(VertexIn input) @vertex(main)
 fn float4 frag(FragmentIn input) @fragment
 {
     float scale = pick(input.color.x > 0.5) * first_above(input.color.y);
-    return map_at(1).Sample(input.color) + float4(tint(input.color.xy), 0.0, scale);
+    Maps maps;
+    maps.base = map_at(1);
+    maps.detail[0] = map_at(2);
+    maps.detail[1] = map_at(3);
+    maps.weight = input.color.z;
+    return map_at(1).Sample(input.color) + float4(tint(input.color.xy), 0.0, scale)
+        + sample_both(maps, input.color.xy);
 }

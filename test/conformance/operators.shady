@@ -68,6 +68,14 @@ fn float4 frag(FragmentIn input) @fragment
     float4x4 shifted = m + 1.0;
     float4x4 mixed = (scaled - negated) + shifted;
 
+    // An integer vector times a scalar, on either side. `OpVectorTimesScalar`
+    // is for floats only, so these are an integer multiply of a splat.
+    int2 cell = int2(count, signed_rest) * 4;
+    uint2 step = uint2(bits, 3u) * 2u;
+    int2 flipped = 3 * cell;
+    float2 cells = float2(cell + flipped) + float2(step);
+
     return float4(small[0], pick) + float4(a, 1.0) - float4(float(count))
-        + float4(float(signed_rest), float_rest, 0.0, 0.0) + mixed[3];
+        + float4(float(signed_rest), float_rest, 0.0, 0.0) + mixed[3]
+        + float4(cells, 0.0, 0.0);
 }

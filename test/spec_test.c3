@@ -89,8 +89,21 @@ struct FragmentIn { float4 position @position; float4 color; }
 fn float4 frag(FragmentIn input) @fragment { return input.color; }
 `);
 
-	test::@check(error.contains("only bool, int, uint and float"),
+	test::@check(error.contains("only a scalar"),
 		"a spec constant has to be a scalar to be replaceable; got '%s'", error);
+}
+
+fn void rejects_a_matrix_constant() @test
+{
+	String error = shady_support::compile_error(`
+const float2x2 TURN = float2x2(0.0, 1.0, -1.0, 0.0);
+
+struct FragmentIn { float4 position @position; float4 color; }
+fn float4 frag(FragmentIn input) @fragment { return input.color; }
+`);
+
+	test::@check(error.contains("cannot be a constant"),
+		"a constant is a scalar, a vector or a table of them; got '%s'", error);
 }
 
 fn void rejects_a_non_literal_initialiser() @test

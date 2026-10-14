@@ -5,6 +5,7 @@
 module array_test;
 
 import std::core::test;
+import shady;
 import shady_support;
 
 fn void a_local_array_indexes_dynamically() @test
@@ -34,6 +35,77 @@ fn float4 frag(FragmentIn input) @fragment
 `));
 
 	test::@check(error == "", "a `const` array should be declarable inside a function; got '%s'", error);
+}
+
+<*
+ A module-level table is one OpConstantComposite. A literal index extracts
+ from it. A runtime index reads it through a local copy, because SPIR-V indexes
+ a composite by a runtime value only through a pointer.
+*>
+fn void a_module_constant_table_indexes_both_ways() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+const float  ROUGH[4] = { 0.2, 0.4, 0.6, 1 };
+const float2 TAPS[2]  = { float2(-1.0, 0.5), float2(1.0) };
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    int i = int(input.color.x * 3.0);
+    return float4(ROUGH[i], ROUGH[3], TAPS[i & 1]);
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.CONSTANT_COMPOSITE), "the table is a constant composite");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.COMPOSITE_EXTRACT), "ROUGH[3] is an extract");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.ACCESS_CHAIN), "ROUGH[i] goes through a local");
+}
+
+fn void a_constant_table_cannot_be_assigned() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+const float ROUGH[2] = { 0.2, 0.4 };
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    ROUGH[1] = input.color.x;
+    return float4(ROUGH[1]);
+}
+`));
+
+	test::@check(error.contains("cannot assign"), "an element of a constant is a copy; got '%s'", error);
+}
+
+fn void a_literal_index_past_a_constant_table_is_refused() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+const float ROUGH[2] = { 0.2, 0.4 };
+
+fn float4 frag(FragmentIn input) @fragment { return float4(ROUGH[2]); }
+`));
+
+	test::@check(error.contains("past the end"), "ROUGH[2] reaches past a float[2]; got '%s'", error);
+}
+
+fn void a_constant_table_is_its_length_of_literals() @test
+{
+	String brief = shady_support::compile_error(shady_support::fragment(`
+const float ROUGH[3] = { 0.2, 0.4 };
+fn float4 frag(FragmentIn input) @fragment { return float4(ROUGH[0]); }
+`));
+	test::@check(brief.contains("needs 3 elements"), "a short table is refused; got '%s'", brief);
+
+	String folded = shady_support::compile_error(shady_support::fragment(`
+const float ROUGH[2] = { 0.2, 0.2 * 2.0 };
+fn float4 frag(FragmentIn input) @fragment { return float4(ROUGH[0]); }
+`));
+	test::@check(folded.contains("needs a number"), "an element is a literal; got '%s'", folded);
+
+	String spec = shady_support::compile_error(shady_support::fragment(`
+const float ROUGH[2] @spec(0) = { 0.2, 0.4 };
+fn float4 frag(FragmentIn input) @fragment { return float4(ROUGH[0]); }
+`));
+	test::@check(spec.contains("only a scalar"), "a table is not a spec constant; got '%s'", spec);
 }
 
 fn void a_struct_member_array_is_addressable() @test

@@ -16,6 +16,11 @@ struct FragmentIn
     float4 color;
 }
 
+// A module-level table and a vector constant, indexed by a literal and by a
+// runtime value.
+const float  WEIGHTS[4] = { 0.125, 0.25, -0.5, 1 };
+const float3 TINT = float3(1.0, 0.5, 0.25);
+
 struct Palette
 {
     float4 colors[4];
@@ -48,5 +53,6 @@ fn float4 frag(FragmentIn input) @fragment
 
     int i = int(input.color.x * 3.0);
     float2 uv = taps[i];
-    return swatch(palette, i) + float4(uv, 0.0, 1.0);
+    float weight = WEIGHTS[i] + WEIGHTS[3];
+    return swatch(palette, i) + float4(uv, 0.0, 1.0) + float4(TINT * weight, TINT[i]);
 }

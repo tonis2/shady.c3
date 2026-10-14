@@ -40,6 +40,12 @@ struct Value
 	// The value is a texel read from a storage image: a copy, so writing one
 	// of its components would change nothing - which is said, not done.
 	bool  texel;
+
+	// `pointer` reaches into something - a member, an array element - rather
+	// than being a variable or a parameter itself. SPIR-V lets only the
+	// latter be a call's pointer argument, so a chained pointer handed to an
+	// `out`, `inout` or `&self` parameter goes through a copy instead.
+	bool  chained;
 }
 
 struct Local
@@ -910,7 +916,7 @@ fn Value Codegen.member_value(&self, Value base, uint index)
 	{
 		Id ptr = self.func.access_chain(self.mod.type_pointer(base.storage, self.type_id(member_type)),
 			base.pointer, (Id[]) { self.const_int((int)index) });
-		return (Value) { .type = member_type, .pointer = ptr, .storage = base.storage };
+		return (Value) { .type = member_type, .pointer = ptr, .storage = base.storage, .chained = true };
 	}
 
 	return (Value) { .type = member_type, .id = self.func.composite_extract(self.type_id(member_type), base.id, index) };
@@ -1144,13 +1150,32 @@ fn Value? Codegen.index_value(&self, Value base, Expr* expr)
 			{
 				self.mod.capability(Capability.SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING);
 			}
-			return (Value) { .type = element, .pointer = ptr, .storage = base.storage, .non_uniform = true };
+			return (Value) { .type = element, .pointer = ptr, .storage = base.storage, .non_uniform = true, .chained = true };
 		}
-		return (Value) { .type = element, .pointer = ptr, .storage = base.storage };
+		return (Value) { .type = element, .pointer = ptr, .storage = base.storage, .chained = true };
 	}
 
-	self.fail(expr.line, expr.column, "indexing a temporary is not supported yet");
-	return CODEGEN_ERROR~;
+	// A value with no address: a constant table, or a vector or matrix
+	// something returned. A literal index is an extract. Any other goes through
+	// a local holding a copy, since SPIR-V indexes a composite by a runtime
+	// value only through a pointer. Either way the element is a copy, so it
+	// is not assignable.
+	uint length = base.type.count;
+	if (expr.index.index.kind == INT_LITERAL)
+	{
+		double at = expr.index.index.literal.value;
+		if (at >= (double)length)
+		{
+			self.fail(expr.index.index.line, expr.index.index.column, string::format(self.allocator,
+				"index %d is past the end of a %s, which has %d", (uint)at, base.type.name, length));
+			return CODEGEN_ERROR~;
+		}
+		return (Value) { .type = element, .id = self.func.composite_extract(self.type_id(element), self.rvalue(base), (uint)at) };
+	}
+	Id copy = self.func.local(self.pointer_to(StorageClass.FUNCTION, base.type));
+	self.func.store(copy, self.rvalue(base));
+	Id ptr  = self.func.access_chain(self.pointer_to(StorageClass.FUNCTION, element), copy, (Id[]) { self.rvalue(index) });
+	return (Value) { .type = element, .id = self.func.load(self.type_id(element), ptr) };
 }
 
 fn Value? Codegen.unary_expression(&self, Expr* expr)
@@ -1186,7 +1211,7 @@ fn Value? Codegen.unary_expression(&self, Expr* expr)
 			// still of something that exists.
 			if (operand.pointer != NO_ID)
 			{
-				return (Value) { .type = operand.type, .pointer = operand.pointer, .storage = operand.storage };
+				return (Value) { .type = operand.type, .pointer = operand.pointer, .storage = operand.storage, .chained = operand.chained };
 			}
 			Id local = self.func.local(self.pointer_to(StorageClass.FUNCTION, operand.type));
 			self.func.store(local, id);
@@ -1628,7 +1653,11 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 			// scalar was written on.
 			return self.func.binop(Opcode.MATRIX_TIMES_SCALAR, self.type_id(rt), right_id, left_id);
 		}
-		if (lt.kind == VECTOR && rt.is_scalar())
+		// Floats only: `OpVectorTimesScalar` has no integer form, and an
+		// `int2 * 4` emitted with it is invalid SPIR-V that RADV runs as a zero.
+		// Anything else is a component-wise multiply of a splat, below, which
+		// is also where a scalar of the wrong kind is refused.
+		if (lt.kind == VECTOR && rt.kind == FLOAT && lt.scalar().kind == FLOAT && lt.scalar().width() == rt.width())
 		{
 			return self.func.binop(Opcode.VECTOR_TIMES_SCALAR, self.type_id(lt), left_id, right_id);
 		}
@@ -1662,6 +1691,25 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 		return self.matrix_columns(column_op, matrix, left_id, lt, right_id, rt);
 	}
 
+	// The two sides have to agree: only literals are converted implicitly
+	// (LANGUAGE.md 5.3), so a `uint` next to a `float` is refused here rather
+	// than carried into an instruction whose operands do not match its type.
+	// That mismatch is invalid SPIR-V, and a driver that is handed one may do
+	// anything - RADV crashes rather than reporting it. The width is part of
+	// the type: a half next to a float, or a byte next to a uint, is the same
+	// mismatch as a uint next to a float.
+	//
+	// Checked before the broadcast below, which makes the scalar side the
+	// vector's type: after it, a `uint` next to a `float2` would compare equal
+	// and be splatted into a float vector it is not.
+	if (lt.scalar().kind != rt.scalar().kind || lt.scalar().width() != rt.scalar().width())
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"cannot use a %s and a %s in one operation - convert one side explicitly",
+			lt.name, rt.name));
+		return CODEGEN_ERROR~;
+	}
+
 	// Broadcast a scalar against a vector for the component-wise operators.
 	if (lt.kind == VECTOR && rt.is_scalar())
 	{
@@ -1672,21 +1720,6 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 	{
 		left_id = self.splat(rt, left_id);
 		lt      = rt;
-	}
-
-	// The two sides have to agree: only literals are converted implicitly
-	// (LANGUAGE.md 5.3), so a `uint` next to a `float` is refused here rather
-	// than carried into an instruction whose operands do not match its type.
-	// That mismatch is invalid SPIR-V, and a driver that is handed one may do
-	// anything - RADV crashes rather than reporting it. The width is part of
-	// the type: a half next to a float, or a byte next to a uint, is the same
-	// mismatch as a uint next to a float.
-	if (lt.scalar().kind != rt.scalar().kind || lt.scalar().width() != rt.scalar().width())
-	{
-		self.fail(expr.line, expr.column, string::format(self.allocator,
-			"cannot use a %s and a %s in one operation - convert one side explicitly",
-			lt.name, rt.name));
-		return CODEGEN_ERROR~;
 	}
 
 	bool is_float  = lt.scalar().kind == FLOAT;
@@ -2526,10 +2559,16 @@ fn bool passes_by_reference(StorageClass storage) @private
 <*
  The Function pointer a by-reference argument is passed as: the variable's own,
  or a copy that `writebacks` returns to it after the call.
+
+ A copy too for a member or an element of a Function variable. Its pointer is
+ an access chain, and under the logical addressing model a call's pointer
+ argument must be a memory object declaration - a variable or a parameter -
+ or `spirv-val` refuses the module. A method called on a struct's member -
+ `maps.base.Sample(uv)` - was that call.
 *>
 fn Id Codegen.pass_by_reference(&self, Value value, WritebackList* writebacks)
 {
-	if (value.storage == StorageClass.FUNCTION) return value.pointer;
+	if (value.storage == StorageClass.FUNCTION && !value.chained) return value.pointer;
 
 	Id temporary = self.func.local(self.pointer_to(StorageClass.FUNCTION, value.type));
 	self.func.store(temporary, self.rvalue(value));

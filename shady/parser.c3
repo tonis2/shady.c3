@@ -1074,11 +1074,14 @@ fn Decl*? Parser.declaration(&self)
 			self.advance();
 			TypeRef type = self.type_ref()!;
 			Token   name = self.expect(IDENT, "expected a name for the constant")!;
+			// `const float WEIGHTS[4] = { ... };`: a table, written the way a
+			// local array is.
+			self.declarator_array(&type)!;
 			decl.kind       = DeclKind.CONSTANT;
 			decl.name       = name.text;
 			decl.attributes = self.attributes()!;
 			self.expect(EQ, "a constant needs an initialiser")!;
-			Expr* value = self.expression()!;
+			Expr* value = self.check(LBRACE) ? self.initializer()! : self.expression()!;
 			self.expect(SEMICOLON, "expected `;` after the constant")!;
 			decl.constant = { .type = type, .value = value };
 			return decl;
