@@ -1,0 +1,105 @@
+// The ray-tracing pipeline, every stage of it: a ray-generation shader that
+// traces from a helper and calls a callable shader, two miss shaders with
+// different payloads, a closest-hit shader that traces a shadow ray and
+// recurses through an inout helper, an any-hit shader that ignores a hit from a
+// helper and terminates the ray, and an intersection shader for a sphere.
+
+struct Camera @uniform { float4x4 inverse_view; float3 origin; float3 sun; }
+Camera camera;
+accel scene;
+float4 pixels[];
+Sampler2D leaves;
+
+struct Payload { float3 color; uint depth; }
+struct Shadow { bool lit; }
+struct Material { float3 albedo; float roughness; }
+struct Sphere { float3 normal; }
+struct Barycentrics { float2 uv; }
+
+struct LaunchIn { uint3 id @builtin(launch_id); uint3 size @builtin(launch_size); }
+struct RayIn { float3 direction @builtin(world_ray_direction); float3 origin @builtin(world_ray_origin); float t @builtin(ray_tmax); }
+struct HitIn { uint kind @builtin(hit_kind); uint primitive @builtin(primitive_id); float4x3 to_world @builtin(object_to_world); }
+
+fn void shoot(float3 origin, float3 direction, inout Payload p)
+{
+    trace_ray(scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, origin, 0.001, direction, 1000.0, p);
+}
+
+fn void Payload.tint(&self, float3 by)
+{
+    self.color = self.color * by;
+}
+
+fn void gen(LaunchIn at) @raygen
+{
+    float2 uv = float2(at.id.xy) / float2(at.size.xy);
+    float3 direction = normalize(float3(uv * 2.0 - 1.0, 1.0));
+    Payload p;
+    p.color = float3(0.0);
+    p.depth = 0u;
+    shoot(camera.origin, direction, p);
+
+    Material m;
+    m.albedo = p.color;
+    m.roughness = 0.5;
+    execute_callable(0u, m);
+
+    pixels[at.id.y * at.size.x + at.id.x] = float4(m.albedo, 1.0);
+}
+
+fn void sky(inout Payload p, RayIn ray) @miss
+{
+    p.color = mix(float3(1.0), float3(0.5, 0.7, 1.0), ray.direction.y * 0.5 + 0.5);
+}
+
+fn void sky_shadow(inout Shadow s) @miss
+{
+    s.lit = true;
+}
+
+fn void hit(inout Payload p, Barycentrics bary, RayIn ray, HitIn h) @closest_hit
+{
+    float3 position = ray.origin + ray.direction * ray.t;
+    Shadow s;
+    s.lit = false;
+    trace_ray(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 1, 1,
+              position, 0.001, camera.sun, 1000.0, s);
+    float3 albedo = float3(bary.uv, 1.0 - bary.uv.x - bary.uv.y) + h.to_world[3];
+    p.color = s.lit ? albedo : albedo * 0.2;
+    p.tint(float3(float(h.primitive % 2u) * 0.5 + 0.5));
+    if (p.depth < 2u)
+    {
+        p.depth += 1u;
+        shoot(position, reflect(ray.direction, float3(0.0, 1.0, 0.0)), p);
+    }
+}
+
+fn void reject(Barycentrics bary)
+{
+    if (leaves.sample_lod(bary.uv, 0.0).a < 0.5) ignore_intersection();
+}
+
+fn void alpha(inout Payload p, Barycentrics bary, HitIn h) @any_hit
+{
+    reject(bary);
+    if (h.kind == HIT_KIND_TRIANGLE_BACK_FACE) terminate_ray();
+}
+
+struct ObjectRay { float3 origin @builtin(object_ray_origin); float3 direction @builtin(object_ray_direction); float tmin @builtin(ray_tmin); }
+
+fn void sphere(ObjectRay ray) @intersection
+{
+    float b = dot(ray.origin, ray.direction);
+    float c = dot(ray.origin, ray.origin) - 1.0;
+    float d = b * b - c;
+    if (d < 0.0) return;
+    Sphere hit;
+    float t = -b - sqrt(d);
+    hit.normal = normalize(ray.origin + ray.direction * t);
+    report_intersection(t, 0u, hit);
+}
+
+fn void shade(inout Material m, LaunchIn at) @callable
+{
+    m.albedo = m.albedo * (1.0 - m.roughness * 0.5);
+}

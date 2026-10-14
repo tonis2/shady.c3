@@ -110,18 +110,33 @@ with `MatrixStride 16`.
 ### 2.3 Opaque types
 ```
 texture1d texture2d texture3d texturecube texture2d_array texturecube_array
-sampler
+sampler sampler_cmp
 
-Sampler2D Sampler2DShadow
+Sampler2D Sampler3D SamplerCube Sampler2DArray SamplerCubeArray
+Sampler2DShadow SamplerCubeShadow Sampler2DArrayShadow
+
+accel RayQuery
 ```
 `texture2d` plus `sampler` are the separate objects, paired only at the point of
-use. `Sampler2D` is one combined image-and-sampler descriptor, and
-`Sampler2DShadow` is the depth-comparison form of it.
+use. `sampler_cmp` is the separate path's comparison sampler: the same SPIR-V
+sampler, but the one the comparison methods take and the only one they take
+(§8). `Sampler2D` and the rest are combined image-and-sampler descriptors, and
+the `Shadow` types are their depth-comparison forms.
+
+An `_array` or `Array` type is layered: a coordinate into one carries the layer
+as its last component. A cube array needs the `imageCubeArray` device feature.
+
+`accel` is a ray-tracing acceleration structure - the scene a ray is traced
+against - and `RaytracingAccelerationStructure`, HLSL's name for it, is the same
+type. `RayQuery` is an inline ray query's traversal state. Both are §11's.
 
 An opaque type may be an array: `Sampler2D three_textures[]` is a runtime-sized
-descriptor array, `Sampler2D four[4]` a fixed one. Either way an opaque type may
-only appear as a module-level resource - never as a struct member, local,
-parameter or return type.
+descriptor array, `Sampler2D four[4]` a fixed one. Either way a descriptor - a
+texture, a sampler or an `accel` - may only appear as a module-level resource:
+never as a struct member, local, parameter, return type, `?:` arm or assignment
+target, all of which are refused. Vulkan cannot store one into memory, so each of
+those was a module it refuses anyway. A `RayQuery` is the opposite: a local, or
+an `inout` parameter, and nothing else (§11.2).
 
 ### 2.4 Structs
 ```
@@ -140,16 +155,20 @@ uniform types.
 ```
 Vertex* vertices;
 ```
-A device address (§10). The pointee must be a `buffer`. There is no `&`, no
-pointer arithmetic beyond `p[i]`, and no pointer-to-pointer.
+A device address (§10). The pointee must be a `buffer`. There is no pointer
+arithmetic beyond `p[i]` and no pointer-to-pointer. `&x` exists, but it is the
+address a cooperative matrix is loaded through (§3.4.2), not a device address,
+and an opaque type or a `RayQuery` has no address.
 
 ### 2.6 Arrays
 ```
 float4[16] palette;
 float4 palette[16];   // the declarator form, as in C
 ```
-The length may sit on the type or after the name. Arrays may be locals or
-struct members, are indexed by a runtime value, and take an initialiser list:
+The length may sit on the type or after the name, but not both: an array has
+one dimension, and a second (`float[4] a[3]`, `float a[3][4]`) is refused - index
+one array as `row * width + column` instead. Arrays may be locals or struct
+members, are indexed by a runtime value, and take an initialiser list:
 `float2 taps[2] = { float2(0, 0), float2(1, 1) };`.
 
 `T[]` - no length - is a runtime-sized array, and it is only legal as the last
@@ -363,9 +382,9 @@ A module-level variable is written `Type name;`. What kind of resource it is
 comes entirely from the type — there are no `uniform`, `buffer` or
 `push_constant` keywords.
 
-Only some types may be bound: an opaque type (`texture2d`, `sampler`,
-`Sampler2D`, `Sampler2DShadow`) or an array of one - a descriptor array, `[]`
-for a runtime-sized one - a
+Only some types may be bound: a descriptor (any texture, sampler, combined
+sampler or `accel` of §2.3) or an array of one - a descriptor array, `[]` for a
+runtime-sized one - a
 `@uniform` struct, a `@storage` struct, or a `@pushconstant` struct. A plain
 struct has no layout and an `@address` struct is reached through a pointer, so
 neither can be a variable. A bare `T[]` is the short spelling of a `@storage`
@@ -405,8 +424,10 @@ barrier;        // every invocation has reached this point
 barrier();      // the same
 ```
 
-`barrier` synchronises the workgroup and orders workgroup-memory writes before
-it against reads after it. Every invocation of the workgroup has to reach it -
+`barrier` synchronises the workgroup and orders the writes before it against
+the reads after it, for shared memory and storage buffers both: its semantics
+are `AcquireRelease | WorkgroupMemory | UniformMemory`. Every invocation of the
+workgroup has to reach it -
 a barrier inside a branch half the workgroup takes leaves the other half
 waiting, and a driver that notices reports a hang rather than a wrong number.
 
@@ -414,6 +435,10 @@ It is what makes shared memory usable, so the two travel together: write,
 `barrier`, read. A loop that reduces through shared memory needs one barrier
 per step, not one per loop, because the next step's read has to see the
 previous step's write.
+
+In a Vulkan-memory-model module - one with a cooperative matrix in it (§3.4.2) -
+the barrier does not yet add `MakeAvailable | MakeVisible`, which that model
+wants for the writes to be seen.
 
 ### 3.4.2 Cooperative matrices
 
@@ -585,7 +610,8 @@ spliced module.
 | `@fragment(name)` | function | …published under `name` |
 | `@compute` | function | Compute entry point |
 | `@compute(name)` | function | …published under `name` |
-| `@threads(x, y, z)` | `@compute` function | Workgroup size, required on compute |
+| `@raygen` `@closest_hit` `@any_hit` `@miss` `@intersection` `@callable` | function | Ray-tracing pipeline entry points (§11.3), each with an optional name like the rest |
+| `@threads(x, y, z)` | `@compute` function | Workgroup size, required on compute and refused elsewhere |
 | `@subgroup_size(n)` | `@compute` function | The subgroup size the kernel is written for (below) |
 | `@uniform` | struct | A uniform buffer: std140, takes a binding |
 | `@storage` | struct | A storage buffer: std430, takes a binding, ends in a runtime-sized array |
@@ -608,7 +634,8 @@ it as an `OpModuleProcessed` line reading `shady.subgroup_size n` and the host
 asks the pipeline for it. `n` is a power of two from 4 to 128.
 
 A struct carries at most one of `@uniform`, `@storage`, `@pushconstant` and
-`@address`; two is an error. Attributes sit between a struct's name and its body, and
+`@address`; two is an error. A function carries at most one stage attribute: one
+function is one entry point. Attributes sit between a struct's name and its body, and
 after a function's signature, as in C3.
 
 Unknown attributes are an error, not a warning — a typo'd `@framgent` that
@@ -659,8 +686,9 @@ v.x  v.xy  v.xyz  v.xyzw      position set
 v.r  v.rg  v.rgb  v.rgba      colour set
 ```
 Sets may not be mixed (`v.xg` is an error). A swizzle of length 1 yields a
-scalar. Repeats are allowed on reads (`v.xxy`); a swizzle used as an assignment
-target must not repeat (`v.xx = ...` is an error).
+scalar. Repeats are allowed on reads (`v.xxy`). Only a single component can be
+assigned (`v.x = 1.0`); a wider swizzle as an assignment target (`v.xy = ...`)
+is refused - assign the components one at a time, or rebuild the vector.
 
 ### 5.3 Constructors and conversion
 ```
@@ -689,6 +717,19 @@ explicit `float(x)`.
 `OpMatrixTimesMatrix` — column-vector convention, so `projection * view * p`
 applies `view` first.
 
+`+`, `-` and `/` on a matrix are component-wise, against a matrix of the same
+type or a float (`m / 2.0`, `1.0 - m`), and unary `-m` negates every component.
+SPIR-V has none of these for matrices, so they are emitted a column at a time.
+Any other operator on a matrix - `%`, a comparison, a bitwise operator - is
+refused.
+
+### 5.5 Remainder
+
+`%` is C3's remainder: the result takes the sign of the left side, so
+`-7 % 3 == -1` and `-7.5 % 2.0 == -1.5` (`OpSRem`, `OpFRem`). GLSL's floored
+modulo, whose result takes the sign of the right side, is the builtin `mod`:
+`mod(-7.5, 2.0) == 0.5` (§8). For a `uint` the two agree.
+
 ## 6. Entry points
 
 Every function carrying a stage attribute becomes an `OpEntryPoint`, and all of
@@ -709,6 +750,18 @@ fn float4 shade_solid(FragmentIn input) @fragment { ... }
 
 That compiles to four entry points named `main`, `stage_in_shadow`, `opaque`
 and `shade_solid` — one `VkShaderModule`, four things a pipeline can select.
+
+The stages are vertex, fragment and compute (§6.2 on) and the six of the
+ray-tracing pipeline (§11.3). An entry point's parameters are its inputs - a
+raster or compute stage cannot write them back, so `out` and `inout` are refused
+there - and a void one's `return` takes no value.
+
+Each `OpEntryPoint` lists its interface: the stage's inputs and outputs, and -
+in a SPIR-V 1.4 module, which is what a ray-tracing feature makes one (§11.4) -
+every global variable its call tree uses. A helper is emitted once and counted
+for every entry point that reaches it, and so is anything a helper does that only
+some stages may: `sample()` in a helper called from a vertex shader is refused at
+the call to `sample()`, naming the vertex entry point.
 
 ### 6.1 Naming
 
@@ -745,8 +798,15 @@ Exactly one member of a vertex output struct must be `@position`.
 fn float4 frag(FragmentIn input) @fragment
 ```
 The parameter struct's members become stage inputs. Their locations must line
-up with the vertex stage's outputs; since both stages are in one module this is
-checked at compile time.
+up with the vertex stage's outputs. Locations are assigned in member order and
+are not cross-checked between the stages, so the simplest way to keep them in
+step is the one struct shared by both - the vertex stage returns it and the
+fragment stage takes it.
+
+An integer member of that struct is `Flat` on both sides without being asked
+(`@flat` says the same thing). Flat is only for the two ends of a varying: an
+integer vertex input or fragment output - an integer render target - is not
+interpolated, and carries no decoration.
 
 Returning `float4` writes location 0. Returning a struct writes one output per
 member. `OriginUpperLeft` is always emitted.
@@ -772,9 +832,24 @@ Read via `@builtin(name)` on an input struct member:
 | `vertex_index` | `uint` | vertex |
 | `instance_index` | `uint` | vertex |
 | `frag_coord` | `float4` | fragment |
+| `front_facing` | `bool` | fragment |
 | `global_invocation_id` | `uint3` | compute |
 | `local_invocation_id` | `uint3` | compute |
 | `workgroup_id` | `uint3` | compute |
+| `launch_id`, `launch_size` | `uint3` | every ray-tracing stage |
+| `world_ray_origin`, `world_ray_direction` | `float3` | intersection, any-hit, closest-hit, miss |
+| `ray_tmin`, `ray_tmax` | `float` | intersection, any-hit, closest-hit, miss |
+| `incoming_ray_flags` | `uint` | intersection, any-hit, closest-hit, miss |
+| `object_ray_origin`, `object_ray_direction` | `float3` | intersection, any-hit, closest-hit |
+| `instance_custom_index`, `instance_id`, `primitive_id`, `geometry_index` | `uint` | intersection, any-hit, closest-hit |
+| `object_to_world`, `world_to_object` | `float4x3` | intersection, any-hit, closest-hit |
+| `hit_kind` | `uint` | any-hit, closest-hit |
+
+Each is checked where the entry point is: a built-in in a stage that does not
+have it, of a type Vulkan does not hand it as, or in a returned struct - every
+one of these is an input - is refused. An integer built-in may be `int` or `uint`
+(`int3` or `uint3`); Vulkan leaves the signedness to the shader. In a hit shader
+`ray_tmax` is the distance to the hit being reported.
 
 ## 7. Block layout
 
@@ -788,7 +863,7 @@ Two layouts are used by default, and which one applies depends on the block:
 
 Both share the same base rules:
 
-- `float`, `int`, `uint`, `bool` — 4 bytes, aligned 4
+- `float`, `int`, `uint` — 4 bytes, aligned 4
 - `float2` — 8 bytes, aligned 8
 - `float3` — 12 bytes, aligned 16
 - `float4` — 16 bytes, aligned 16
@@ -804,6 +879,11 @@ std140 then adds two roundings that std430 does not:
 
 So a `float2x2` is 16 bytes in std430 and 32 in std140, and a struct of three
 floats aligns to 4 in std430 and 16 in std140.
+
+A `bool` has no layout at all: Vulkan forbids one in a uniform, storage,
+push-constant or device-address block, so a block that holds one - directly or
+in a nested struct - is refused where it is declared. Store a `uint` and
+compare it with `0u`.
 
 A struct nested inside a block is laid out by that block, and its members carry
 `Offset` (and `MatrixStride`) decorations just as the block's own do. Because a
@@ -839,15 +919,25 @@ through.
 
 Mapped to GLSL.std.450 unless noted.
 
-**Math**: `abs` `sign` `floor` `ceil` `round` `fract` `mod` `min` `max` `clamp`
-`saturate` `mix` `lerp` `step` `smoothstep` `sqrt` `rsqrt` `inversesqrt` `pow`
-`exp` `exp2` `log` `log2` `sin` `cos` `tan` `asin` `acos` `atan` `atan2`
+**Math**: `abs` `sign` `floor` `ceil` `round` `fract` `frac` `mod` `fmod` `min`
+`max` `clamp` `saturate` `mix` `lerp` `step` `smoothstep` `sqrt` `rsqrt`
+`inversesqrt` `pow` `exp` `exp2` `log` `log2` `sin` `cos` `tan` `asin` `acos`
+`atan` `atan2`
+
+`min`, `max`, `clamp`, `abs` and `sign` pick the float, signed or unsigned form
+from their operands. A `uint` has no GLSL `abs` or `sign`: `abs(u)` is `u`, and
+`sign(u)` is `min(u, 1u)`. `mod(x, y)` is GLSL's floored modulo and `fmod(x, y)`
+HLSL's truncated one, which is `%` (§5.5); either splats a scalar against a
+vector.
 
 **Geometry**: `length` `distance` `dot` `cross` `normalize` `reflect` `refract`
 `faceforward`
 
-**Matrix**: `transpose` `inverse` `determinant`, and `mul(a, b)` for a matrix
-product spelled the HLSL way.
+`dot` returns the operands' own scalar type. On int or uint vectors it is the
+multiply and the sum written out, since `OpDot` is a float instruction.
+
+**Matrix**: `transpose`, `inverse` and `determinant` (square matrices only), and
+`mul(a, b)` for a matrix product spelled the HLSL way.
 
 **Conversion and selection**: `asuint` `asint` `asfloat` (bit-preserving, same
 shape), `ashalf(bits)` (the half whose bits are the low 16 of a 32-bit int or
@@ -866,27 +956,70 @@ synchronisation, described in §3.4.1.
 
 **Texture** (method syntax on the texture):
 
-A separate `texture2d` and `sampler` are paired at the point of use, and have
-two methods:
-```
-tex.sample(tex_sampler, uv)          // OpImageSampleImplicitLod, fragment only
-tex.sample_lod(tex_sampler, uv, lod) // OpImageSampleExplicitLod
-```
-A combined `Sampler2D` samples directly and has the whole set; the Slang
-spellings are accepted alongside the lowercase ones:
-```
-tex.Sample(uv)                           // implicit LOD, fragment only
-tex.SampleLevel(uv, lod)
-tex.SampleGrad(uv, gx, gy)
-tex.SampleBias(uv, bias)                 // fragment only
-shadow.SampleCmpLevelZero(uv, reference) // Sampler2DShadow, yields a float
-```
-An index into a runtime-sized descriptor array that is not uniform across the
-invocations of a wave goes through `NonUniformResourceIndex(index)`, which
-decorates the index so the driver does not hoist one descriptor for the whole
-wave.
+Every method has a lowercase name and the Slang/HLSL spelling. A combined type
+(`Sampler2D` and the rest) samples directly; a separate texture names its
+sampler first - `tex.sample(linear, uv)` - and is paired with it where it is
+sampled. `off` is an optional constant texel offset (below).
+
+| Lowercase | Slang | Arguments | Result | Notes |
+|---|---|---|---|---|
+| `sample` | `Sample` | `uv [, off]` | `float4` | fragment only |
+| `sample_bias` | `SampleBias` | `uv, bias [, off]` | `float4` | fragment only |
+| `sample_lod` | `SampleLevel` | `uv, lod [, off]` | `float4` | |
+| `sample_grad` | `SampleGrad` | `uv, dx, dy [, off]` | `float4` | |
+| `sample_cmp` | `SampleCmp` | `uv, ref [, off]` | `float` | compares; fragment only |
+| `sample_cmp_lod` | `SampleCmpLevel` | `uv, ref, lod [, off]` | `float` | compares |
+| `sample_cmp_level_zero` | `SampleCmpLevelZero` | `uv, ref [, off]` | `float` | compares |
+| `gather` | `Gather`, `GatherRed/Green/Blue/Alpha` | `uv, component [, off]`; Slang: `uv [, off]` | `float4` | 2D and cube only |
+| `gather_cmp` | `GatherCmp` | `uv, ref [, off]` | `float4` | compares; 2D and cube only |
+| `load` | `Load` | `address, level [, off]`; Slang packs the level last | `float4` | no sampler; not a cube |
+| `size` | — | `[level]` | `int`, `int2` or `int3` | the extent, plus the layer count |
+| `levels` | — | none | `int` | the mip count |
+
+The *fragment only* methods take their level from screen-space derivatives,
+which only a fragment shader has; anywhere else they are refused in favour of
+the explicit-level form. `GetDimensions` is refused, pointing at `size` and
+`levels`.
+
+**Comparison.** The methods that compare need a sampler made with a compare op:
+a `Shadow` type, or a `sampler_cmp` on the separate path. The others need one
+made without, so `shadow.Sample(uv)` and `tex.sample_cmp(linear, ...)` are both
+refused. The reference is its own `float` argument, never packed into the
+coordinate, and a 3D texture has no comparison.
+
+**Coordinates.** A sampling coordinate is a float vector as wide as the
+texture, plus the layer for a layered one:
+
+| Texture | Coordinate | Gradient, offset | `load` address | `size()` |
+|---|---|---|---|---|
+| 1D | `float` | `float`, `int` | `int` | `int` |
+| 2D | `float2` | `float2`, `int2` | `int2` | `int2` |
+| 2D array | `float3` | `float2`, `int2` | `int3` | `int3` |
+| 3D | `float3` | `float3`, `int3` | `int3` | `int3` |
+| Cube | `float3` | `float3`, none | refused | `int2` |
+| Cube array | `float4` | `float3`, none | refused | `int3` |
+
+Exactly that wide: a coordinate one component short or long is refused, since
+it is almost always a forgotten or a stray layer. A `load` address may be `int`
+or `uint`, and its level is an integer.
+
+**Texel offsets** are constants: an `int2(1, -1)` of integer literals (an
+`int3` for a 3D texture, a bare literal for 1D). A cube takes none. An offset
+outside [-8, 7], the range every device supports, compiles with a warning.
+
+**Non-uniform indexing.** An index into a descriptor array that is not uniform
+across the invocations of a wave goes through `NonUniformResourceIndex(index)`,
+written inside the brackets - `maps[NonUniformResourceIndex(i)]`. The decoration
+then follows the descriptor to the image instruction (the access chain, the
+load, the sampled image), which is where the driver reads it; an index stored
+in a local first loses the mark. The host enables
+`shaderSampledImageArrayNonUniformIndexing`.
 
 **Derivatives** (fragment only): `ddx` `ddy` `fwidth`
+
+**Ray tracing**: the `RayQuery` methods, the `RAY_FLAG_*` and intersection-type
+constants, and `trace_ray`, `execute_callable`, `report_intersection`,
+`ignore_intersection` and `terminate_ray` are in §11.
 
 ## 9. Statements
 
@@ -899,12 +1032,24 @@ for (int i = 0; i < 4; i++) { ... }
 break; continue;
 return c;
 discard;                     // fragment only, OpKill
+ignore_intersection();       // any-hit only, §11.3
+terminate_ray();             // any-hit only, §11.3
 ```
 
-Blocks introduce a scope. Shadowing an outer local is an error.
+`discard` and the two any-hit calls end the invocation where they stand, so they
+are statements: `ignore_intersection()` inside an expression is refused. Each is
+refused in a stage that does not have it, in a helper too - `discard` in an
+any-hit shader points at `ignore_intersection()`.
+
+Blocks introduce a scope, and a declaration in an inner scope shadows an outer
+local or a parameter of the same name until the scope ends. A redeclaration in
+the *same* scope is not refused yet; the later declaration is the one names
+resolve to.
 
 `for` and `while` lower to structured control flow with `OpLoopMerge`; `if`
-lowers with `OpSelectionMerge`.
+lowers with `OpSelectionMerge`. An `if` whose branches both `return` ends the
+function as far as the "every path returns" rule is concerned, and so does a
+`while (true)` or `for (;;)` with no `break`.
 
 ## 10. Buffer device addresses
 
@@ -953,8 +1098,9 @@ fn FragmentIn vert(VertexIn input) @vertex
 matrix - a mesh's streams are flat arrays of `float3`, `uint4` and `float4x4`,
 not arrays of structs. Any other pointee is an error.
 
-The pointer grammar is exactly one trailing `*`. There is no `&`, no pointer
-arithmetic beyond indexing, and no pointer-to-pointer.
+The pointer grammar is exactly one trailing `*`. There is no pointer arithmetic
+beyond indexing and no pointer-to-pointer, and `&x` never makes a device
+address - it is only the address of a cooperative-matrix tile (§3.4.2).
 
 Pointers may appear as:
 
@@ -1026,8 +1172,10 @@ Declaring an `@address` struct changes the module header, not just its body:
 
 - `OpCapability PhysicalStorageBufferAddresses` and `OpCapability Int64`
 - `OpExtension "SPV_KHR_physical_storage_buffer"`
-- `OpMemoryModel PhysicalStorageBuffer64 GLSL450` instead of `Logical`
-- SPIR-V **1.3** instead of 1.0
+- `OpMemoryModel PhysicalStorageBuffer64 GLSL450` instead of `Logical`, keeping
+  the `Vulkan` memory model a cooperative matrix chose
+- SPIR-V **1.3** instead of 1.0 - or 1.4, if a ray-tracing feature already asked
+  for it; a module's version is the highest any feature in it needs
 
 `p[i]` lowers to explicit 64-bit arithmetic - `OpConvertPtrToU`, `OpIMul` by
 the stride, `OpIAdd`, `OpConvertUToPtr` - rather than to `OpPtrAccessChain`.
@@ -1053,3 +1201,310 @@ a driver honouring it.
 
 `src/main.c3` in this project does all four: it pulls every vertex of its cube
 through a device address, with no vertex input bindings or attributes at all.
+
+## 11. Ray tracing
+
+Rays are traced two ways, and a module may use both:
+
+- **Ray queries** (§11.2) are traced inline, by the shader that wants the
+  answer, from any stage. A fragment shader asking whether the sun is visible
+  from the point it is shading is a ray query - this is how a rasterizer gets
+  ray-traced shadows, ambient occlusion or a reflection probe's visibility.
+- **The ray-tracing pipeline** (§11.3) is a set of stages the hardware chains
+  together: a ray-generation shader traces a ray, intersection and any-hit
+  shaders test the geometry it meets, and a closest-hit or miss shader finishes
+  it. This is what a path tracer, or ray-traced reflections and global
+  illumination, are built from.
+
+### 11.1 The scene
+
+```
+accel scene;                                    // set 0, binding 0
+accel scenes[];                                 // a table of them
+RaytracingAccelerationStructure world @set(1) @binding(0);
+```
+
+An `accel` is the top-level acceleration structure the host built, bound like a
+texture (§3.3): a descriptor with a set and a binding, possibly in an array, and
+indexed through `NonUniformResourceIndex` when the index varies across a wave.
+`RaytracingAccelerationStructure` is HLSL's name for the same type.
+
+### 11.2 Ray queries
+
+```
+struct Uniforms @uniform { float4x4 view_projection; float3 sun; }
+Uniforms uniforms;
+accel    scene;
+Sampler2D foliage;
+
+struct VertexIn   { float3 position; float3 normal; }
+struct FragmentIn { float4 position @position; float3 world; float3 normal; }
+
+fn float sun_visibility(float3 position, float3 normal)
+{
+    RayQuery q;
+    q.init(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF,
+           position + normal * 0.01, 0.0, uniforms.sun, 10000.0);
+    while (q.proceed())
+    {
+        // A non-opaque triangle - a leaf - blocks the sun only where its
+        // texture does.
+        if (q.candidate_type() == CANDIDATE_NON_OPAQUE_TRIANGLE
+            && foliage.sample_lod(q.candidate_barycentrics(), 0.0).a > 0.5)
+        {
+            q.confirm();
+        }
+    }
+    return q.committed_type() == COMMITTED_NOTHING ? 1.0 : 0.0;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    FragmentIn output;
+    output.position = uniforms.view_projection * float4(input.position, 1.0);
+    output.world = input.position;
+    output.normal = input.normal;
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    float lit = max(dot(input.normal, uniforms.sun), 0.0) * sun_visibility(input.world, input.normal);
+    return float4(float3(0.1) + float3(lit), 1.0);
+}
+```
+
+A `RayQuery` is the traversal of one ray, driven by the shader: `init` aims it,
+`proceed` steps it until it returns `false`, and the getters read what it found.
+Opaque triangles commit themselves; a non-opaque one, or a procedural AABB, is a
+*candidate* the loop decides about - `confirm()` accepts the triangle being
+visited, `generate(t)` a hit inside the AABB. Above, the barycentrics stand in
+for the texture coordinate a real alpha test would interpolate from the mesh.
+
+A `RayQuery` is declared as a local, without an initialiser, and handed to a
+helper as `inout RayQuery q`. It is traversal state rather than a value, so it is
+not assigned, copied, returned, stored in a struct or an array, chosen with `?:`,
+or declared at module level or `shared`. It may be used in every stage.
+
+| Method | Result | |
+|---|---|---|
+| `init(scene, flags, cull_mask, origin, tmin, direction, tmax)` | — | aims the query; `flags` and `cull_mask` are `uint`, the ray `float3`s and `float`s |
+| `proceed()` | `bool` | steps the traversal; `false` once it is done |
+| `confirm()` | — | accepts the triangle candidate |
+| `generate(t)` | — | accepts a hit at `t` in the AABB candidate |
+| `terminate()` | — | ends the traversal |
+| `ray_flags()` | `uint` | |
+| `ray_tmin()` | `float` | |
+| `world_ray_origin()`, `world_ray_direction()` | `float3` | |
+| `candidate_aabb_opaque()` | `bool` | whether the AABB candidate is opaque |
+
+The getters below come in two spellings, `candidate_` for the intersection being
+visited and `committed_` for the closest one accepted so far -
+`q.candidate_t()`, `q.committed_t()`:
+
+| Getter | Result |
+|---|---|
+| `type` | `uint`: `COMMITTED_*` or `CANDIDATE_*`, below |
+| `t` | `float`, the distance along the ray |
+| `barycentrics` | `float2` |
+| `front_face` | `bool` |
+| `instance_custom_index`, `instance_id`, `sbt_offset`, `geometry_index`, `primitive_index` | `uint` |
+| `object_ray_origin`, `object_ray_direction` | `float3` |
+| `object_to_world`, `world_to_object` | `float4x3`, the instance's transform |
+
+A candidate's `t`, `barycentrics` and `front_face` are a triangle's; asked of an
+AABB candidate their value is undefined, as `confirm` on an AABB and `generate`
+on a triangle are.
+
+**Constants.** The flags and the intersection types use HLSL's names, as `uint`
+constants. A shader's own declaration of one of these names wins.
+
+| Constant | Value |
+|---|---|
+| `RAY_FLAG_NONE` | 0 |
+| `RAY_FLAG_FORCE_OPAQUE` | 0x1 |
+| `RAY_FLAG_FORCE_NON_OPAQUE` | 0x2 |
+| `RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH` | 0x4 |
+| `RAY_FLAG_SKIP_CLOSEST_HIT_SHADER` | 0x8 |
+| `RAY_FLAG_CULL_BACK_FACING_TRIANGLES` | 0x10 |
+| `RAY_FLAG_CULL_FRONT_FACING_TRIANGLES` | 0x20 |
+| `RAY_FLAG_CULL_OPAQUE` | 0x40 |
+| `RAY_FLAG_CULL_NON_OPAQUE` | 0x80 |
+| `RAY_FLAG_SKIP_TRIANGLES` | 0x100 |
+| `RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES` | 0x200 |
+| `COMMITTED_NOTHING`, `COMMITTED_TRIANGLE_HIT`, `COMMITTED_PROCEDURAL_PRIMITIVE_HIT` | 0, 1, 2 |
+| `CANDIDATE_NON_OPAQUE_TRIANGLE`, `CANDIDATE_PROCEDURAL_PRIMITIVE` | 0, 1 |
+| `HIT_KIND_TRIANGLE_FRONT_FACE`, `HIT_KIND_TRIANGLE_BACK_FACE` | 0xFE, 0xFF |
+
+The two `SKIP_` flags are a device feature of their own (§11.5).
+
+### 11.3 Pipeline stages
+
+```
+struct Camera @uniform { float4x4 inverse_view_projection; float3 position; float3 sun; }
+Camera camera;
+accel  scene;
+float4 image[];
+
+struct Payload { float3 color; }
+struct Shadow  { bool lit; }
+
+struct LaunchIn { uint3 id @builtin(launch_id); uint3 size @builtin(launch_size); }
+struct RayIn    { float3 origin @builtin(world_ray_origin); float3 direction @builtin(world_ray_direction); float t @builtin(ray_tmax); }
+struct Triangle { float2 barycentrics; }
+
+fn void generate(LaunchIn at) @raygen
+{
+    float2 ndc = (float2(at.id.xy) + 0.5) / float2(at.size.xy) * 2.0 - 1.0;
+    float4 target = camera.inverse_view_projection * float4(ndc, 1.0, 1.0);
+
+    Payload p;
+    p.color = float3(0.0);
+    trace_ray(scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0,
+              camera.position, 0.001, normalize(target.xyz / target.w - camera.position), 10000.0, p);
+    image[at.id.y * at.size.x + at.id.x] = float4(p.color, 1.0);
+}
+
+fn void sky(inout Payload p, RayIn ray) @miss
+{
+    p.color = mix(float3(1.0), float3(0.4, 0.6, 1.0), ray.direction.y * 0.5 + 0.5);
+}
+
+fn void sky_shadow(inout Shadow s) @miss
+{
+    s.lit = true;
+}
+
+fn void surface(inout Payload p, Triangle hit, RayIn ray) @closest_hit
+{
+    float3 position = ray.origin + ray.direction * ray.t;
+    Shadow s;
+    s.lit = false;
+    // Miss shader 1 is `sky_shadow`; no closest-hit shader runs for a shadow ray.
+    trace_ray(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, 0xFF, 0, 1, 1,
+              position, 0.001, camera.sun, 10000.0, s);
+    float3 albedo = float3(hit.barycentrics, 1.0 - hit.barycentrics.x - hit.barycentrics.y);
+    p.color = s.lit ? albedo : albedo * 0.2;
+}
+```
+
+| Attribute | Stage | Its `inout` parameter | May call |
+|---|---|---|---|
+| `@raygen` | ray generation | none | `trace_ray`, `execute_callable` |
+| `@miss` | miss | the payload | `trace_ray`, `execute_callable` |
+| `@closest_hit` | closest hit | the payload | `trace_ray`, `execute_callable` |
+| `@any_hit` | any hit | the payload | `ignore_intersection`, `terminate_ray` |
+| `@intersection` | intersection | none | `report_intersection` |
+| `@callable` | callable | the callable data | `execute_callable` |
+
+A ray-tracing entry point returns `void`, has no execution modes - `@threads` is
+refused on one - and no varyings. Its parameters are told apart by their shape:
+
+- an **`inout` struct** is the payload the ray carries, or in a callable shader
+  the data its caller passed. It is the caller's, reached in place: what the
+  shader writes is what the caller reads back. `out` is refused - the payload
+  arrives holding what it was traced with.
+- a **struct of `@builtin` members** is the stage's built-ins (§6.4).
+- a **struct with no built-ins** is the hit attributes, in a closest-hit or
+  any-hit shader: for a triangle the `float2` barycentrics of the hit, for a
+  procedural primitive whatever its intersection shader reported. The shader gets
+  a copy, since the attributes themselves are read-only there. Vulkan
+  guarantees 32 bytes of them; a larger struct compiles with a warning.
+
+Each kind is one parameter at most, and a payload, callable data or hit
+attributes are a plain struct rather than a block.
+
+**Calls.**
+
+- `trace_ray(scene, flags, cull_mask, sbt_offset, sbt_stride, miss_index,
+  origin, tmin, direction, tmax, payload)` sends a ray through the pipeline - the
+  operands of `traceRayEXT` and `OpTraceRayKHR`, in their order. The integer
+  operands are `uint`. `payload` is a struct variable - a local, or the shader's
+  own payload when a closest-hit shader traces again - and is copied into the
+  ray and back out once its hit or miss shader has run.
+- `execute_callable(index, data)` runs the callable shader at `index` in the
+  shader binding table, with `data` copied in and back out the same way.
+- `report_intersection(t, hit_kind[, attributes])` - an intersection shader
+  found a hit at `t`. `hit_kind` is a `uint` the hit shaders read back (a
+  procedural one is 0 to 127); `attributes` is the struct they take. The result
+  says whether the hit was accepted - an any-hit shader may still ignore it. An
+  intersection shader reports one attribute type, through helpers too.
+- `ignore_intersection()` drops the hit an any-hit shader is looking at, and
+  `terminate_ray()` accepts it and ends the ray's traversal. Both end the shader
+  where they stand, like `discard` (§9).
+
+Each call is refused outside the stages in the table, and a helper that makes one
+is refused in the entry points that cannot.
+
+A payload handed to a helper as `inout`, or used as a `&self` receiver, travels
+through a copy that is written back when the call returns, so the helper's writes
+reach the caller.
+
+The pipeline ties stages together on the host, not in the module: the miss
+index, the hit group a closest-hit, any-hit and intersection shader form, and
+the shader binding table are the host's. A hit group's shaders must agree on the
+payload and on the hit-attribute type; nothing in one module can check that.
+
+```
+accel scene;
+Sampler2D cutout;
+struct Payload { float3 color; }
+struct Triangle { float2 barycentrics; }
+struct Sphere { float3 normal; }
+struct ObjectRay { float3 origin @builtin(object_ray_origin); float3 direction @builtin(object_ray_direction); }
+
+fn void alpha_test(inout Payload p, Triangle hit) @any_hit
+{
+    if (cutout.sample_lod(hit.barycentrics, 0.0).a < 0.5) ignore_intersection();
+}
+
+fn void ball(ObjectRay ray) @intersection
+{
+    // A unit sphere at the instance's origin.
+    float b = dot(ray.origin, ray.direction);
+    float c = dot(ray.origin, ray.origin) - 1.0;
+    float d = b * b - c;
+    if (d < 0.0) return;
+    float t = -b - sqrt(d);
+    Sphere s;
+    s.normal = normalize(ray.origin + ray.direction * t);
+    report_intersection(t, 0u, s);
+}
+
+struct Material { float3 albedo; float roughness; }
+fn void rough(inout Material m) @callable
+{
+    m.albedo = m.albedo * (1.0 - 0.5 * m.roughness);
+}
+```
+
+### 11.4 What the emitter produces
+
+- SPIR-V **1.4**: `VK_KHR_ray_query` and `VK_KHR_ray_tracing_pipeline` both
+  depend on `VK_KHR_spirv_1_4`. A module with any ray feature in it is 1.4,
+  its raster and compute entry points included.
+- From 1.4, every `OpEntryPoint` lists every global variable its call tree uses,
+  and only those: a uniform block one entry point reads is not in another's
+  interface, and each hit or miss shader lists exactly its own payload.
+- A ray query: `OpCapability RayQueryKHR` and `SPV_KHR_ray_query`. An `accel`
+  nothing traces against is declared the same way.
+- A pipeline stage: `OpCapability RayTracingKHR` and `SPV_KHR_ray_tracing`.
+- `RAY_FLAG_SKIP_TRIANGLES` or `RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES`:
+  `OpCapability RayTraversalPrimitiveCullingKHR`.
+- A payload, callable data and hit attributes are each one variable of their
+  storage class per struct type, named after the type (`payload.Payload`,
+  `incoming_payload.Payload`, `hit_attributes.Triangle`).
+
+### 11.5 What the host has to do
+
+1. Enable `VK_KHR_acceleration_structure` (which needs
+   `VK_KHR_deferred_host_operations` and `bufferDeviceAddress`) and build the
+   scene's acceleration structures.
+2. For ray queries, enable `VK_KHR_ray_query` and its `rayQuery` feature; for
+   the pipeline stages, `VK_KHR_ray_tracing_pipeline` and `rayTracingPipeline`.
+   On Vulkan 1.1, enable `VK_KHR_spirv_1_4` too.
+3. Enable `rayTraversalPrimitiveCulling` for a module using a `SKIP_` flag, and
+   `runtimeDescriptorArray` for an `accel` table.
+4. Bind each `accel` as `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR`.
+5. For the pipeline, create the shader groups and the shader binding table: the
+   module's entry points are found by name, as any other stage's are.

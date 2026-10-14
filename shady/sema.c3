@@ -32,6 +32,8 @@ enum TypeKind : char
 	SAMPLED_IMAGE, // a combined image and sampler, `Sampler2D`
 	POINTER, // a buffer device address; `element` is the pointee
 	COOPMAT, // a cooperative matrix: one tile per workgroup, `coopmat<float, 16, 16, workgroup>`
+	ACCEL,   // a ray-tracing acceleration structure: the scene rays are traced against
+	RAY_QUERY, // an inline ray query's traversal state, `RayQuery`: a local, used by address
 }
 
 struct StructMember
@@ -376,9 +378,28 @@ fn void TypeTable.init(&self, Allocator allocator)
 	self.add_image(SAMPLED_IMAGE, "Sampler2DShadow",      float4_t, Dim.D2,   depth: 1);
 	self.add_image(SAMPLED_IMAGE, "SamplerCubeShadow",    float4_t, Dim.CUBE, depth: 1);
 	self.add_image(SAMPLED_IMAGE, "Sampler2DArrayShadow", float4_t, Dim.D2,   arrayed: 1, depth: 1);
+
+	// The scene a ray is traced against, bound like a texture. HLSL's name
+	// for it is accepted too, so a shader ported from there keeps its
+	// declarations; both are the one OpTypeAccelerationStructureKHR.
+	self.add(ACCEL, "accel");
+	self.add(ACCEL, "RaytracingAccelerationStructure");
+	self.add(RAY_QUERY, "RayQuery");
 }
 
 // --- Queries -----------------------------------------------------------------
+
+<*
+ The type's name with its article, as a message says it: "an accel", "a
+ Sampler2D".
+*>
+fn String Type.a_name(&self, Allocator allocator)
+{
+	char first = self.name.len ? self.name[0] : 'x';
+	bool vowel = first == 'a' || first == 'e' || first == 'i' || first == 'o' || first == 'u'
+		|| first == 'A' || first == 'E' || first == 'I' || first == 'O' || first == 'U';
+	return string::format(allocator, "%s %s", vowel ? "an" : "a", self.name);
+}
 
 fn bool Type.is_scalar(&self) => self.kind == BOOL || self.kind == INT || self.kind == UINT || self.kind == FLOAT;
 
@@ -448,7 +469,27 @@ fn bool Type.is_numeric(&self) => self.kind == INT || self.kind == UINT || self.
  A type that is a descriptor and not memory: an image, a sampler, or a combined
  image-and-sampler.
 *>
-fn bool Type.is_opaque(&self) => self.kind == TEXTURE || self.kind == SAMPLER || self.kind == SAMPLED_IMAGE;
+fn bool Type.is_opaque(&self) => self.is_image_like() || self.kind == ACCEL;
+
+<*
+ An image, a sampler, or a combined image-and-sampler: the descriptors an
+ image instruction reads, and the ones the image capabilities are about.
+*>
+fn bool Type.is_image_like(&self) => self.kind == TEXTURE || self.kind == SAMPLER || self.kind == SAMPLED_IMAGE;
+
+<*
+ A type whose values are handles rather than data: a descriptor, which the host
+ binds, or a ray query, which is traversal state. Neither can be stored into
+ memory - Vulkan refuses an OpStore of one into a Function variable
+ (VUID-StandaloneSpirv-OpTypeImage-06924) - so neither is a struct member, a
+ return value, a by-value parameter, a `?:` arm or an assignment target.
+*>
+fn bool Type.is_handle(&self) => self.is_opaque() || self.kind == RAY_QUERY;
+
+<*
+ A handle, or an array of them.
+*>
+fn bool Type.holds_handle(&self) => self.kind == ARRAY ? self.element.holds_handle() : self.is_handle();
 
 <*
  How many components an image's own extent has: 1, 2 or 3, with a cube's
@@ -675,24 +716,104 @@ fn uint? Type.assign_offsets(&self, Layout layout)
 // --- Builtins ----------------------------------------------------------------
 
 <*
+ What a `@builtin(name)` is: the SPIR-V BuiltIn it reads, the stages that have
+ it, and the type it is read as.
+
+ Every built-in the language has is an input - a value the stage is handed -
+ so a built-in is refused in a returned struct, in a stage that does not have
+ it, and as a type Vulkan does not give it. Each of those used to be a module
+ the validator refused instead.
+*>
+struct BuiltinInfo
+{
+	String  name;
+	Builtin builtin;
+	uint    stages;    // a set of `Stage.bit()`s
+	String  type_name; // int and uint are interchangeable, see `matches_builtin`
+}
+
+<*
+ Look a `@builtin(name)` up. False for an unknown name, so the caller can report
+ it rather than emitting something wrong.
+*>
+fn bool builtin_info(String name, BuiltinInfo* out)
+{
+	uint vertex   = Stage.VERTEX.bit();
+	uint fragment = Stage.FRAGMENT.bit();
+	uint compute  = Stage.COMPUTE.bit();
+
+	// The ray-tracing stages, by how far along the ray each one is: every one
+	// knows its launch, the ones a ray reaches know the ray, the ones a hit
+	// reaches know the instance it hit, and only a hit shader knows what kind
+	// of hit it was.
+	uint launch   = Stage.RAYGEN.bit() | Stage.INTERSECTION.bit() | Stage.ANY_HIT.bit()
+		| Stage.CLOSEST_HIT.bit() | Stage.MISS.bit() | Stage.CALLABLE.bit();
+	uint ray      = Stage.INTERSECTION.bit() | Stage.ANY_HIT.bit() | Stage.CLOSEST_HIT.bit() | Stage.MISS.bit();
+	uint instance = Stage.INTERSECTION.bit() | Stage.ANY_HIT.bit() | Stage.CLOSEST_HIT.bit();
+	uint hit      = Stage.ANY_HIT.bit() | Stage.CLOSEST_HIT.bit();
+
+	switch (name)
+	{
+		case "vertex_index":          *out = { name, Builtin.VERTEX_INDEX, vertex, "uint" };
+		case "instance_index":        *out = { name, Builtin.INSTANCE_INDEX, vertex, "uint" };
+		case "frag_coord":            *out = { name, Builtin.FRAG_COORD, fragment, "float4" };
+		case "front_facing":          *out = { name, Builtin.FRONT_FACING, fragment, "bool" };
+		case "global_invocation_id":  *out = { name, Builtin.GLOBAL_INVOCATION_ID, compute, "uint3" };
+		case "local_invocation_id":   *out = { name, Builtin.LOCAL_INVOCATION_ID, compute, "uint3" };
+		case "workgroup_id":          *out = { name, Builtin.WORKGROUP_ID, compute, "uint3" };
+
+		case "launch_id":             *out = { name, Builtin.LAUNCH_ID, launch, "uint3" };
+		case "launch_size":           *out = { name, Builtin.LAUNCH_SIZE, launch, "uint3" };
+		case "world_ray_origin":      *out = { name, Builtin.WORLD_RAY_ORIGIN, ray, "float3" };
+		case "world_ray_direction":   *out = { name, Builtin.WORLD_RAY_DIRECTION, ray, "float3" };
+		case "ray_tmin":              *out = { name, Builtin.RAY_TMIN, ray, "float" };
+		// In a hit shader, the distance to the hit being reported.
+		case "ray_tmax":              *out = { name, Builtin.RAY_TMAX, ray, "float" };
+		case "incoming_ray_flags":    *out = { name, Builtin.INCOMING_RAY_FLAGS, ray, "uint" };
+		case "object_ray_origin":     *out = { name, Builtin.OBJECT_RAY_ORIGIN, instance, "float3" };
+		case "object_ray_direction":  *out = { name, Builtin.OBJECT_RAY_DIRECTION, instance, "float3" };
+		case "instance_custom_index": *out = { name, Builtin.INSTANCE_CUSTOM_INDEX, instance, "uint" };
+		case "instance_id":           *out = { name, Builtin.INSTANCE_ID, instance, "uint" };
+		case "primitive_id":          *out = { name, Builtin.PRIMITIVE_ID, instance, "uint" };
+		case "geometry_index":        *out = { name, Builtin.RAY_GEOMETRY_INDEX, instance, "uint" };
+		case "object_to_world":       *out = { name, Builtin.OBJECT_TO_WORLD, instance, "float4x3" };
+		case "world_to_object":       *out = { name, Builtin.WORLD_TO_OBJECT, instance, "float4x3" };
+		case "hit_kind":              *out = { name, Builtin.HIT_KIND, hit, "uint" };
+		default: return false;
+	}
+	return true;
+}
+
+<*
  Map a `@builtin(name)` to its SPIR-V BuiltIn. Returns false for an unknown
  name so the caller can report it rather than emitting something wrong.
 *>
 fn bool builtin_from_name(String name, Builtin* out)
 {
-	switch (name)
-	{
-		case "vertex_index":         *out = Builtin.VERTEX_INDEX;
-		case "instance_index":       *out = Builtin.INSTANCE_INDEX;
-		case "frag_coord":           *out = Builtin.FRAG_COORD;
-		case "front_facing":         *out = Builtin.FRONT_FACING;
-		case "global_invocation_id": *out = Builtin.GLOBAL_INVOCATION_ID;
-		case "local_invocation_id":  *out = Builtin.LOCAL_INVOCATION_ID;
-		case "workgroup_id":         *out = Builtin.WORKGROUP_ID;
-		default: return false;
-	}
+	BuiltinInfo info;
+	if (!builtin_info(name, &info)) return false;
+	*out = info.builtin;
 	return true;
 }
+
+<*
+ Whether a member of this type can hold a built-in of type `expected`. Vulkan
+ asks for a 32-bit integer where the built-ins are indices and ids, and leaves
+ the signedness to the shader: the corpus reads `vertex_index` as a `uint`, and
+ GLSL declares the same built-in an `int`.
+*>
+fn bool Type.matches_builtin(&self, Type* expected)
+{
+	if (self == expected) return true;
+	if (self.kind != expected.kind) return self.is_integer32() && expected.is_integer32();
+	if (self.kind == VECTOR)
+	{
+		return self.count == expected.count && self.element.is_integer32() && expected.element.is_integer32();
+	}
+	return false;
+}
+
+fn bool Type.is_integer32(&self) => (self.kind == INT || self.kind == UINT) && self.width() == 32;
 
 <*
  Decode a swizzle like "xyz" or "rgba" into component indices.

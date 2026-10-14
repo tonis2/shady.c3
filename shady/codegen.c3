@@ -43,6 +43,10 @@ struct Local
 	String name;
 	Type*  type;
 	Id     pointer;
+	// Almost always Function. A ray-tracing stage's incoming payload is named
+	// like a parameter but lives in its own storage class, and is reached in
+	// place rather than copied.
+	StorageClass storage;
 }
 
 struct Resource
@@ -92,6 +96,10 @@ struct FunctionSig
 	Id      func_id;
 	bool    emitted;
 	bool    emitting; // set while the body is being emitted, to catch recursion
+
+	// What the body uses and asks of its callers' stages, recorded while it
+	// is emitted. Null until then.
+	Reach*  reach;
 
 	// `@required`: this module needs a definition it does not contain, and the
 	// text that provides one is spliced in from elsewhere. Carried on the
@@ -165,10 +173,21 @@ struct Codegen
 	IdListC      interface_ids;
 	bool         terminated; // current block already has a terminator
 
-	// The stage of the entry point being emitted. A helper is emitted inside
-	// the first entry point that calls it, so this is the stage its body runs
-	// in at least there - which is what the fragment-only checks ask.
-	ExecutionModel execution_model;
+	// The stage of the entry point being emitted. A helper is emitted once,
+	// inside the first entry point that calls it, and runs in every stage that
+	// reaches it - so code inside a helper must not branch on this. A check
+	// that depends on the stage goes through `require_stages`, which records it
+	// on the helper and asks every entry point that reaches it.
+	Stage stage;
+
+	// The reach of the function being emitted, and the entry points waiting
+	// for their `OpEntryPoint` (see reach.c3).
+	Reach*          reach;
+	EntryRecordList entries;
+
+	// The payload, callable-data and hit-attribute variables the pipeline's
+	// calls pass through (see ray.c3).
+	RayGlobalList   ray_globals;
 
 	Id glsl; // the GLSL.std.450 import
 
@@ -178,6 +197,14 @@ struct Codegen
 	 known before the header is written - see `compile`.
 	*>
 	bool uses_device_addresses;
+
+	// An acceleration structure was declared, so the module needs one of the
+	// ray capabilities even if nothing traces against it.
+	bool uses_accel;
+
+	// A ray flag that skips triangles or AABBs was named, which is a
+	// capability of its own.
+	bool uses_primitive_culling;
 
 	<*
 	 Lay every block out with C3's packing instead of std140/std430. Off by
@@ -258,6 +285,16 @@ fn void Codegen.warn(&self, uint line, uint column, String message, uint length 
 }
 
 // --- Scope -------------------------------------------------------------------
+
+<*
+ Bring a name into scope. Every local goes through here: StorageClass's zero
+ value is UniformConstant, so a local pushed without one would be reached
+ through access chains of the wrong storage class.
+*>
+fn void Codegen.bind_local(&self, String name, Type* type, Id pointer, StorageClass storage = StorageClass.FUNCTION)
+{
+	self.locals.push({ .name = name, .type = type, .pointer = pointer, .storage = storage });
+}
 
 fn Local* Codegen.find_local(&self, String name)
 {
@@ -370,6 +407,15 @@ fn Id Codegen.type_id(&self, Type* type)
 					array_stride(type.element, self.block_layout(ADDRESS)));
 			}
 		case TEXTURE: type.id = self.image_type_id(type);
+		case ACCEL:
+			// No capability here: a declared resource is emitted whether or not
+			// anything reads it, and which of the two ray capabilities it needs
+			// depends on what does. `finish_module` covers one nothing reads.
+			type.id = self.mod.unique(Opcode.TYPE_ACCELERATION_STRUCTURE_KHR);
+			self.uses_accel = true;
+		case RAY_QUERY:
+			type.id = self.mod.unique(Opcode.TYPE_RAY_QUERY_KHR);
+			self.ray_query_capability();
 		case STRUCT:
 			@pool() {
 				Id[] members = alloc::alloc_array(tmem, Id, type.members.len);
@@ -709,7 +755,7 @@ fn Value? Codegen.expression(&self, Expr* expr)
 		case IDENT:
 			if (Local* local = self.find_local(expr.ident.name))
 			{
-				return (Value) { .type = local.type, .pointer = local.pointer, .storage = StorageClass.FUNCTION };
+				return (Value) { .type = local.type, .pointer = local.pointer, .storage = local.storage };
 			}
 			if (Constant* constant = self.find_constant(expr.ident.name))
 			{
@@ -717,9 +763,18 @@ fn Value? Codegen.expression(&self, Expr* expr)
 			}
 			if (Resource* resource = self.find_resource(expr.ident.name))
 			{
+				self.use_global(resource.id);
 				// Textures and samplers stay as pointers; they are only ever
 				// loaded at the point of sampling.
 				return (Value) { .type = resource.type, .pointer = resource.id, .storage = resource.storage };
+			}
+			uint ray_value;
+			bool culls;
+			if (ray_constant(expr.ident.name, &ray_value, &culls))
+			{
+				if (culls) self.uses_primitive_culling = true;
+				Type* uint_t = self.types.find("uint");
+				return (Value) { .type = uint_t, .id = self.mod.const_u32(self.type_id(uint_t), ray_value) };
 			}
 			self.fail(expr.line, expr.column,
 				string::format(self.allocator, "unknown name `%s`", expr.ident.name),
@@ -897,6 +952,13 @@ fn void? Codegen.declare_shared(&self, Ast* ast)
 				"`%s` needs a length - a workgroup's memory is as big as the module says it is", decl.name));
 			return CODEGEN_ERROR~;
 		}
+		if (type.holds_handle())
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"`%s` cannot be shared - %s is a handle, not memory a workgroup can hold", decl.name,
+				(type.kind == ARRAY ? type.element : type).a_name(self.allocator)));
+			return CODEGEN_ERROR~;
+		}
 
 		Id pointer_type = self.mod.type_pointer(StorageClass.WORKGROUP, self.type_id(type));
 
@@ -1034,8 +1096,11 @@ fn Value? Codegen.index_expression(&self, Expr* expr)
 		// index alone is not what the driver reads.
 		if (index.non_uniform && element.is_opaque())
 		{
+			// The capability is the images' alone: an acceleration structure
+			// array indexed non-uniformly needs only ShaderNonUniform, which
+			// NonUniformResourceIndex already declared.
 			self.mod.decorate(ptr, Decoration.NON_UNIFORM);
-			self.mod.capability(Capability.SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING);
+			if (element.is_image_like()) self.mod.capability(Capability.SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING);
 			return (Value) { .type = element, .pointer = ptr, .storage = base.storage, .non_uniform = true };
 		}
 		return (Value) { .type = element, .pointer = ptr, .storage = base.storage };
@@ -1048,6 +1113,12 @@ fn Value? Codegen.index_expression(&self, Expr* expr)
 fn Value? Codegen.unary_expression(&self, Expr* expr)
 {
 	Value operand = self.expression(expr.unary.operand)!;
+	if (operand.type.is_handle())
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"%s has no operators - it is a handle, not a value", operand.type.a_name(self.allocator)));
+		return CODEGEN_ERROR~;
+	}
 	Id    id      = self.rvalue(operand);
 	Id    type    = self.type_id(operand.type);
 
@@ -1108,6 +1179,12 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 	if (target.pointer == NO_ID)
 	{
 		self.fail(expr.line, expr.column, "cannot assign to this expression");
+		return CODEGEN_ERROR~;
+	}
+	if (target.type.is_handle())
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"%s cannot be assigned - it is a handle, not a value", target.type.a_name(self.allocator)));
 		return CODEGEN_ERROR~;
 	}
 
@@ -1217,6 +1294,12 @@ fn Value? Codegen.conditional_expression(&self, Expr* expr)
 	self.terminated = false;
 	Value then_value = self.expression(expr.conditional.then_value)!;
 	result  = then_value.type;
+	if (result.is_handle())
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"`?:` cannot choose %s - it is a handle, not a value; branch with `if` instead", result.a_name(self.allocator)));
+		return CODEGEN_ERROR~;
+	}
 	pointer = self.func.local(self.pointer_to(StorageClass.FUNCTION, result));
 	self.func.store(pointer, self.coerce(then_value, result, expr.conditional.then_value)!);
 	if (!self.terminated) self.func.branch(merge_label);
@@ -1680,7 +1763,8 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 	foreach (decl : ast.decls)
 	{
 		if (decl.kind != DeclKind.FUNCTION) continue;
-		if (decl.attributes.find("vertex") || decl.attributes.find("fragment") || decl.attributes.find("compute")) continue;
+		Stage stage;
+		if (stage_attribute(decl.attributes, &stage)) continue;
 
 		Type* return_type = self.types.find(decl.function.return_type.name);
 		if (!return_type)
@@ -1692,6 +1776,12 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 		if (decl.function.return_type.is_array || decl.function.return_type.is_pointer)
 		{
 			self.fail(decl.line, decl.column, "a function cannot return an array or a pointer");
+			return CODEGEN_ERROR~;
+		}
+		if (return_type.is_handle())
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"a function cannot return %s - it is a handle, not a value", return_type.a_name(self.allocator)));
 			return CODEGEN_ERROR~;
 		}
 
@@ -1788,6 +1878,19 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 				return CODEGEN_ERROR~;
 			}
 			Type* type = self.resolve_type(written[i].type, written[i].line, written[i].column)!;
+			if (type.is_opaque())
+			{
+				self.fail(written[i].line, written[i].column, string::format(self.allocator,
+					"%s cannot be a parameter - it is a descriptor, so the function names the module-level variable itself",
+					type.a_name(self.allocator)));
+				return CODEGEN_ERROR~;
+			}
+			if (type.kind == RAY_QUERY && !written[i].by_ref)
+			{
+				self.fail(written[i].line, written[i].column, string::format(self.allocator,
+					"a RayQuery is traversal state, not a value - pass it as `inout RayQuery %s`", written[i].name));
+				return CODEGEN_ERROR~;
+			}
 			params[at] = type;
 			names[at]  = written[i].name;
 			refs[at]   = written[i].by_ref;
@@ -2188,12 +2291,15 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 	StageVarList  saved_inputs     = self.inputs;
 	StageVarList  saved_outputs    = self.outputs;
 	usz           saved_locals     = (usz)self.locals.len();
+	Reach*        saved_reach      = self.reach;
 
 	self.func       = &function;
 	self.fn_return  = sig.return_type;
 	self.terminated = false;
 	self.inputs     = {};
 	self.outputs    = {};
+	sig.reach       = self.new_reach(false);
+	self.reach      = sig.reach;
 
 	usz at = 0;
 	if (sig.has_receiver)
@@ -2204,14 +2310,14 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 			// The parameter already is a pointer into the caller's storage, so
 			// the receiver's members are reached through it directly.
 			Id pid = function.param(self.pointer_to(StorageClass.FUNCTION, receiver));
-			self.locals.push({ .name = sig.receiver_name, .type = receiver, .pointer = pid });
+			self.bind_local(sig.receiver_name, receiver, pid);
 		}
 		else
 		{
 			Id pid     = function.param(self.type_id(receiver));
 			Id pointer = function.local(self.pointer_to(StorageClass.FUNCTION, receiver));
 			function.store(pointer, pid);
-			self.locals.push({ .name = sig.receiver_name, .type = receiver, .pointer = pointer });
+			self.bind_local(sig.receiver_name, receiver, pointer);
 		}
 		at = 1;
 	}
@@ -2224,14 +2330,14 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 			// An `out`/`inout` parameter already is a pointer into the caller's
 			// storage, so the name is bound straight to it.
 			Id pid = function.param(self.pointer_to(StorageClass.FUNCTION, param));
-			self.locals.push({ .name = sig.names[i], .type = param, .pointer = pid });
+			self.bind_local(sig.names[i], param, pid);
 		}
 		else
 		{
 			Id pid     = function.param(self.type_id(param));
 			Id pointer = function.local(self.pointer_to(StorageClass.FUNCTION, param));
 			function.store(pointer, pid);
-			self.locals.push({ .name = sig.names[i], .type = param, .pointer = pointer });
+			self.bind_local(sig.names[i], param, pointer);
 		}
 	}
 
@@ -2257,6 +2363,7 @@ fn void? Codegen.emit_function(&self, FunctionSig* sig)
 	self.inputs     = saved_inputs;
 	self.outputs    = saved_outputs;
 	self.locals.size = (sz)saved_locals;
+	self.reach      = saved_reach;
 
 	sig.emitted  = true;
 	sig.emitting = false;
@@ -2281,17 +2388,22 @@ fn Value? Codegen.user_call(&self, Expr* expr, String name, Value* receiver)
 	if (!sig) return CODEGEN_ERROR~;
 
 	self.emit_function(sig)!;
+	self.note_callee(sig);
 
 	usz  total     = (usz)args.len() + (receiver ? (usz)1 : (usz)0);
 	Id[] call_args = self.new_ids(total);
 	usz  at        = 0;
 	usz  offset    = 0;
 
+	// Arguments passed through a temporary, written back once the call returns.
+	WritebackList writebacks;
+	writebacks.init(self.allocator, 2);
+
 	if (receiver)
 	{
 		if (sig.has_receiver && sig.receiver_ref)
 		{
-			call_args[at++] = self.receiver_pointer(*receiver);
+			call_args[at++] = self.receiver_pointer(*receiver, &writebacks);
 		}
 		else
 		{
@@ -2304,12 +2416,12 @@ fn Value? Codegen.user_call(&self, Expr* expr, String name, Value* receiver)
 		usz index = (usz)i + offset;
 		if (sig.refs[index])
 		{
-			if (value.pointer == NO_ID || value.storage != StorageClass.FUNCTION)
+			if (value.pointer == NO_ID || !passes_by_reference(value.storage))
 			{
 				self.fail(expr.line, expr.column, "an out or inout argument must be a variable");
 				return CODEGEN_ERROR~;
 			}
-			call_args[at++] = value.pointer;
+			call_args[at++] = self.pass_by_reference(value, &writebacks);
 		}
 		else
 		{
@@ -2318,20 +2430,60 @@ fn Value? Codegen.user_call(&self, Expr* expr, String name, Value* receiver)
 	}
 
 	Id result = self.func.call(self.type_id(sig.return_type), sig.func_id, call_args);
+	foreach (&writeback : writebacks)
+	{
+		self.store(writeback.target, self.func.load(self.type_id(writeback.target.type), writeback.temporary));
+	}
 	return (Value) { .type = sig.return_type, .id = result };
+}
+
+struct Writeback
+{
+	Value target;
+	Id    temporary;
+}
+
+alias WritebackList = List{Writeback};
+
+<*
+ The storage classes an `out` or `inout` argument may live in. A parameter is a
+ Function pointer, so a Function variable is passed as itself; a ray-tracing
+ stage's incoming payload or callable data is named like a variable too, and is
+ passed through a Function copy that is written back after the call.
+*>
+fn bool passes_by_reference(StorageClass storage) @private
+{
+	return storage == StorageClass.FUNCTION
+		|| storage == StorageClass.INCOMING_RAY_PAYLOAD
+		|| storage == StorageClass.INCOMING_CALLABLE_DATA;
+}
+
+<*
+ The Function pointer a by-reference argument is passed as: the variable's own,
+ or a copy that `writebacks` returns to it after the call.
+*>
+fn Id Codegen.pass_by_reference(&self, Value value, WritebackList* writebacks)
+{
+	if (value.storage == StorageClass.FUNCTION) return value.pointer;
+
+	Id temporary = self.func.local(self.pointer_to(StorageClass.FUNCTION, value.type));
+	self.func.store(temporary, self.rvalue(value));
+	writebacks.push({ .target = value, .temporary = temporary });
+	return temporary;
 }
 
 <*
  The pointer a `&self` receiver is passed as.
 
  A value already in Function storage is passed by its own address, so writes
- through it would reach the caller. Anything else - a temporary, or a struct
- reached through a device address - is copied into a Function local first,
- which makes `&self` on those read-only for now.
+ through it would reach the caller, and a ray-tracing payload is passed through
+ a copy that is written back. Anything else - a temporary, or a struct reached
+ through a device address - is copied into a Function local first, which makes
+ `&self` on those read-only for now.
 *>
-fn Id Codegen.receiver_pointer(&self, Value base)
+fn Id Codegen.receiver_pointer(&self, Value base, WritebackList* writebacks)
 {
-	if (base.pointer != NO_ID && base.storage == StorageClass.FUNCTION) return base.pointer;
+	if (base.pointer != NO_ID && passes_by_reference(base.storage)) return self.pass_by_reference(base, writebacks);
 
 	Id id  = self.rvalue(base);
 	Id ptr = self.func.local(self.pointer_to(StorageClass.FUNCTION, base.type));
@@ -2357,6 +2509,7 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 		{
 			return self.texture_method(expr, base, callee.member.name);
 		}
+		if (base.type.kind == RAY_QUERY) return self.ray_query_method(expr, base, callee.member.name);
 		if (self.has_function(callee.member.name)) return self.user_call(expr, callee.member.name, &base);
 
 		self.fail(expr.line, expr.column,
@@ -2384,6 +2537,15 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 	if (name == "barrier" || name == "workgroup_barrier") return self.workgroup_barrier(expr);
 	if (name == "InterlockedAdd") return self.atomic_add_call(expr);
 	if (name == "NonUniformResourceIndex") return self.non_uniform_call(expr);
+	if (name == "trace_ray") return self.trace_ray_call(expr);
+	if (name == "execute_callable") return self.execute_callable_call(expr);
+	if (name == "report_intersection") return self.report_intersection_call(expr);
+	if (name == "ignore_intersection" || name == "terminate_ray")
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"`%s()` ends the shader, so it is a statement of its own", name));
+		return CODEGEN_ERROR~;
+	}
 
 	return self.builtin_call(expr, name);
 }
@@ -2467,7 +2629,29 @@ fn void Codegen.coopmat_capability(&self)
 	// SPV_KHR_vulkan_memory_model wants a 1.3 module, and a coopmat module is
 	// the only kind that has one, so the version is raised here rather than at
 	// the top of every compile.
-	if (self.mod.version < VERSION_1_3) self.mod.version = VERSION_1_3;
+	self.mod.require_version(VERSION_1_3);
+}
+
+<*
+ Declare inline ray queries. Both ray-tracing extensions depend on
+ VK_KHR_spirv_1_4, so a module using either is a 1.4 module - which is also what
+ makes its entry points list every global they reach (see reach.c3).
+*>
+fn void Codegen.ray_query_capability(&self)
+{
+	self.mod.extension(EXTENSION_RAY_QUERY);
+	self.mod.capability(Capability.RAY_QUERY_KHR);
+	self.mod.require_version(VERSION_1_4);
+}
+
+<*
+ Declare the ray-tracing pipeline stages, for the same version reason.
+*>
+fn void Codegen.ray_tracing_capability(&self)
+{
+	self.mod.extension(EXTENSION_RAY_TRACING);
+	self.mod.capability(Capability.RAY_TRACING_KHR);
+	self.mod.require_version(VERSION_1_4);
 }
 
 <*
@@ -3154,12 +3338,11 @@ fn Value? Codegen.texture_sample(&self, Expr* expr, Value texture, String method
 	// The implicit-LOD forms take their level from screen-space derivatives,
 	// and only a fragment shader has those.
 	bool implicit = method == "sample" || method == "sample_bias" || method == "sample_cmp";
-	if (implicit && self.execution_model != ExecutionModel.FRAGMENT)
+	if (implicit)
 	{
-		self.fail(expr.line, expr.column, string::format(self.allocator,
+		self.require_stages(Stage.FRAGMENT.bit(), expr.line, expr.column, string::format(self.allocator,
 			"`%s` takes its level from screen-space derivatives, which only a fragment shader has - write `%s` with an explicit level",
-			written, method == "sample_cmp" ? "sample_cmp_lod" : "sample_lod"));
-		return CODEGEN_ERROR~;
+			written, method == "sample_cmp" ? "sample_cmp_lod" : "sample_lod"))!;
 	}
 
 	Type* float_t = self.types.find("float");
@@ -3581,12 +3764,8 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 			// The result has the operand's own shape, which is what GLSL's
 			// `dFdx` family says as well. `fwidth` is |ddx| + |ddy| in one
 			// instruction - the width of a pixel in the operand's units.
-			if (self.execution_model != ExecutionModel.FRAGMENT)
-			{
-				self.fail(expr.line, expr.column, string::format(self.allocator,
-					"`%s` is a screen-space derivative, which only a fragment shader has", name));
-				return CODEGEN_ERROR~;
-			}
+			self.require_stages(Stage.FRAGMENT.bit(), expr.line, expr.column, string::format(self.allocator,
+				"`%s` is a screen-space derivative, which only a fragment shader has", name))!;
 			Opcode opcode;
 			switch (name)
 			{
@@ -3807,6 +3986,27 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 					"a runtime-sized array is only a member of an @storage block, where the host decides its length");
 				return CODEGEN_ERROR~;
 			}
+			if (type.kind == RAY_QUERY)
+			{
+				// A query is the one handle a function holds: its own
+				// traversal, started empty and aimed by `init`.
+				if (stmt.decl.value)
+				{
+					self.fail(stmt.line, stmt.column, string::format(self.allocator,
+						"`%s` cannot be initialised - a RayQuery starts empty, and `init` aims it", stmt.decl.name));
+					return CODEGEN_ERROR~;
+				}
+			}
+			else if (type.holds_handle())
+			{
+				Type* element = type.kind == ARRAY ? type.element : type;
+				self.fail(stmt.line, stmt.column, element.kind == RAY_QUERY
+					? string::format(self.allocator, "`%s` cannot be an array of RayQuery - declare one query per traversal", stmt.decl.name)
+					: string::format(self.allocator,
+						"`%s` cannot be a local - %s is a descriptor, declared at module level where the host binds it",
+						stmt.decl.name, element.a_name(self.allocator)));
+				return CODEGEN_ERROR~;
+			}
 			Id pointer = self.func.local(self.pointer_to(StorageClass.FUNCTION, type));
 			self.mod.name(pointer, stmt.decl.name);
 			if (stmt.decl.value)
@@ -3821,9 +4021,10 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 					self.func.store(pointer, self.coerce(value, type, stmt.decl.value)!);
 				}
 			}
-			self.locals.push({ .name = stmt.decl.name, .type = type, .pointer = pointer });
+			self.bind_local(stmt.decl.name, type, pointer);
 
 		case EXPR:
+			if (self.ray_terminator(stmt.expr.value)!) break;
 			self.expression(stmt.expr.value)!;
 
 		case RETURN:
@@ -3843,6 +4044,9 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 			self.locals.size = (sz)scope;
 
 		case DISCARD:
+			// OpKill ends a fragment's invocation; no other stage has one to end.
+			self.require_stages(Stage.FRAGMENT.bit(), stmt.line, stmt.column,
+				"`discard` ends a fragment, which only a fragment shader has - an any-hit shader drops a hit with `ignore_intersection()`")!;
 			self.func.discard();
 			self.terminated = true;
 
@@ -3887,6 +4091,15 @@ fn void? Codegen.emit_return(&self, Stmt* stmt)
 		self.func.ret();
 		self.terminated = true;
 		return;
+	}
+
+	// A void function's `return` carries nothing - an entry point's included,
+	// whose value would otherwise become an OpReturnValue in a function SPIR-V
+	// declares as returning nothing.
+	if (self.outputs.len() == 0 && (!self.fn_return || self.fn_return.kind == VOID))
+	{
+		self.fail(stmt.line, stmt.column, "this function returns void, so `return` takes no value");
+		return CODEGEN_ERROR~;
 	}
 
 	Value value = self.expression(stmt.ret.value)!;

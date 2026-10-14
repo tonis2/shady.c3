@@ -107,6 +107,46 @@ fn void main(ComputeIn at) @compute @threads(64, 1, 1)
 }
 ```
 
+**Ray-traced shadows**
+
+A ray query traces from any stage, so a rasterizer's fragment shader can ask
+whether the sun is visible from the point it shades:
+
+```c3
+struct Uniforms @uniform { float4x4 mvp; float3 sun; }
+Uniforms uniforms;
+accel scene;
+
+struct VertexIn   { float3 position; float3 normal; }
+struct FragmentIn { float4 position @position; float3 world; float3 normal; }
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    FragmentIn output;
+    output.position = uniforms.mvp * float4(input.position, 1.0);
+    output.world = input.position;
+    output.normal = input.normal;
+    return output;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    // A shadow ray from the surface toward the sun: is anything in the way?
+    RayQuery q;
+    q.init(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH, 0xFF,
+           input.world + input.normal * 0.01, 0.0, uniforms.sun, 10000.0);
+    while (q.proceed()) {}
+    float lit = q.committed_type() == COMMITTED_NOTHING ? 1.0 : 0.0;
+
+    float diffuse = max(dot(input.normal, uniforms.sun), 0.0) * lit;
+    return float4(float3(0.1 + diffuse), 1.0);
+}
+```
+
+The full ray-tracing pipeline (`@raygen`, `@closest_hit`, `@any_hit`, `@miss`,
+`@intersection`, `@callable`) is covered in
+[LANGUAGE.md §11](LANGUAGE.md#11-ray-tracing).
+
 Resources bind in declaration order. Use `@set(n) @binding(n)` to pin one
 explicitly; a duplicate binding is an error.
 
@@ -114,11 +154,12 @@ explicitly; a duplicate binding is an error.
 
 | Area | What's supported |
 |---|---|
-| **Stages** | Vertex, fragment and compute (`@threads`, `@subgroup_size`). A module can hold any number of entry points. |
+| **Stages** | Vertex, fragment and compute (`@threads`, `@subgroup_size`), and the six ray-tracing pipeline stages. A module can hold any number of entry points. |
 | **Types** | `bool` `int` `uint` `float` `half` `int8` `uint8`, vectors, matrices, arrays, structs and device pointers |
 | **Buffers** | Uniform buffers (std140), storage buffers (std430) with runtime-sized arrays, push constants and buffer device addresses |
 | **Textures** | 1D, 2D, 3D, cube and layered textures, separate or combined (`Sampler2D`, `SamplerCube`, `Sampler2DArray`, shadow types…). Sampling with bias, level or gradients, depth comparison, gather, texel `load`, `size`/`levels` queries, constant texel offsets, and bindless arrays with `NonUniformResourceIndex` |
 | **Compute** | `shared` workgroup memory, `barrier`, `InterlockedAdd` and cooperative matrices (`coopmat`, `coop_load`, `coop_muladd`, `coop_store`) |
+| **Ray tracing** | Acceleration structures (`accel`, and arrays of them); inline `RayQuery` from any stage, with candidate and committed getters for alpha-tested and procedural geometry; the pipeline stages with payloads, hit attributes, callable data, `trace_ray`, `execute_callable`, `report_intersection`, `ignore_intersection` and `terminate_ray`; HLSL-named `RAY_FLAG_*` constants |
 | **Layout** | std140 and std430 by default, or C3-compatible packing with `scalar_layout: true` |
 | **Control flow** | `if`, `while`, `for`, `break`, `continue`, `discard` and `?:` |
 | **Functions** | Overloads, C3-style methods, `out`/`inout` parameters and forward declarations |
@@ -129,8 +170,13 @@ explicitly; a duplicate binding is an error.
 
 ## Limitations
 
-- Only vertex, fragment and compute stages are supported. There are no
-  geometry, tessellation, mesh or ray-tracing stages.
+- There are no geometry, tessellation or mesh stages.
+- Ray tracing has no shader-record buffers, no HLSL `RayDesc`/`TraceRay`
+  spellings, and no cull-mask or vertex-position-fetch built-ins. A
+  ray-generation shader writes its image to a storage buffer, since there are
+  no storage images yet. Any ray feature makes the module SPIR-V 1.4; the host
+  needs `VK_KHR_acceleration_structure` and `VK_KHR_ray_query` or
+  `VK_KHR_ray_tracing_pipeline` (see LANGUAGE.md §11.5).
 - There are no storage images (writable textures), no integer or multisampled
   textures, no `switch` and no `double`.
 - Arrays have one dimension.

@@ -40,6 +40,12 @@ struct Module
 	uint      version;
 	Id        next_id;
 
+	// What the OpMemoryModel instruction says, kept so one half can change
+	// without the other: device addresses change the addressing model, a
+	// cooperative matrix the memory model, and a module may have both.
+	AddressingModel addressing_model;
+	MemoryModel     memory_model_kind;
+
 	// Sections, in the order the SPIR-V logical layout requires them.
 	WordList capabilities;
 	WordList extensions;
@@ -58,7 +64,13 @@ struct Module
 
 fn Module* Module.init(&self, Allocator allocator = mem, uint version = VERSION_1_0)
 {
-	*self = { .allocator = allocator, .version = version, .next_id = 1 };
+	*self = {
+		.allocator         = allocator,
+		.version           = version,
+		.next_id           = 1,
+		.addressing_model  = AddressingModel.LOGICAL,
+		.memory_model_kind = MemoryModel.GLSL450,
+	};
 
 	self.capabilities.init(allocator);
 	self.extensions.init(allocator);
@@ -101,6 +113,16 @@ fn void Module.free(&self)
  simply the next unreserved one.
 *>
 fn Id Module.id(&self) => self.next_id++;
+
+<*
+ Raise the module to at least `version`. Never lowers it: each feature asks
+ for the version it needs, in whatever order the shader reaches them, and the
+ module is the highest of those.
+*>
+fn void Module.require_version(&self, uint version)
+{
+	if (self.version < version) self.version = version;
+}
 
 // --- Raw emission ------------------------------------------------------------
 
@@ -273,6 +295,16 @@ fn Id Module.declare_typed(&self, Opcode opcode, Id result_type, Id... operands)
 
 // --- Module-level directives -------------------------------------------------
 
+fn bool Module.has_capability(&self, Capability capability)
+{
+	Id[] section = self.capabilities.array_view();
+	for (usz at = 0; at + 1 < section.len; at += 2)
+	{
+		if (section[at + 1] == (Id)capability) return true;
+	}
+	return false;
+}
+
 fn void Module.capability(&self, Capability capability)
 {
 	// One `OpCapability` per capability, for the same reason `extension`
@@ -338,16 +370,31 @@ fn Id Module.ext_inst_import(&self, String name)
 
 fn void Module.set_memory_model(&self, AddressingModel addressing_model = AddressingModel.LOGICAL, MemoryModel memory_model = MemoryModel.GLSL450)
 {
+	self.addressing_model  = addressing_model;
+	self.memory_model_kind = memory_model;
 	self.memory_model.clear();
 	emit(&self.memory_model, Opcode.MEMORY_MODEL, (Id)addressing_model, (Id)memory_model);
+}
+
+<*
+ Change the addressing model and keep the memory model. Device addresses are
+ decided after the shader is walked, by which time a cooperative matrix may
+ already have made the module a Vulkan-memory-model one - and setting both at
+ once would quietly put it back to GLSL450.
+*>
+fn void Module.set_addressing_model(&self, AddressingModel addressing_model)
+{
+	self.set_memory_model(addressing_model, self.memory_model_kind);
 }
 
 <*
  Declare an entry point.
 
  `interface` must list every Input and Output variable the entry point can
- reach, statically. Getting this wrong is the most common way to produce a
- module that validates but misbehaves, so it is explicit rather than inferred.
+ reach, statically - and from SPIR-V 1.4 on, every global variable of any
+ storage class its call tree uses. Getting this wrong is the most common way to
+ produce a module that validates but misbehaves, so it is explicit rather than
+ inferred.
 *>
 fn void Module.entry_point(&self, ExecutionModel execution_model, Id function, String name, Id[] interface_ids = {})
 {
@@ -401,7 +448,7 @@ fn void Module.member_name(&self, Id target, uint member, String text)
 *>
 fn void Module.module_processed(&self, String text)
 {
-	if (self.version < VERSION_1_1) self.version = VERSION_1_1;
+	self.require_version(VERSION_1_1);
 	@pool() {
 		Id[] words = string_words(text, tmem);
 		self.processed_notes.push(((uint)(1 + words.len) << 16) | (uint)Opcode.MODULE_PROCESSED);

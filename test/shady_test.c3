@@ -165,3 +165,75 @@ fn void build_triangle_module() @test
 	file::save(string::tformat("%s/cube.spirv", OUT_DIR), spirv)!!;
 	io::printfn("shady: wrote %s/cube.spirv, %d bytes, bound %d", OUT_DIR, spirv.len, mod.next_id);
 }
+
+// --- The module builder's version and memory model ----------------------------
+
+<*
+ Each feature asks for the version it needs, in whatever order the shader
+ reaches them, so a later, smaller request must not undo an earlier one: a
+ ray-tracing module that also uses device addresses is 1.4, not 1.3.
+*>
+fn void require_version_never_lowers() @test
+{
+	shady::Module mod;
+	mod.init(mem);
+	defer mod.free();
+
+	test::@check(mod.version == shady::VERSION_1_0, "mod.version");
+	mod.require_version(shady::VERSION_1_4);
+	mod.require_version(shady::VERSION_1_3);
+	mod.require_version(shady::VERSION_1_1);
+	test::@check(mod.version == shady::VERSION_1_4, "mod.version");
+}
+
+<*
+ Device addresses change the addressing model after a cooperative matrix may
+ already have made the module a Vulkan-memory-model one; the second half of
+ the instruction has to survive the first changing.
+*>
+fn void changing_the_addressing_model_keeps_the_memory_model() @test
+{
+	shady::Module mod;
+	mod.init(mem);
+	defer mod.free();
+
+	mod.set_memory_model(shady::AddressingModel.LOGICAL, shady::MemoryModel.VULKAN);
+	mod.set_addressing_model(shady::AddressingModel.PHYSICAL_STORAGE_BUFFER64);
+
+	uint[] words = mod.memory_model.array_view();
+	test::@check(words.len == 3, "words.len");
+	test::@check(words[1] == (uint)shady::AddressingModel.PHYSICAL_STORAGE_BUFFER64, "words[1]");
+	test::@check(words[2] == (uint)shady::MemoryModel.VULKAN, "words[2]");
+}
+
+fn void has_capability_reads_the_section() @test
+{
+	shady::Module mod;
+	mod.init(mem);
+	defer mod.free();
+
+	mod.capability(shady::Capability.SHADER);
+	mod.capability(shady::Capability.RAY_QUERY_KHR);
+	test::@check(mod.has_capability(shady::Capability.RAY_QUERY_KHR), "the capability was declared");
+	test::@check(!mod.has_capability(shady::Capability.RAY_TRACING_KHR), "this one was not");
+}
+
+<*
+ The ray-tracing vocabulary, spot-checked against the SPIR-V grammar: one
+ value from each numbering space, since a wrong number here is a module that
+ means something else rather than one that fails to build.
+*>
+fn void the_ray_tracing_numbers_match_the_grammar() @test
+{
+	test::@check((uint)shady::Opcode.TRACE_RAY_KHR == 4445, "(uint)shady::Opcode.TRACE_RAY_KHR");
+	test::@check((uint)shady::Opcode.TYPE_ACCELERATION_STRUCTURE_KHR == 5341, "(uint)shady::Opcode.TYPE_ACCELERATION_STRUCTURE_KHR");
+	test::@check((uint)shady::Opcode.RAY_QUERY_PROCEED_KHR == 4477, "(uint)shady::Opcode.RAY_QUERY_PROCEED_KHR");
+	test::@check((uint)shady::Opcode.RAY_QUERY_GET_INTERSECTION_WORLD_TO_OBJECT_KHR == 6032, "(uint)shady::Opcode.RAY_QUERY_GET_INTERSECTION_WORLD_TO_OBJECT_KHR");
+	test::@check((uint)shady::ExecutionModel.RAY_GENERATION == 5313, "(uint)shady::ExecutionModel.RAY_GENERATION");
+	test::@check((uint)shady::ExecutionModel.CALLABLE == 5318, "(uint)shady::ExecutionModel.CALLABLE");
+	test::@check((uint)shady::StorageClass.INCOMING_RAY_PAYLOAD == 5342, "(uint)shady::StorageClass.INCOMING_RAY_PAYLOAD");
+	test::@check((uint)shady::Builtin.RAY_GEOMETRY_INDEX == 5352, "(uint)shady::Builtin.RAY_GEOMETRY_INDEX");
+	test::@check((uint)shady::Capability.RAY_TRACING_KHR == 4479, "(uint)shady::Capability.RAY_TRACING_KHR");
+	test::@check((uint)shady::RayFlags.SKIP_AABBS == 0x200, "(uint)shady::RayFlags.SKIP_AABBS");
+	test::@check(shady::VERSION_1_4 == 0x00010400, "shady::VERSION_1_4");
+}

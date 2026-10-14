@@ -24,11 +24,14 @@ module shady;
 // --- Module header -----------------------------------------------------------
 const uint MAGIC = 0x07230203;
 // 1.0 keeps the output loadable by the widest set of drivers. Raising this is
-// a deliberate choice - buffer device address will need 1.3 or the
-// SPV_KHR_physical_storage_buffer extension.
+// a deliberate choice, made by the feature that needs it: a subgroup-size note
+// wants 1.1, buffer device addresses and cooperative matrices 1.3, and ray
+// tracing 1.4 - VK_KHR_ray_query and VK_KHR_ray_tracing_pipeline both depend
+// on VK_KHR_spirv_1_4. See `Module.require_version`.
 const uint VERSION_1_0 = 0x00010000;
 const uint VERSION_1_1 = 0x00010100;
 const uint VERSION_1_3 = 0x00010300;
+const uint VERSION_1_4 = 0x00010400;
 const uint VERSION_1_5 = 0x00010500;
 // Khronos has not assigned this project a generator id, so use 0 ("unknown").
 const uint GENERATOR = 0;
@@ -183,6 +186,41 @@ constdef Opcode : uint
 	COOPERATIVE_MATRIX_STORE_KHR = 4458,
 	COOPERATIVE_MATRIX_MUL_ADD_KHR = 4459,
 
+	// The ray-tracing pipeline. Ignore and terminate end their block, the
+	// way OpKill does.
+	TRACE_RAY_KHR             = 4445,
+	EXECUTE_CALLABLE_KHR      = 4446,
+	IGNORE_INTERSECTION_KHR   = 4448,
+	TERMINATE_RAY_KHR         = 4449,
+	REPORT_INTERSECTION_KHR   = 5334,
+	TYPE_ACCELERATION_STRUCTURE_KHR = 5341,
+
+	// Ray queries: the traversal a shader drives itself, from any stage.
+	TYPE_RAY_QUERY_KHR                  = 4472,
+	RAY_QUERY_INITIALIZE_KHR            = 4473,
+	RAY_QUERY_TERMINATE_KHR             = 4474,
+	RAY_QUERY_GENERATE_INTERSECTION_KHR = 4475,
+	RAY_QUERY_CONFIRM_INTERSECTION_KHR  = 4476,
+	RAY_QUERY_PROCEED_KHR               = 4477,
+	RAY_QUERY_GET_INTERSECTION_TYPE_KHR = 4479,
+	RAY_QUERY_GET_RAY_T_MIN_KHR         = 6016,
+	RAY_QUERY_GET_RAY_FLAGS_KHR         = 6017,
+	RAY_QUERY_GET_INTERSECTION_T_KHR    = 6018,
+	RAY_QUERY_GET_INTERSECTION_INSTANCE_CUSTOM_INDEX_KHR = 6019,
+	RAY_QUERY_GET_INTERSECTION_INSTANCE_ID_KHR = 6020,
+	RAY_QUERY_GET_INTERSECTION_INSTANCE_SBT_RECORD_OFFSET_KHR = 6021,
+	RAY_QUERY_GET_INTERSECTION_GEOMETRY_INDEX_KHR = 6022,
+	RAY_QUERY_GET_INTERSECTION_PRIMITIVE_INDEX_KHR = 6023,
+	RAY_QUERY_GET_INTERSECTION_BARYCENTRICS_KHR = 6024,
+	RAY_QUERY_GET_INTERSECTION_FRONT_FACE_KHR = 6025,
+	RAY_QUERY_GET_INTERSECTION_CANDIDATE_AABB_OPAQUE_KHR = 6026,
+	RAY_QUERY_GET_INTERSECTION_OBJECT_RAY_DIRECTION_KHR = 6027,
+	RAY_QUERY_GET_INTERSECTION_OBJECT_RAY_ORIGIN_KHR = 6028,
+	RAY_QUERY_GET_WORLD_RAY_DIRECTION_KHR = 6029,
+	RAY_QUERY_GET_WORLD_RAY_ORIGIN_KHR  = 6030,
+	RAY_QUERY_GET_INTERSECTION_OBJECT_TO_WORLD_KHR = 6031,
+	RAY_QUERY_GET_INTERSECTION_WORLD_TO_OBJECT_KHR = 6032,
+
 	CONTROL_BARRIER           = 224,
 	ATOMIC_I_ADD              = 234,
 
@@ -218,6 +256,9 @@ constdef Capability : uint
 	RUNTIME_DESCRIPTOR_ARRAY           = 5302,
 	SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING = 5307,
 	PHYSICAL_STORAGE_BUFFER_ADDRESSES  = 5347,
+	RAY_QUERY_KHR                      = 4472,
+	RAY_TRAVERSAL_PRIMITIVE_CULLING_KHR = 4478,
+	RAY_TRACING_KHR                    = 4479,
 }
 
 constdef AddressingModel : uint
@@ -237,6 +278,12 @@ constdef ExecutionModel : uint
 	VERTEX      = 0,
 	FRAGMENT    = 4,
 	GL_COMPUTE  = 5,
+	RAY_GENERATION = 5313,
+	INTERSECTION   = 5314,
+	ANY_HIT        = 5315,
+	CLOSEST_HIT    = 5316,
+	MISS           = 5317,
+	CALLABLE       = 5318,
 }
 
 constdef ExecutionMode : uint
@@ -256,6 +303,14 @@ constdef StorageClass : uint
 	PUSH_CONSTANT           = 9,
 	STORAGE_BUFFER          = 12,
 	PHYSICAL_STORAGE_BUFFER = 5349,
+	// What a ray carries between the shaders of a pipeline: the caller's
+	// payload and callable data, the callee's incoming view of them, and the
+	// attributes an intersection reports to its hit shaders.
+	CALLABLE_DATA           = 5328,
+	INCOMING_CALLABLE_DATA  = 5329,
+	RAY_PAYLOAD             = 5338,
+	HIT_ATTRIBUTE           = 5339,
+	INCOMING_RAY_PAYLOAD    = 5342,
 }
 
 <*
@@ -279,6 +334,10 @@ constdef MemoryAccess : uint
  feature at all, which is wider than requiring 1.5.
 *>
 const String EXTENSION_PHYSICAL_STORAGE_BUFFER = "SPV_KHR_physical_storage_buffer";
+
+// The two ray-tracing extensions: inline queries, and the pipeline stages.
+const String EXTENSION_RAY_QUERY   = "SPV_KHR_ray_query";
+const String EXTENSION_RAY_TRACING = "SPV_KHR_ray_tracing";
 
 constdef Decoration : uint
 {
@@ -308,6 +367,22 @@ constdef Builtin : uint
 	GLOBAL_INVOCATION_ID   = 28,
 	VERTEX_INDEX           = 42,
 	INSTANCE_INDEX         = 43,
+	INSTANCE_ID            = 6,
+	PRIMITIVE_ID           = 7,
+	LAUNCH_ID              = 5319,
+	LAUNCH_SIZE            = 5320,
+	WORLD_RAY_ORIGIN       = 5321,
+	WORLD_RAY_DIRECTION    = 5322,
+	OBJECT_RAY_ORIGIN      = 5323,
+	OBJECT_RAY_DIRECTION   = 5324,
+	RAY_TMIN               = 5325,
+	RAY_TMAX               = 5326,
+	INSTANCE_CUSTOM_INDEX  = 5327,
+	OBJECT_TO_WORLD        = 5330,
+	WORLD_TO_OBJECT        = 5331,
+	HIT_KIND               = 5333,
+	INCOMING_RAY_FLAGS     = 5351,
+	RAY_GEOMETRY_INDEX     = 5352,
 }
 
 // The three control masks, each of which this emitter only ever writes as NONE.
@@ -372,6 +447,38 @@ constdef MemorySemantics : uint
 	ACQUIRE_RELEASE  = 0x8,
 	UNIFORM_MEMORY   = 0x40,
 	WORKGROUP_MEMORY = 0x100,
+}
+
+<*
+ The flags a ray is traced with. A bit field in the specification, and one the
+ shader combines - the language spells these with HLSL's names, see
+ `RAY_CONSTANTS` - so the values are named here only for the compiler's own
+ use.
+*>
+constdef RayFlags : uint
+{
+	NONE                    = 0x0,
+	OPAQUE                  = 0x1,
+	NO_OPAQUE               = 0x2,
+	TERMINATE_ON_FIRST_HIT  = 0x4,
+	SKIP_CLOSEST_HIT_SHADER = 0x8,
+	CULL_BACK_FACING        = 0x10,
+	CULL_FRONT_FACING       = 0x20,
+	CULL_OPAQUE             = 0x40,
+	CULL_NO_OPAQUE          = 0x80,
+	SKIP_TRIANGLES          = 0x100,
+	SKIP_AABBS              = 0x200,
+}
+
+<*
+ Which intersection a ray-query getter reads: the candidate traversal is
+ looking at now, or the closest one committed so far. A constant id operand,
+ not a literal.
+*>
+constdef RayQueryIntersection : uint
+{
+	CANDIDATE = 0,
+	COMMITTED = 1,
 }
 
 constdef GlslOp : uint

@@ -225,6 +225,13 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 					return CODEGEN_ERROR~;
 				}
 			}
+			if (member_type.holds_handle())
+			{
+				self.fail(source.line, source.column, string::format(self.allocator,
+					"`%s.%s` cannot be %s - a handle is not data, and a struct is data",
+					decl.name, source.name, (member_type.kind == ARRAY ? member_type.element : member_type).a_name(self.allocator)));
+				return CODEGEN_ERROR~;
+			}
 			members[i] = {
 				.name        = source.name,
 				.type        = member_type,
@@ -563,11 +570,18 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 				Type* element = type.kind == ARRAY ? type.element : type;
 				if (!element.is_opaque())
 				{
-					self.fail(decl.line, decl.column, element.kind == STRUCT
-						? string::format(self.allocator,
-							"`%s` is a plain struct - mark it @uniform, @storage or @pushconstant to bind it", element.name)
-						: string::format(self.allocator,
-							"`%s` cannot be a module-level variable", type.name));
+					String message;
+					switch (element.kind)
+					{
+						case STRUCT:
+							message = string::format(self.allocator,
+								"`%s` is a plain struct - mark it @uniform, @storage or @pushconstant to bind it", element.name);
+						case RAY_QUERY:
+							message = "a RayQuery is a function's own traversal - declare it as a local";
+						default:
+							message = string::format(self.allocator, "`%s` cannot be a module-level variable", type.name);
+					}
+					self.fail(decl.line, decl.column, message);
 					return CODEGEN_ERROR~;
 				}
 
@@ -612,11 +626,11 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
  coordinate. Vulkan rejects BuiltIn Position in a fragment shader outright
  (VUID-Position-Position-04318), so this is a translation, not a convenience.
 *>
-fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageVarList* out, ExecutionModel execution_model, uint* next_location, uint line, uint column)
+fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageVarList* out, Stage stage, uint* next_location, uint line, uint column)
 {
 	foreach (i, &member : type.members)
 	{
-		if (member.is_position && storage == StorageClass.INPUT && execution_model != ExecutionModel.FRAGMENT)
+		if (member.is_position && storage == StorageClass.INPUT && stage != Stage.FRAGMENT)
 		{
 			self.fail(line, column, "@position is only meaningful on a vertex output or a fragment input");
 			return CODEGEN_ERROR~;
@@ -633,6 +647,7 @@ fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageV
 		}
 		else if (member.is_builtin)
 		{
+			self.check_builtin(member, storage, stage)!;
 			self.mod.decorate(id, Decoration.BUILTIN, (Id)(uint)member.builtin);
 		}
 		else
@@ -658,8 +673,8 @@ fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageV
 		// (VUID-StandaloneSpirv-Flat-06201/06202) - an integer render target is
 		// an ordinary output - and `@flat` on a struct shared with either side is
 		// left off there rather than refused.
-		bool varying = (storage == StorageClass.OUTPUT && execution_model == ExecutionModel.VERTEX)
-			|| (storage == StorageClass.INPUT && execution_model == ExecutionModel.FRAGMENT);
+		bool varying = (storage == StorageClass.OUTPUT && stage == Stage.VERTEX)
+			|| (storage == StorageClass.INPUT && stage == Stage.FRAGMENT);
 		TypeKind scalar = member.type.scalar().kind;
 		bool integer = !member.is_position && !member.is_builtin
 			&& (scalar == INT || scalar == UINT || scalar == BOOL);
@@ -667,6 +682,154 @@ fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageV
 
 		out.push({ .id = id, .type = member.type, .member_index = (usz)i, .is_position = member.is_position });
 		self.interface_ids.push(id);
+	}
+}
+
+<*
+ What an entry point's parameter is to its stage.
+*>
+enum ParamRole : char
+{
+	STAGE_INPUT,    // varyings and built-ins, copied into a local
+	PAYLOAD,        // `inout P p` in a closest-hit, any-hit or miss shader
+	CALLABLE_DATA,  // `inout D d` in a callable shader
+	HIT_ATTRIBUTES, // a plain struct in a closest-hit or any-hit shader
+}
+
+<*
+ Classify a parameter by its shape, the way HLSL does: a ray-tracing stage takes
+ its payload `inout`, its built-ins in a struct of `@builtin` members, and its
+ hit attributes as a plain struct. `earlier` are the roles of the parameters
+ before this one, since each of the ray roles is one parameter at most.
+*>
+fn ParamRole? Codegen.param_role(&self, Decl* decl, Param* param, Stage stage, ParamRole[] earlier)
+{
+	Type* type = self.types.find(param.type.name);
+	if (!type || type.kind != STRUCT || param.type.is_array || param.type.is_pointer)
+	{
+		self.fail(param.line, param.column, "an entry point parameter must be a struct");
+		return CODEGEN_ERROR~;
+	}
+
+	if (!stage.is_ray_tracing())
+	{
+		if (param.by_ref)
+		{
+			self.fail(param.line, param.column, string::format(self.allocator,
+				"`%s` is %s shader's input, which it cannot write back - drop `%s`",
+				param.name, stage_list(stage.bit(), self.allocator), param.is_inout ? "inout" : "out"));
+			return CODEGEN_ERROR~;
+		}
+		return ParamRole.STAGE_INPUT;
+	}
+
+	ParamRole role;
+	if (param.by_ref)
+	{
+		if (!param.is_inout)
+		{
+			self.fail(param.line, param.column, string::format(self.allocator,
+				"write `inout %s %s` - the payload arrives holding what its caller traced it with", type.name, param.name));
+			return CODEGEN_ERROR~;
+		}
+		switch (stage)
+		{
+			case Stage.CLOSEST_HIT:
+			case Stage.ANY_HIT:
+			case Stage.MISS:
+				role = ParamRole.PAYLOAD;
+			case Stage.CALLABLE:
+				role = ParamRole.CALLABLE_DATA;
+			case Stage.RAYGEN:
+				self.fail(param.line, param.column,
+					"a ray-generation shader starts rays rather than receiving one - declare the payload as a local and pass it to `trace_ray`");
+				return CODEGEN_ERROR~;
+			default:
+				self.fail(param.line, param.column,
+					"an intersection shader has no payload - it reports what it finds with `report_intersection`");
+				return CODEGEN_ERROR~;
+		}
+	}
+	else
+	{
+		usz builtins = 0;
+		foreach (&member : type.members) if (member.is_builtin) builtins++;
+		if (builtins == type.members.len) return ParamRole.STAGE_INPUT;
+		if (builtins)
+		{
+			foreach (&member : type.members)
+			{
+				if (member.is_builtin) continue;
+				self.fail(param.line, param.column, string::format(self.allocator,
+					"a ray-tracing shader has no varyings, so `%s.%s` needs a @builtin - or move it to a struct of its own if it is the hit attributes",
+					type.name, member.name));
+				return CODEGEN_ERROR~;
+			}
+		}
+		if (stage != Stage.CLOSEST_HIT && stage != Stage.ANY_HIT)
+		{
+			self.fail(param.line, param.column, string::format(self.allocator,
+				"`%s` has no @builtin members, so it would be hit attributes - which only a closest-hit or any-hit shader has",
+				param.name));
+			return CODEGEN_ERROR~;
+		}
+		role = ParamRole.HIT_ATTRIBUTES;
+		if (type.size(Layout.SCALAR) > 32)
+		{
+			self.warn(param.line, param.column, string::format(self.allocator,
+				"`%s` is %d bytes of hit attributes - Vulkan only guarantees 32 (maxRayHitAttributeSize)",
+				type.name, type.size(Layout.SCALAR)));
+		}
+	}
+
+	if (type.block != NONE)
+	{
+		self.fail(param.line, param.column, string::format(self.allocator,
+			"`%s` is %s, so it is memory the host lays out - a payload or hit attributes are a plain struct",
+			type.name, type.block.attribute()));
+		return CODEGEN_ERROR~;
+	}
+	foreach (other : earlier)
+	{
+		if (other != role) continue;
+		self.fail(param.line, param.column, string::format(self.allocator,
+			"`%s` already takes its %s - an entry point has one", decl.name,
+			role == ParamRole.HIT_ATTRIBUTES ? "hit attributes" : role == ParamRole.PAYLOAD ? "payload" : "callable data"));
+		return CODEGEN_ERROR~;
+	}
+	return role;
+}
+
+<*
+ A `@builtin` member is something this stage is handed, of the type Vulkan
+ hands it as. Checked here rather than where the struct is declared, because
+ one struct may be the input of several stages.
+*>
+fn void? Codegen.check_builtin(&self, StructMember* member, StorageClass storage, Stage stage)
+{
+	Attribute*  attribute = member.attributes.find("builtin");
+	BuiltinInfo info;
+	builtin_info(attribute.args[0].name, &info);
+
+	if (storage == StorageClass.OUTPUT)
+	{
+		self.fail(attribute.line, attribute.column, string::format(self.allocator,
+			"`@builtin(%s)` is an input, so it is a parameter's member, not a returned one", info.name));
+		return CODEGEN_ERROR~;
+	}
+	if (!(info.stages & stage.bit()))
+	{
+		self.fail(attribute.line, attribute.column, string::format(self.allocator,
+			"`@builtin(%s)` is only in %s shader, and this is %s shader",
+			info.name, stage_list(info.stages, self.allocator), stage_list(stage.bit(), self.allocator)));
+		return CODEGEN_ERROR~;
+	}
+	Type* expected = self.types.find(info.type_name);
+	if (!member.type.matches_builtin(expected))
+	{
+		self.fail(attribute.line, attribute.column, string::format(self.allocator,
+			"`@builtin(%s)` is a %s, so `%s` cannot be a %s", info.name, expected.name, member.name, member.type.name));
+		return CODEGEN_ERROR~;
 	}
 }
 
@@ -699,7 +862,7 @@ fn String? Codegen.entry_name(&self, Decl* decl, Attribute* stage)
  with ordinary member access, and the return value is scattered back out to the
  stage's output variables (see emit_return).
 *>
-fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_model, String entry_name)
+fn void? Codegen.emit_entry_point(&self, Decl* decl, Stage stage, String entry_name)
 {
 	if (!decl.function.body)
 	{
@@ -713,10 +876,34 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 	self.outputs.clear();
 	self.interface_ids.clear();
 	self.locals.clear();
-	self.execution_model = execution_model;
+	self.stage = stage;
+	self.reach = self.new_reach(true);
+	ExecutionModel execution_model = stage.execution_model();
 
 	Type* void_t  = self.types.find("void");
 	Id    fn_void = self.mod.type_function(self.type_id(void_t));
+
+	if (stage.is_ray_tracing()) self.ray_tracing_capability();
+
+	// A workgroup's shape is a compute shader's alone; on any other stage the
+	// attribute would be read by nothing.
+	foreach (name : (String[]) { "threads", "subgroup_size" })
+	{
+		Attribute* attribute = decl.attributes.find(name);
+		if (!attribute || stage == Stage.COMPUTE) continue;
+		self.fail(attribute.line, attribute.column, string::format(self.allocator,
+			"@%s is the shape of a compute workgroup, and `%s` is %s shader",
+			name, decl.name, stage_list(stage.bit(), self.allocator)));
+		return CODEGEN_ERROR~;
+	}
+
+	// What each parameter is: stage input, or - in a ray-tracing stage - the
+	// payload, the callable data or the hit attributes.
+	ParamRole[] roles = alloc::alloc_array(self.allocator, ParamRole, decl.function.params.len);
+	foreach (p, param : decl.function.params)
+	{
+		roles[p] = self.param_role(decl, &decl.function.params[p], stage, roles[:p])!;
+	}
 
 	// Inputs, one struct per parameter. A second parameter is how a stage takes
 	// a builtin beside its varying struct: a fragment's `front_facing` has no
@@ -725,14 +912,10 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 	uint next_input_location = 0;
 	foreach (p, param : decl.function.params)
 	{
+		if (roles[p] != ParamRole.STAGE_INPUT) continue;
 		Type* input_type = self.types.find(param.type.name);
-		if (!input_type || input_type.kind != STRUCT)
-		{
-			self.fail(decl.line, decl.column, "an entry point parameter must be a struct");
-			return CODEGEN_ERROR~;
-		}
 		sz first = (sz)self.inputs.len();
-		self.stage_variables(input_type, StorageClass.INPUT, &self.inputs, execution_model, &next_input_location, decl.line, decl.column)!;
+		self.stage_variables(input_type, StorageClass.INPUT, &self.inputs, stage, &next_input_location, decl.line, decl.column)!;
 		for (sz i = first; i < (sz)self.inputs.len(); i++) self.inputs[i].parameter = (uint)p;
 	}
 
@@ -748,7 +931,7 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 	if (return_type.kind == STRUCT)
 	{
 		uint next_output_location = 0;
-		self.stage_variables(return_type, StorageClass.OUTPUT, &self.outputs, execution_model, &next_output_location, decl.line, decl.column)!;
+		self.stage_variables(return_type, StorageClass.OUTPUT, &self.outputs, stage, &next_output_location, decl.line, decl.column)!;
 	}
 	else if (return_type.kind != VOID)
 	{
@@ -759,7 +942,15 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 		self.interface_ids.push(id);
 	}
 
-	if (execution_model == ExecutionModel.VERTEX)
+	if (stage.is_ray_tracing() && return_type.kind != VOID)
+	{
+		self.fail(decl.line, decl.column, string::format(self.allocator,
+			"`%s` is %s shader, which returns void - what it finds goes back through the payload",
+			decl.name, stage_list(stage.bit(), self.allocator)));
+		return CODEGEN_ERROR~;
+	}
+
+	if (stage == Stage.VERTEX)
 	{
 		bool has_position = false;
 		foreach (&output : self.outputs) if (output.is_position) has_position = true;
@@ -780,6 +971,28 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 	foreach (p, param : decl.function.params)
 	{
 		Type* input_type = self.types.find(param.type.name);
+		switch (roles[p])
+		{
+			case PAYLOAD:
+			case CALLABLE_DATA:
+				// The caller's payload is reached in place: whatever this
+				// shader writes to it is what the caller reads back.
+				StorageClass storage = roles[p] == ParamRole.PAYLOAD
+					? StorageClass.INCOMING_RAY_PAYLOAD
+					: StorageClass.INCOMING_CALLABLE_DATA;
+				self.bind_local(param.name, input_type, self.ray_global(storage, input_type), storage);
+				continue;
+			case HIT_ATTRIBUTES:
+				// Read-only in a hit shader (VUID-StandaloneSpirv-HitAttributeKHR-04703),
+				// so the shader gets a copy it may write like any parameter.
+				Id attributes = self.ray_global(StorageClass.HIT_ATTRIBUTE, input_type);
+				Id copy = function.local(self.pointer_to(StorageClass.FUNCTION, input_type));
+				self.mod.name(copy, param.name);
+				function.store(copy, function.load(self.type_id(input_type), attributes));
+				self.bind_local(param.name, input_type, copy);
+				continue;
+			default:
+		}
 		Id pointer = function.local(self.pointer_to(StorageClass.FUNCTION, input_type));
 		self.mod.name(pointer, param.name);
 
@@ -794,7 +1007,7 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 			function.store(member, value);
 		}
 
-		self.locals.push({ .name = param.name, .type = input_type, .pointer = pointer });
+		self.bind_local(param.name, input_type, pointer);
 	}
 
 	self.statement(decl.function.body)!;
@@ -805,14 +1018,27 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 
 	// OpName keeps the function's own name so a disassembly maps back to the
 	// source; the entry point publishes whatever the stage attribute asked for.
+	// Its OpEntryPoint waits for the end of the build (see reach.c3): from
+	// SPIR-V 1.4 its interface lists the globals it reaches, and only then is
+	// the module's version known.
 	self.mod.name(function.id, decl.name);
-	self.mod.entry_point(execution_model, function.id, entry_name, self.interface_ids.array_view());
+	Id[] io = alloc::alloc_array(self.allocator, Id, self.interface_ids.len());
+	foreach (i, id : self.interface_ids) io[i] = id;
+	self.entries.push({
+		.stage    = stage,
+		.function = function.id,
+		.name     = entry_name,
+		.fn_name  = decl.name,
+		.io       = io,
+		.reach    = self.reach,
+	});
+	self.reach = null;
 
-	if (execution_model == ExecutionModel.FRAGMENT)
+	if (stage == Stage.FRAGMENT)
 	{
 		self.mod.execution_mode(function.id, ExecutionMode.ORIGIN_UPPER_LEFT);
 	}
-	else if (execution_model == ExecutionModel.GL_COMPUTE)
+	else if (stage == Stage.COMPUTE)
 	{
 		Attribute* threads = decl.attributes.find( "threads");
 		if (!threads || threads.args.len != 3)
@@ -919,6 +1145,8 @@ fn char[]? compile(
 	codegen.inputs.init(&arena, 8);
 	codegen.outputs.init(&arena, 8);
 	codegen.interface_ids.init(&arena, 16);
+	codegen.entries.init(&arena, 4);
+	codegen.ray_globals.init(&arena, 4);
 
 	mod.capability(Capability.SHADER);
 	codegen.glsl = mod.ext_inst_import("GLSL.std.450");
@@ -933,21 +1161,6 @@ fn char[]? compile(
 	}
 
 	copy_warnings(warnings, allocator, source, &map, &findings);
-
-	// Buffer device addresses change the module header, not just its body: the
-	// addressing model stops being Logical, so it can only be written once the
-	// shader has been walked. set_memory_model rewrites its section rather than
-	// appending, which is what makes that safe.
-	if (codegen.uses_device_addresses)
-	{
-		mod.version = VERSION_1_3;
-		mod.capability(Capability.PHYSICAL_STORAGE_BUFFER_ADDRESSES);
-		// Addresses are computed as 64-bit integers, which is a capability of
-		// its own even though PhysicalStorageBufferAddresses implies the type.
-		mod.capability(Capability.INT64);
-		mod.extension(EXTENSION_PHYSICAL_STORAGE_BUFFER);
-		mod.set_memory_model(AddressingModel.PHYSICAL_STORAGE_BUFFER64);
-	}
 
 	return mod.build(allocator);
 }
@@ -1000,22 +1213,13 @@ fn void? Codegen.build(&self)
 		// `Stage` rather than compared here, because the same list is what a
 		// generator writing a module has to spell.
 		Stage      kind;
-		Attribute* stage = null;
-		foreach (&attribute : decl.attributes)
-		{
-			if (stage_from_attribute(attribute.name, &kind))
-			{
-				stage = attribute;
-				break;
-			}
-		}
+		Attribute* stage = stage_attribute(decl.attributes, &kind);
 		if (!stage)
 		{
 			// An ordinary function: declared by declare_functions and emitted
 			// on first call. Not an entry point, so nothing to do here.
 			continue;
 		}
-		ExecutionModel execution_model = kind.execution_model();
 
 		String entry_name = self.entry_name(decl, stage)!;
 		foreach (taken : entry_names)
@@ -1027,7 +1231,7 @@ fn void? Codegen.build(&self)
 		}
 		entry_names.push(entry_name);
 
-		self.emit_entry_point(decl, execution_model, entry_name)!;
+		self.emit_entry_point(decl, kind, entry_name)!;
 	}
 
 	if (!entry_names.len())
@@ -1035,6 +1239,13 @@ fn void? Codegen.build(&self)
 		self.fail(0, 0, "the shader has no entry points");
 		return CODEGEN_ERROR~;
 	}
+
+	// The whole shader has been walked: what a helper asks of its stages can be
+	// asked of every entry point reaching it, the header can be finished, and
+	// with the version final the entry points can say what they reach.
+	self.check_entry_stages()!;
+	self.finish_module();
+	self.publish_entry_points();
 
 	// A spec constant is the host's handle on a value, so one no code reads is
 	// a knob wired to nothing - and the host setting it would never find out.

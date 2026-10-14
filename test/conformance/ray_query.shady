@@ -1,0 +1,59 @@
+// Inline ray queries, from every stage that can hold one: a fragment shadow,
+// a compute pass that alpha-tests its candidates against a texture, and one
+// helper taking the query by reference that both reach - so each entry point's
+// SPIR-V 1.4 interface has to list the globals the helper uses.
+
+struct Uniforms @uniform { float4x4 mvp; float3 light_dir; }
+Uniforms uniforms;
+accel scene;
+Sampler2D alpha_map;
+float coverage[];
+shared float tile[64];
+
+struct VertexIn { float3 position; }
+struct FragmentIn { float4 position @position; float3 world; }
+
+fn float visibility(inout RayQuery q, float3 p, float3 dir)
+{
+    q.init(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_FORCE_OPAQUE, 0xFF, p, 0.001, dir, 1000.0);
+    while (q.proceed()) {}
+    return q.committed_type() == COMMITTED_NOTHING ? 1.0 : 0.0;
+}
+
+fn FragmentIn vert(VertexIn input) @vertex
+{
+    FragmentIn o;
+    o.position = uniforms.mvp * float4(input.position, 1.0);
+    o.world = input.position;
+    return o;
+}
+
+fn float4 frag(FragmentIn input) @fragment
+{
+    RayQuery q;
+    float lit = visibility(q, input.world, uniforms.light_dir);
+    return float4(lit, lit, lit, 1.0);
+}
+
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+
+fn void ao(ComputeIn at) @compute @threads(64, 1, 1)
+{
+    RayQuery q;
+    float3 origin = float3(float(at.id.x), 0.0, 0.0);
+    q.init(scene, RAY_FLAG_NONE, 0xFF, origin, 0.01, float3(0.0, 1.0, 0.0), 10.0);
+    while (q.proceed())
+    {
+        if (q.candidate_type() == CANDIDATE_NON_OPAQUE_TRIANGLE)
+        {
+            float2 b = q.candidate_barycentrics();
+            if (alpha_map.sample_lod(b, 0.0).a > 0.5) q.confirm();
+        }
+    }
+    float t = q.committed_t();
+    uint prim = q.committed_primitive_index();
+    float4x3 m = q.committed_object_to_world();
+    tile[at.id.x] = t + float(prim) + m[0].x + visibility(q, origin, q.world_ray_direction());
+    barrier();
+    coverage[at.id.x] = tile[63 - at.id.x];
+}

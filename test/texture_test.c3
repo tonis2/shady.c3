@@ -306,3 +306,37 @@ fn void an_offset_outside_the_guaranteed_range_warns() @test
 	test::@check(warnings.len() == 1 && warnings[0].message.contains("[-8, 7]"),
 		"and warns that a device may not support it");
 }
+
+<*
+ A helper is emitted once and runs in every entry point that calls it, so an
+ implicit level inside one is asked of each of them - not only of the first,
+ which used to decide alone.
+*>
+fn void a_helper_answers_to_every_stage_that_calls_it() @test
+{
+	String helper = `
+Sampler2D albedo @set(0) @binding(0);
+struct VertexOut { float4 position @position; }
+fn float4 shade(float2 uv)
+{
+    return albedo.Sample(uv);
+}
+fn float4 frag(VertexOut input) @fragment
+{
+    return shade(input.position.xy);
+}
+`;
+	test::@check(shady_support::compile_error(helper) == "", "a fragment shader may call it");
+
+	String error = shady_support::compile_error(string::tformat(`%s
+fn VertexOut vert() @vertex
+{
+    VertexOut o;
+    o.position = shade(float2(0.5));
+    return o;
+}
+`, helper));
+	test::@check(error.starts_with("6:") && error.contains("only a fragment shader")
+		&& error.contains("`shade` is reached from `vert`, a vertex shader"),
+		"a vertex shader may not, and the message says which entry point broke it; got '%s'", error);
+}

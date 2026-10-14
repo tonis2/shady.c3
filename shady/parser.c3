@@ -1270,7 +1270,9 @@ fn Ast? parse(String source, Parser* parser = null, LineMap* map = null)
  knows and ignores the rest - is a misspelt `@framgent` that compiles into a
  module with no fragment stage and says nothing.
 *>
-const String[*] FUNCTION_ATTRIBUTES @local = { "vertex", "fragment", "compute", "threads", "subgroup_size", "required", "fallback" };
+// The stage attributes are a function's too, and come from `Stage` rather than
+// this list, so a stage added there is one the parser accepts.
+const String[*] FUNCTION_ATTRIBUTES @local = { "threads", "subgroup_size", "required", "fallback" };
 const String[*] STRUCT_ATTRIBUTES @local   = { "uniform", "pushconstant", "storage", "address" };
 const String[*] MEMBER_ATTRIBUTES @local   = { "position", "location", "builtin", "flat" };
 const String[*] RESOURCE_ATTRIBUTES @local = { "set", "binding" };
@@ -1295,12 +1297,13 @@ fn void? validate_attributes(Parser* parser, Decl*[] decls) @local
 					check_attributes(parser, member.attributes, MEMBER_ATTRIBUTES[..], "a struct member")!;
 				}
 			case FUNCTION:
-				check_attributes(parser, decl.attributes, FUNCTION_ATTRIBUTES[..], "a function")!;
+				check_attributes(parser, decl.attributes, FUNCTION_ATTRIBUTES[..], "a function", stages: true)!;
 				foreach (param : decl.function.params)
 				{
 					check_attributes(parser, param.attributes, {}, "a parameter")!;
 				}
 				check_hole_shape(parser, decl)!;
+				check_one_stage(parser, decl)!;
 			case RESOURCE:
 				check_attributes(parser, decl.attributes, RESOURCE_ATTRIBUTES[..], "a module-level variable")!;
 			case CONSTANT:
@@ -1317,15 +1320,18 @@ fn bool is_listed(String name, String[] names) @local
 	return false;
 }
 
-fn void? check_attributes(Parser* parser, Attribute[] attributes, String[] allowed, String what) @local
+fn void? check_attributes(Parser* parser, Attribute[] attributes, String[] allowed, String what, bool stages = false) @local
 {
 	foreach (attribute : attributes)
 	{
-		if (is_listed(attribute.name, allowed)) continue;
+		Stage stage;
+		bool is_stage = stage_from_attribute(attribute.name, &stage);
+		if (is_listed(attribute.name, allowed) || (stages && is_stage)) continue;
 
 		// Two different mistakes: a name the language has, on the wrong kind of
 		// declaration, and a name it does not have at all - most often a typo.
-		bool known = is_listed(attribute.name, FUNCTION_ATTRIBUTES[..])
+		bool known = is_stage
+			|| is_listed(attribute.name, FUNCTION_ATTRIBUTES[..])
 			|| is_listed(attribute.name, STRUCT_ATTRIBUTES[..])
 			|| is_listed(attribute.name, MEMBER_ATTRIBUTES[..])
 			|| is_listed(attribute.name, RESOURCE_ATTRIBUTES[..])
@@ -1334,15 +1340,23 @@ fn void? check_attributes(Parser* parser, Attribute[] attributes, String[] allow
 		DString takes;
 		takes.init(mem, 64);
 		defer takes.free();
-		if (allowed.len == 0)
+		if (allowed.len == 0 && !stages)
 		{
 			takes.append_string("none");
 		}
 		else
 		{
-			foreach (i, name : allowed)
+			if (stages)
 			{
-				if (i > 0) takes.append_string(", ");
+				foreach (each : Stage::values)
+				{
+					if (takes.len()) takes.append_string(", ");
+					takes.appendf("@%s", each.attribute());
+				}
+			}
+			foreach (name : allowed)
+			{
+				if (takes.len()) takes.append_string(", ");
 				takes.appendf("@%s", name);
 			}
 		}
@@ -1351,6 +1365,31 @@ fn void? check_attributes(Parser* parser, Attribute[] attributes, String[] allow
 			? string::tformat("`@%s` does not apply to %s; %s takes %s", attribute.name, what, what, takes.str_view())
 			: string::tformat("unknown attribute `@%s`; %s takes %s", attribute.name, what, takes.str_view());
 		parser.fail_at(attribute.line, attribute.column, message);
+		parser.error_length = (uint)attribute.name.len + 1;
+		return PARSE_ERROR~;
+	}
+}
+
+<*
+ One function is one entry point of one stage. Two stage attributes on it would
+ have the first one win and the second say nothing, so the second is refused
+ where it is written.
+*>
+fn void? check_one_stage(Parser* parser, Decl* decl) @local
+{
+	Attribute* first = null;
+	foreach (&attribute : decl.attributes)
+	{
+		Stage stage;
+		if (!stage_from_attribute(attribute.name, &stage)) continue;
+		if (!first)
+		{
+			first = attribute;
+			continue;
+		}
+		parser.fail_at(attribute.line, attribute.column, string::tformat(
+			"`%s` is already a @%s entry point - one function is one stage, so write a second function for @%s",
+			decl.name, first.name, attribute.name));
 		parser.error_length = (uint)attribute.name.len + 1;
 		return PARSE_ERROR~;
 	}
@@ -1368,7 +1407,8 @@ fn void? check_hole_shape(Parser* parser, Decl* decl) @local
 	if (!required && !fallback) return;
 
 	Attribute* at = required ? required : fallback;
-	bool entry = decl.attributes.find("vertex") || decl.attributes.find("fragment") || decl.attributes.find("compute");
+	Stage stage;
+	bool entry = stage_attribute(decl.attributes, &stage) != null;
 	String message;
 	if (required && fallback)
 	{

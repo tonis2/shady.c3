@@ -184,3 +184,162 @@ fn float4 frag(VOut input) @fragment
 	test::@check(shady_support::has_decoration(spirv, shady::Decoration.FLAT),
 		"a uint2 varying is an integer varying, and Flat like a uint");
 }
+
+<*
+ Every stage there is, through each of its spellings: the attribute names it,
+ the name maps back to it, and it has an execution model of its own.
+*>
+fn void every_stage_round_trips() @test
+{
+	foreach (stage : Stage::values)
+	{
+		Stage out;
+		test::@check(shady::stage_from_attribute(stage.attribute(), &out) && out == stage,
+			"@%s should name its own stage", stage.attribute());
+		foreach (other : Stage::values)
+		{
+			if (other == stage) continue;
+			test::@check(stage.execution_model() != other.execution_model(),
+				"@%s and @%s are different execution models", stage.attribute(), other.attribute());
+		}
+	}
+}
+
+fn void a_function_is_one_stage() @test
+{
+	String error = shady_support::compile_error(`
+struct FragmentIn { float4 position @position; }
+fn float4 frag(FragmentIn input) @fragment @compute
+{
+	return float4(1.0);
+}
+`);
+	test::@check(error.contains("already a @fragment entry point"), "two stages on one function; got '%s'", error);
+}
+
+fn void a_void_entry_point_returns_nothing() @test
+{
+	String error = shady_support::compile_error(`
+float data[];
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+fn void main(ComputeIn at) @compute @threads(1, 1, 1)
+{
+	return data[0];
+}
+`);
+	test::@check(error.contains("returns void"), "a value return in a void entry point; got '%s'", error);
+}
+
+<*
+ `discard` ends a fragment, so it is refused in any other stage - in the entry
+ point's own body, and in a helper only a vertex shader calls.
+*>
+fn void discard_is_fragment_only() @test
+{
+	String error = shady_support::compile_error(`
+struct VertexOut { float4 position @position; }
+fn VertexOut vert() @vertex
+{
+	VertexOut o;
+	o.position = float4(1.0);
+	if (o.position.x > 2.0) discard;
+	return o;
+}
+`);
+	test::@check(error.contains("`discard`") && error.contains("fragment"), "discard in a vertex shader; got '%s'", error);
+
+	error = shady_support::compile_error(`
+struct VertexOut { float4 position @position; }
+fn void cull(float x)
+{
+	if (x > 2.0) discard;
+}
+fn VertexOut vert() @vertex
+{
+	VertexOut o;
+	o.position = float4(1.0);
+	cull(o.position.x);
+	return o;
+}
+`);
+	test::@check(error.starts_with("5:") && error.contains("`cull` is reached from `vert`, a vertex shader"),
+		"discard in a helper a vertex shader calls; got '%s'", error);
+}
+
+<*
+ A module that uses nothing past SPIR-V 1.0 stays there, and its entry points
+ list only their inputs and outputs: listing a uniform block is a 1.4 rule, and
+ a 1.0 validator refuses it.
+*>
+fn void a_plain_interface_is_inputs_and_outputs() @test
+{
+	char[] spirv = shady_support::build(`
+struct Uniforms @uniform { float4 tint; }
+Uniforms uniforms;
+struct FragmentIn { float4 position @position; float4 color; }
+fn float4 frag(FragmentIn input) @fragment
+{
+	return input.color * uniforms.tint;
+}
+`);
+	defer free(spirv);
+
+	test::@check(shady_support::version(spirv) == shady::VERSION_1_0, "the module stays at 1.0");
+	test::@check(shady_support::interface_size(spirv, "frag") == 3, "position, color and the output");
+	test::@check(shady_support::interface_count(spirv, "frag", shady::StorageClass.UNIFORM) == 0,
+		"a 1.0 interface lists no uniform block");
+}
+
+<*
+ A built-in is something a stage is handed: refused in a stage that does not
+ have it, as a type Vulkan does not give it, and in a returned struct. Each of
+ these used to be a module only the validator refused.
+*>
+fn void a_builtin_belongs_to_its_stage() @test
+{
+	String error = shady_support::compile_error(`
+struct FragmentIn { float4 position @position; uint id @builtin(vertex_index); }
+fn float4 frag(FragmentIn input) @fragment
+{
+	return float4(float(input.id));
+}
+`);
+	test::@check(error.starts_with("2:") && error.contains("only in a vertex shader, and this is a fragment shader"),
+		"vertex_index in a fragment shader; got '%s'", error);
+
+	error = shady_support::compile_error(`
+struct FragmentIn { float4 position @position; float facing @builtin(front_facing); }
+fn float4 frag(FragmentIn input) @fragment
+{
+	return float4(input.facing);
+}
+`);
+	test::@check(error.contains("is a bool, so `facing` cannot be a float"), "a float front_facing; got '%s'", error);
+
+	error = shady_support::compile_error(`
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+struct Out { float4 position @position; uint3 id @builtin(global_invocation_id); }
+fn Out vert() @vertex
+{
+	Out o;
+	o.position = float4(1.0);
+	return o;
+}
+`);
+	test::@check(error.contains("is an input"), "a built-in in a returned struct; got '%s'", error);
+}
+
+fn void an_integer_builtin_takes_either_signedness() @test
+{
+	String error = shady_support::compile_error(`
+struct VertexIn { int vid @builtin(vertex_index); int3 unused; }
+struct VertexOut { float4 position @position; }
+fn VertexOut vert(VertexIn input) @vertex
+{
+	VertexOut o;
+	o.position = float4(float(input.vid));
+	return o;
+}
+`);
+	test::@check(error == "", "an int vertex_index is as good as a uint; got '%s'", error);
+}
