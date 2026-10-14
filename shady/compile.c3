@@ -326,7 +326,9 @@ fn void? Codegen.declare_constants(&self, Ast* ast)
 	{
 		if (decl.kind != DeclKind.CONSTANT) continue;
 
-		Type* type = self.types.find(decl.constant.type.name);
+		Type* type = decl.constant.type.is_image
+			? self.resolve_type(decl.constant.type, decl.line, decl.column)!
+			: self.types.find(decl.constant.type.name);
 		if (!type)
 		{
 			self.fail(decl.line, decl.column,
@@ -584,6 +586,8 @@ fn void? Codegen.emit_resources(&self, Ast* ast)
 					self.fail(decl.line, decl.column, message);
 					return CODEGEN_ERROR~;
 				}
+
+				if (element.kind == STORAGE_IMAGE) self.uses_storage_images = true;
 
 				// A runtime-sized descriptor array needs the extension; a fixed
 				// one does not.
@@ -920,11 +924,30 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, Stage stage, String entry_n
 	}
 
 	// Outputs, from the return type.
-	Type* return_type = self.types.find(decl.function.return_type.name);
+	Type* return_type = decl.function.return_type.is_image
+		? self.resolve_type(decl.function.return_type, decl.line, decl.column)!
+		: self.types.find(decl.function.return_type.name);
 	if (!return_type)
 	{
 		self.fail(decl.line, decl.column,
 			string::format(self.allocator, "unknown type `%s`", decl.function.return_type.name));
+		return CODEGEN_ERROR~;
+	}
+
+	// What an entry point returns is stored to its outputs, and a handle
+	// cannot be stored (VUID-StandaloneSpirv-OpTypeImage-06924).
+	if (return_type.is_handle())
+	{
+		self.fail(decl.line, decl.column, string::format(self.allocator,
+			"a function cannot return %s - it is a handle, not a value", return_type.a_name(self.allocator)));
+		return CODEGEN_ERROR~;
+	}
+	// A compute shader has no outputs to return into: Vulkan has no Output
+	// variable in one (VUID-StandaloneSpirv-None-04644).
+	if (stage == Stage.COMPUTE && return_type.kind != VOID)
+	{
+		self.fail(decl.line, decl.column, string::format(self.allocator,
+			"`%s` is a compute shader, which returns void - it writes its results to buffers or images", decl.name));
 		return CODEGEN_ERROR~;
 	}
 

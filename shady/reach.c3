@@ -232,6 +232,8 @@ fn void add_globals(IdListC* interface_ids, Reach* reach) @private
 *>
 fn void Codegen.finish_module(&self)
 {
+	self.decorate_image_access();
+
 	// Buffer device addresses change the module header, not just its body: the
 	// addressing model stops being Logical, so it can only be written once the
 	// shader has been walked. The memory model is kept: a cooperative matrix

@@ -82,8 +82,9 @@ fn Id Module.type_function(&self, Id return_type, Id[] parameters = {})
 }
 
 <*
- A sampled image type, i.e. a texture. `depth`, `arrayed`, `multisampled` and
- `format` follow the OpTypeImage operand order.
+ An image type: a texture, with a sampler, or a storage image, written by
+ texel. `depth`, `arrayed`, `multisampled`, `sampled` and `format` follow the
+ OpTypeImage operand order.
 *>
 fn Id Module.type_image(&self, Id sampled_type, Dim dim = Dim.D2, uint depth = 0, uint arrayed = 0,
                         uint multisampled = 0, SampledImage sampled = SampledImage.WITH_SAMPLER,

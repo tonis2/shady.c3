@@ -30,6 +30,7 @@ enum TypeKind : char
 	TEXTURE,
 	SAMPLER,
 	SAMPLED_IMAGE, // a combined image and sampler, `Sampler2D`
+	STORAGE_IMAGE, // a writable image, `image2d<rgba8>`; `element` is its texel type
 	POINTER, // a buffer device address; `element` is the pointee
 	COOPMAT, // a cooperative matrix: one tile per workgroup, `coopmat<float, 16, 16, workgroup>`
 	ACCEL,   // a ray-tracing acceleration structure: the scene rays are traced against
@@ -71,10 +72,14 @@ struct Type
 	// only so the language can tell which sample methods it serves.
 	uint depth;
 
-	// TEXTURE and SAMPLED_IMAGE: the OpTypeImage Arrayed operand, 1 for a
-	// layered texture such as `texture2d_array`. A coordinate into one carries
-	// the layer as its last component.
+	// TEXTURE, SAMPLED_IMAGE and STORAGE_IMAGE: the OpTypeImage Arrayed
+	// operand, 1 for a layered texture such as `texture2d_array`. A coordinate
+	// into one carries the layer as its last component.
 	uint arrayed;
+
+	// STORAGE_IMAGE only: the texel format the bound view holds, or UNKNOWN
+	// when the host picks it. The texel type in `element` follows from it.
+	ImageFormat format;
 
 	// ARRAY only: no declared length, so it is an OpTypeRuntimeArray. Legal as
 	// the tail of a storage block and nowhere else.
@@ -228,6 +233,20 @@ fn Type* TypeTable.coopmat_of(&self, Type* element, uint rows, uint columns, uin
 	type.count   = columns;
 	type.scope   = scope;
 	type.use     = use;
+	return type;
+}
+
+<*
+ A storage image type, interned under its written name - `image2d<rgba8>` -
+ so two declarations of the same image are one Type. `texel` is what a texel
+ reads and writes as, which the format decides when there is one.
+*>
+fn Type* TypeTable.storage_image_of(&self, String name, Dim dim, uint arrayed, ImageFormat format, Type* texel)
+{
+	if (Type* existing = self.find(name)) return existing;
+	Type* type   = self.add(STORAGE_IMAGE, name, texel, 0, dim);
+	type.arrayed = arrayed;
+	type.format  = format;
 	return type;
 }
 
@@ -398,6 +417,8 @@ fn String Type.a_name(&self, Allocator allocator)
 	char first = self.name.len ? self.name[0] : 'x';
 	bool vowel = first == 'a' || first == 'e' || first == 'i' || first == 'o' || first == 'u'
 		|| first == 'A' || first == 'E' || first == 'I' || first == 'O' || first == 'U';
+	// "a uint3": the vowel is spelled, not said.
+	if (self.name.starts_with("uint")) vowel = false;
 	return string::format(allocator, "%s %s", vowel ? "an" : "a", self.name);
 }
 
@@ -466,16 +487,20 @@ fn uint Type.width(&self) => self.bits == 0 ? 32 : self.bits;
 fn bool Type.is_numeric(&self) => self.kind == INT || self.kind == UINT || self.kind == FLOAT;
 
 <*
- A type that is a descriptor and not memory: an image, a sampler, or a combined
- image-and-sampler.
+ A type that is a descriptor and not memory: an image, a sampler, a combined
+ image-and-sampler, a storage image, or an acceleration structure.
 *>
 fn bool Type.is_opaque(&self) => self.is_image_like() || self.kind == ACCEL;
 
 <*
- An image, a sampler, or a combined image-and-sampler: the descriptors an
- image instruction reads, and the ones the image capabilities are about.
+ An image, a sampler, a combined image-and-sampler or a storage image: the
+ descriptors an image instruction reads, and the ones the image capabilities
+ are about.
 *>
-fn bool Type.is_image_like(&self) => self.kind == TEXTURE || self.kind == SAMPLER || self.kind == SAMPLED_IMAGE;
+fn bool Type.is_image_like(&self)
+{
+	return self.kind == TEXTURE || self.kind == SAMPLER || self.kind == SAMPLED_IMAGE || self.kind == STORAGE_IMAGE;
+}
 
 <*
  A type whose values are handles rather than data: a descriptor, which the host
@@ -519,6 +544,18 @@ fn uint Type.coordinate_components(&self) => self.extent_components() + self.arr
  images, so a cube answers two.
 *>
 fn uint Type.size_components(&self) => (self.dim == Dim.CUBE ? 2 : self.extent_components()) + self.arrayed;
+
+<*
+ How wide a storage image's texel address is. A texel has an integer address,
+ one number per dimension plus the layer - except on a cube, whose address is
+ (x, y, face) and whose array folds the layer into the face, as layer * 6 +
+ face, so both take three.
+*>
+fn uint Type.texel_address_components(&self)
+{
+	if (self.dim == Dim.CUBE) return 3;
+	return self.extent_components() + self.arrayed;
+}
 
 <*
  Component count for scalars and vectors; 1 for a scalar. Meaningless for

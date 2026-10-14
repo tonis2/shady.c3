@@ -154,6 +154,19 @@ fn TypeRef? Parser.type_ref(&self)
 		type.coopmat_use     = use.text;
 	}
 
+	// `image2d<rgba8>`: a storage image names its texel format, or with a
+	// texel type such as `image2d<float4>` leaves the format to the host. A
+	// family name without the brackets stays an ordinary name - the resolver
+	// says what is missing - so a struct called `image2d` keeps working.
+	if (is_storage_image_family(name.text) && self.check(LT))
+	{
+		self.advance();
+		Token argument = self.expect(IDENT, "expected a format such as `rgba8`, or a texel type such as `float4`")!;
+		self.expect(GT, "expected `>` closing the image type")!;
+		type.is_image       = true;
+		type.image_argument = argument.text;
+	}
+
 	if (self.match(LBRACKET))
 	{
 		type.is_array = true;
@@ -645,8 +658,10 @@ fn bool Parser.at_declaration(&self)
 	if (self.peek(1).kind == IDENT) return true;
 
 	// `coopmat<float, 16, 16, workgroup> tile;`: the shape sits between the
-	// type and the name, so the lookahead walks past the closing `>`.
-	if (self.peek().text == "coopmat" && self.peek(1).kind == LT)
+	// type and the name, so the lookahead walks past the closing `>`. A
+	// storage image has the same shape, and is a declaration - one the
+	// resolver refuses as a local - rather than `a < b > c`.
+	if ((self.peek().text == "coopmat" || is_storage_image_family(self.peek().text)) && self.peek(1).kind == LT)
 	{
 		usz at = 2;
 		while (self.peek(at).kind != GT && self.peek(at).kind != EOF)

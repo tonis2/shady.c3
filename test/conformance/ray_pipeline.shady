@@ -1,13 +1,14 @@
 // The ray-tracing pipeline, every stage of it: a ray-generation shader that
-// traces from a helper and calls a callable shader, two miss shaders with
-// different payloads, a closest-hit shader that traces a shadow ray and
-// recurses through an inout helper, an any-hit shader that ignores a hit from a
-// helper and terminates the ray, and an intersection shader for a sphere.
+// traces from a helper, calls a callable shader and writes a storage image,
+// two miss shaders with different payloads, a closest-hit shader that traces a
+// shadow ray and recurses through an inout helper, an any-hit shader that
+// ignores a hit from a helper and terminates the ray, and an intersection
+// shader for a sphere.
 
 struct Camera @uniform { float4x4 inverse_view; float3 origin; float3 sun; }
 Camera camera;
 accel scene;
-float4 pixels[];
+image2d<rgba8> output;
 Sampler2D leaves;
 
 struct Payload { float3 color; uint depth; }
@@ -44,7 +45,7 @@ fn void gen(LaunchIn at) @raygen
     m.roughness = 0.5;
     execute_callable(0u, m);
 
-    pixels[at.id.y * at.size.x + at.id.x] = float4(m.albedo, 1.0);
+    output[at.id.xy] = float4(m.albedo, 1.0);
 }
 
 fn void sky(inout Payload p, RayIn ray) @miss

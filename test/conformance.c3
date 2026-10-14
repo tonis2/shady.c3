@@ -45,6 +45,7 @@ const char[*] EMBED_TEXTURES     = $embed("conformance/textures.shady");
 const char[*] EMBED_SEPARATE     = $embed("conformance/separate_textures.shady");
 const char[*] EMBED_RAY_QUERY    = $embed("conformance/ray_query.shady");
 const char[*] EMBED_RAY_PIPELINE = $embed("conformance/ray_pipeline.shady");
+const char[*] EMBED_STORAGE_IMAGES = $embed("conformance/storage_images.shady");
 // Not a case of its own: `import.shady` pulls it in, and a module without an
 // entry point is not something to compile on its own.
 const char[*] EMBED_IMPORT_LIB   = $embed("conformance/import_lib.shady");
@@ -101,6 +102,7 @@ const Case[*] CORPUS = {
 	{ "separate_textures", (String)EMBED_SEPARATE[..], false },
 	{ "ray_query",    (String)EMBED_RAY_QUERY[..],    false },
 	{ "ray_pipeline", (String)EMBED_RAY_PIPELINE[..], false },
+	{ "storage_images", (String)EMBED_STORAGE_IMAGES[..], false },
 };
 
 fn void the_conformance_corpus_compiles_and_validates() @test

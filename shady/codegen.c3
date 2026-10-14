@@ -36,6 +36,10 @@ struct Value
 	// reached through one. Carried so every instruction on the way to the
 	// image operation can be decorated, which is where drivers look.
 	bool  non_uniform;
+
+	// The value is a texel read from a storage image: a copy, so writing one
+	// of its components would change nothing - which is said, not done.
+	bool  texel;
 }
 
 struct Local
@@ -59,6 +63,11 @@ struct Resource
 	uint      set;
 	uint      binding;
 	uint      size;    // block size in bytes, for uniform and push constant blocks
+
+	// A storage image's use across the module, which decides whether it is
+	// decorated NonReadable or NonWritable.
+	bool      reads;
+	bool      writes;
 }
 
 <*
@@ -205,6 +214,10 @@ struct Codegen
 	// A ray flag that skips triangles or AABBs was named, which is a
 	// capability of its own.
 	bool uses_primitive_culling;
+
+	// A storage image was declared, so a barrier orders image memory too.
+	// Known before any body is written: resources come first.
+	bool uses_storage_images;
 
 	<*
 	 Lay every block out with C3's packing instead of std140/std430. Off by
@@ -407,6 +420,7 @@ fn Id Codegen.type_id(&self, Type* type)
 					array_stride(type.element, self.block_layout(ADDRESS)));
 			}
 		case TEXTURE: type.id = self.image_type_id(type);
+		case STORAGE_IMAGE: type.id = self.storage_image_type_id(type);
 		case ACCEL:
 			// No capability here: a declared resource is emitted whether or not
 			// anything reads it, and which of the two ray capabilities it needs
@@ -469,9 +483,16 @@ fn Type*? Codegen.resolve_type(&self, TypeRef ref, uint line, uint column)
 {
 	if (ref.is_coopmat) return self.resolve_coopmat(ref, line, column);
 
-	Type* type = self.types.find(ref.name);
+	Type* type = ref.is_image ? self.resolve_storage_image(ref, line, column)! : self.types.find(ref.name);
 	if (!type)
 	{
+		if (is_storage_image_family(ref.name))
+		{
+			self.fail(line, column, string::format(self.allocator,
+				"`%s` names its format: `%s<rgba8>`, or `%s<float4>` to let the host pick one",
+				ref.name, ref.name, ref.name));
+			return CODEGEN_ERROR~;
+		}
 		self.fail(line, column, string::format(self.allocator, "unknown type `%s`", ref.name));
 		return CODEGEN_ERROR~;
 	}
@@ -1057,9 +1078,24 @@ fn Type*? Codegen.resolve_coopmat(&self, TypeRef ref, uint line, uint column)
  The storage class a pointer id was declared with. Tracked by asking the
  resources and locals, since SPIR-V ids carry no type information here.
 *>
-fn Value? Codegen.index_expression(&self, Expr* expr)
+fn Value? Codegen.index_expression(&self, Expr* expr) => self.index_value(self.expression(expr.index.value)!, expr);
+
+<*
+ `base[i]`, with the base already evaluated: the write sites evaluate it once
+ to see whether it is a storage image, and come here when it is not.
+*>
+fn Value? Codegen.index_value(&self, Value base, Expr* expr)
 {
-	Value base  = self.expression(expr.index.value)!;
+	// A storage image is indexed by texel address, which reads the texel.
+	if (base.type.kind == STORAGE_IMAGE) return self.texel_index_read(base, expr);
+	if (base.type.kind == TEXTURE || base.type.kind == SAMPLED_IMAGE)
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"%s is read with `load` or sampled - only a storage image such as `%s<rgba8>` is indexed by texel",
+			base.type.a_name(self.allocator), storage_family_name(base.type.dim, base.type.arrayed)));
+		return CODEGEN_ERROR~;
+	}
+
 	Value index = self.expression(expr.index.index)!;
 
 	// A device address indexes as an array of its pointee.
@@ -1100,7 +1136,14 @@ fn Value? Codegen.index_expression(&self, Expr* expr)
 			// array indexed non-uniformly needs only ShaderNonUniform, which
 			// NonUniformResourceIndex already declared.
 			self.mod.decorate(ptr, Decoration.NON_UNIFORM);
-			if (element.is_image_like()) self.mod.capability(Capability.SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING);
+			if (element.kind == STORAGE_IMAGE)
+			{
+				self.mod.capability(Capability.STORAGE_IMAGE_ARRAY_NON_UNIFORM_INDEXING);
+			}
+			else if (element.is_image_like())
+			{
+				self.mod.capability(Capability.SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING);
+			}
 			return (Value) { .type = element, .pointer = ptr, .storage = base.storage, .non_uniform = true };
 		}
 		return (Value) { .type = element, .pointer = ptr, .storage = base.storage };
@@ -1168,6 +1211,12 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 		Value base   = self.expression(member.member.value)!;
 		uint[4] indices;
 		uint    count;
+		if (base.texel)
+		{
+			self.fail(expr.line, expr.column,
+				"a texel is written whole - read it into a local, change the component, and write it back");
+			return CODEGEN_ERROR~;
+		}
 		if (base.type.kind == VECTOR && base.pointer != NO_ID
 			&& swizzle_indices(member.member.name, &indices, &count) && count == 1)
 		{
@@ -1175,7 +1224,20 @@ fn Value? Codegen.assign_expression(&self, Expr* expr)
 		}
 	}
 
-	Value target = self.expression(expr.assign.target)!;
+	// `img[at] = v` writes a texel: no pointer to store through, an image
+	// write instead. The base is evaluated once either way.
+	Value target;
+	if (expr.assign.target.kind == INDEX)
+	{
+		Expr* index = expr.assign.target;
+		Value base  = self.expression(index.index.value)!;
+		if (base.type.kind == STORAGE_IMAGE) return self.texel_assign(expr, base);
+		target = self.index_value(base, index)!;
+	}
+	else
+	{
+		target = self.expression(expr.assign.target)!;
+	}
 	if (target.pointer == NO_ID)
 	{
 		self.fail(expr.line, expr.column, "cannot assign to this expression");
@@ -1766,7 +1828,10 @@ fn void? Codegen.declare_functions(&self, Ast* ast)
 		Stage stage;
 		if (stage_attribute(decl.attributes, &stage)) continue;
 
-		Type* return_type = self.types.find(decl.function.return_type.name);
+		// A storage image is resolved to be refused below as the handle it is.
+		Type* return_type = decl.function.return_type.is_image
+			? self.resolve_type(decl.function.return_type, decl.line, decl.column)!
+			: self.types.find(decl.function.return_type.name);
 		if (!return_type)
 		{
 			self.fail(decl.line, decl.column,
@@ -2509,6 +2574,7 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 		{
 			return self.texture_method(expr, base, callee.member.name);
 		}
+		if (base.type.kind == STORAGE_IMAGE) return self.storage_image_method(expr, base, callee.member.name);
 		if (base.type.kind == RAY_QUERY) return self.ray_query_method(expr, base, callee.member.name);
 		if (self.has_function(callee.member.name)) return self.user_call(expr, callee.member.name, &base);
 
@@ -2584,8 +2650,10 @@ fn Value? Codegen.workgroup_barrier(&self, Expr* expr)
 	Type* uint_t = self.types.find("uint");
 	Id scope_execution = self.mod.const_u32(self.type_id(uint_t), 2); // Workgroup
 	Id scope_memory    = self.mod.const_u32(self.type_id(uint_t), 2);
-	Id semantics       = self.mod.const_u32(self.type_id(uint_t),
-		(uint)MemorySemantics.ACQUIRE_RELEASE | (uint)MemorySemantics.WORKGROUP_MEMORY | (uint)MemorySemantics.UNIFORM_MEMORY);
+	uint memory = (uint)MemorySemantics.ACQUIRE_RELEASE | (uint)MemorySemantics.WORKGROUP_MEMORY | (uint)MemorySemantics.UNIFORM_MEMORY;
+	// A storage image is memory another invocation writes too.
+	if (self.uses_storage_images) memory |= (uint)MemorySemantics.IMAGE_MEMORY;
+	Id semantics       = self.mod.const_u32(self.type_id(uint_t), memory);
 
 	// OpControlBarrier carries no result type and no result id, so it is
 	// emitted by hand rather than through `Function.emit`.
@@ -2859,8 +2927,25 @@ fn Value? Codegen.atomic_add_call(&self, Expr* expr)
 		self.fail(expr.line, expr.column, "`InterlockedAdd` takes a destination and a value");
 		return CODEGEN_ERROR~;
 	}
-	Value dest  = self.expression(expr.call.args[0])!;
-	Value value = self.expression(expr.call.args[1])!;
+	// `InterlockedAdd(img[at], v)` adds to a texel, through its address.
+	Expr* written = expr.call.args[0];
+	Value dest;
+	if (written.kind == INDEX)
+	{
+		Value base = self.expression(written.index.value)!;
+		if (base.type.kind == STORAGE_IMAGE)
+		{
+			return self.texel_atomic_add(expr, base, self.expression(expr.call.args[1])!);
+		}
+		dest = self.index_value(base, written)!;
+	}
+	else
+	{
+		dest = self.expression(written)!;
+	}
+	// `InterlockedAdd(count, 1)`: the literal takes the destination's kind,
+	// as it would on either side of a `+`.
+	Value value = self.adapt_literal(self.expression(expr.call.args[1])!, expr.call.args[1], dest.type);
 
 	if (dest.pointer == NO_ID)
 	{
@@ -3237,6 +3322,13 @@ fn Value? Codegen.texture_method(&self, Expr* expr, Value texture, String writte
 	switch (method)
 	{
 		case "":
+			if (written == "store" || written == "Store")
+			{
+				self.fail(expr.line, expr.column, string::format(self.allocator,
+					"a %s is read-only - declare an `%s<format>` to write texels",
+					texture.type.name, storage_family_name(texture.type.dim, texture.type.arrayed)));
+				return CODEGEN_ERROR~;
+			}
 			self.fail(expr.line, expr.column,
 				string::format(self.allocator, "a %s has no method `%s`", texture.type.name, written));
 			return CODEGEN_ERROR~;

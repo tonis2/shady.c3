@@ -112,3 +112,30 @@ fn FragmentIn v(VertexIn i) @vertex(1) { FragmentIn o; o.position = float4(i.pos
 
 	test::@check(error.contains("one name"), "the message should say what the argument must be; got '%s'", error);
 }
+
+<*
+ A compute shader has no outputs: Vulkan allows no Output variable in one, so
+ a value it returned would have nowhere to go.
+*>
+fn void a_compute_shader_returns_void() @test
+{
+	String error = shady_support::compile_error(`
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+fn float4 main(ComputeIn at) @compute @threads(1, 1, 1) { return float4(1.0); }
+`);
+	test::@check(error.contains("returns void"), "a compute shader returning a value is refused; got '%s'", error);
+}
+
+<*
+ An entry point's return value is stored to its outputs, and a handle cannot
+ be stored - the same rule a helper's return is held to.
+*>
+fn void an_entry_point_returns_no_handle() @test
+{
+	String error = shady_support::compile_error(`
+texture2d tex;
+struct FragmentIn { float4 position @position; }
+fn texture2d frag(FragmentIn input) @fragment { return tex; }
+`);
+	test::@check(error.contains("cannot return a texture2d"), "a texture return is refused; got '%s'", error);
+}

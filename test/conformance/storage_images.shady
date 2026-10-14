@@ -1,0 +1,81 @@
+// Storage images: every family, a format the device knows and one the host
+// picks, indexing and the methods, an atomic histogram, a bindless table
+// written non-uniformly, a barrier between invocations sharing texels, and a
+// fragment shader that writes one as well as returning its colour.
+
+image2d<rgba16f>       hdr;
+image2d<rgba8>         ldr;
+image2d<r32ui>         histogram;
+image2d<float4>        scratch;      // the host picks the format
+image2d<rgba8>         targets[];
+image3d<r32f>          volume;
+image2d_array<rg16f>   motion;
+imagecube<rgba8>       sky;
+imagecube_array<rgba8> probes;
+image1d<r32i>          ramp;
+image2d<r11f_g11f_b10f> bloom;
+image2d<rgba8>         splat;
+
+struct ComputeIn
+{
+    uint3 id    @builtin(global_invocation_id);
+    uint3 local @builtin(local_invocation_id);
+}
+
+fn uint bucket(float3 color)
+{
+    float luma = dot(color, float3(0.2126, 0.7152, 0.0722));
+    return uint(clamp(luma, 0.0, 1.0) * 255.0);
+}
+
+// A helper reached from the compute entry: the texel ops work from anywhere.
+fn void count(float3 color)
+{
+    InterlockedAdd(histogram[int2(int(bucket(color)), 0)], 1);
+}
+
+fn void tonemap(ComputeIn at) @compute @threads(8, 8, 1)
+{
+    int2 extent = ldr.size();
+    if (at.id.x >= uint(extent.x) || at.id.y >= uint(extent.y)) return;
+
+    float4 c = hdr[at.id.xy];
+    float3 mapped = c.rgb / (c.rgb + 1.0);
+    ldr[at.id.xy] = float4(mapped, 1.0);
+    bloom[at.id.xy] = max(c.rgb - 1.0, float3(0.0));
+    count(c.rgb);
+
+    // Every invocation writes its texel, then reads its neighbour's.
+    scratch.store(at.id.xy, c);
+    barrier();
+    uint2 neighbour = uint2((at.local.x + 1u) % 8u, at.local.y) + at.id.xy - at.local.xy;
+    float4 n = scratch.load(neighbour);
+    ldr[at.id.xy] += float4(n.rgb * 0.0625, 0.0);
+
+    targets[NonUniformResourceIndex(at.id.x % 4u)][at.id.xy] = float4(mapped, 1.0);
+}
+
+fn void shapes(ComputeIn at) @compute @threads(4, 4, 4)
+{
+    float density = volume.load(int3(at.id));
+    volume[at.id] = density * 0.5;
+
+    float2 m = motion[int3(at.id.xy, 1)];
+    motion.store(int3(at.id.xy, 0), m * 0.5);
+
+    sky[int3(at.id.xy, 3)] = float4(1.0, 0.0, 0.0, 1.0);
+    probes[uint3(at.id.xy, 6u * 2u + 4u)] = float4(0.0, 1.0, 0.0, 1.0);
+
+    int3 cube_array = probes.size();
+    int3 layers     = motion.size();
+    int  r          = ramp.load(int(at.id.x));
+    ramp[int(at.id.x) + cube_array.z + layers.z] = r + 1;
+}
+
+struct FragmentIn { float4 position @position; float2 uv; }
+
+fn float4 paint(FragmentIn input) @fragment
+{
+    splat[int2(input.position.xy)] = float4(input.uv, 0.0, 1.0);
+    return float4(input.uv, 0.0, 1.0);
+}

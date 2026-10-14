@@ -103,9 +103,14 @@ constdef Opcode : uint
 	IMAGE_FETCH               = 95,
 	IMAGE_GATHER              = 96,
 	IMAGE_DREF_GATHER         = 97,
+	// A storage image's texels: read and written by address, no sampler.
+	IMAGE_READ                = 98,
+	IMAGE_WRITE               = 99,
 	// The image half of a sampled image: what a fetch or a query reads.
 	IMAGE                     = 100,
 	IMAGE_QUERY_SIZE_LOD      = 103,
+	// The size of a storage image, which has one level and so no level operand.
+	IMAGE_QUERY_SIZE          = 104,
 	IMAGE_QUERY_LEVELS        = 106,
 
 	CONVERT_F_TO_U            = 109,
@@ -221,6 +226,9 @@ constdef Opcode : uint
 	RAY_QUERY_GET_INTERSECTION_OBJECT_TO_WORLD_KHR = 6031,
 	RAY_QUERY_GET_INTERSECTION_WORLD_TO_OBJECT_KHR = 6032,
 
+	// The address of one texel, for an atomic on a storage image.
+	IMAGE_TEXEL_POINTER       = 60,
+
 	CONTROL_BARRIER           = 224,
 	ATOMIC_I_ADD              = 234,
 
@@ -252,9 +260,17 @@ constdef Capability : uint
 	SAMPLED_1D                         = 43,
 	SAMPLED_CUBE_ARRAY                 = 45,
 	IMAGE_QUERY                        = 50,
+	// The storage-image counterparts of the two above, and what a storage
+	// image's format or a format chosen by the host needs.
+	IMAGE_CUBE_ARRAY                   = 34,
+	IMAGE_1D                           = 44,
+	STORAGE_IMAGE_EXTENDED_FORMATS     = 49,
+	STORAGE_IMAGE_READ_WITHOUT_FORMAT  = 55,
+	STORAGE_IMAGE_WRITE_WITHOUT_FORMAT = 56,
 	SHADER_NON_UNIFORM                 = 5301,
 	RUNTIME_DESCRIPTOR_ARRAY           = 5302,
 	SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING = 5307,
+	STORAGE_IMAGE_ARRAY_NON_UNIFORM_INDEXING = 5309,
 	PHYSICAL_STORAGE_BUFFER_ADDRESSES  = 5347,
 	RAY_QUERY_KHR                      = 4472,
 	RAY_TRAVERSAL_PRIMITIVE_CULLING_KHR = 4478,
@@ -301,6 +317,8 @@ constdef StorageClass : uint
 	WORKGROUP               = 4,
 	FUNCTION                = 7,
 	PUSH_CONSTANT           = 9,
+	// What an OpImageTexelPointer points into: one texel of a storage image.
+	IMAGE                   = 11,
 	STORAGE_BUFFER          = 12,
 	PHYSICAL_STORAGE_BUFFER = 5349,
 	// What a ray carries between the shaders of a pipeline: the caller's
@@ -349,6 +367,10 @@ constdef Decoration : uint
 	MATRIX_STRIDE    = 7,
 	BUILTIN          = 11,
 	FLAT             = 14,
+	// A storage image only written, or only read: GLSL's `writeonly` and
+	// `readonly`, worked out from what the shader does with it.
+	NON_WRITABLE     = 24,
+	NON_READABLE     = 25,
 	LOCATION         = 30,
 	BINDING          = 33,
 	DESCRIPTOR_SET   = 34,
@@ -411,9 +433,55 @@ constdef Dim : uint
 	CUBE = 3,
 }
 
+<*
+ A storage image's texel format: what OpTypeImage says the bound view holds.
+ UNKNOWN leaves it to the host, which costs a capability per direction - one to
+ read, one to write. The order and the values are the specification's; the
+ language spells them the way GLSL's layout qualifiers do, see
+ `storage_format`. R64ui and R64i are left out: they need Int64ImageEXT.
+*>
 constdef ImageFormat : uint
 {
-	UNKNOWN = 0,
+	UNKNOWN        = 0,
+	RGBA32F        = 1,
+	RGBA16F        = 2,
+	R32F           = 3,
+	RGBA8          = 4,
+	RGBA8_SNORM    = 5,
+	RG32F          = 6,
+	RG16F          = 7,
+	R11F_G11F_B10F = 8,
+	R16F           = 9,
+	RGBA16         = 10,
+	RGB10_A2       = 11,
+	RG16           = 12,
+	RG8            = 13,
+	R16            = 14,
+	R8             = 15,
+	RGBA16_SNORM   = 16,
+	RG16_SNORM     = 17,
+	RG8_SNORM      = 18,
+	R16_SNORM      = 19,
+	R8_SNORM       = 20,
+	RGBA32I        = 21,
+	RGBA16I        = 22,
+	RGBA8I         = 23,
+	R32I           = 24,
+	RG32I          = 25,
+	RG16I          = 26,
+	RG8I           = 27,
+	R16I           = 28,
+	R8I            = 29,
+	RGBA32UI       = 30,
+	RGBA16UI       = 31,
+	RGBA8UI        = 32,
+	R32UI          = 33,
+	RGB10_A2UI     = 34,
+	RG32UI         = 35,
+	RG16UI         = 36,
+	RG8UI          = 37,
+	R16UI          = 38,
+	R8UI           = 39,
 }
 
 // "Sampled" operand of OpTypeImage: 1 = used with a sampler, 2 = storage image.
@@ -447,6 +515,7 @@ constdef MemorySemantics : uint
 	ACQUIRE_RELEASE  = 0x8,
 	UNIFORM_MEMORY   = 0x40,
 	WORKGROUP_MEMORY = 0x100,
+	IMAGE_MEMORY     = 0x800,
 }
 
 <*

@@ -107,6 +107,27 @@ fn void main(ComputeIn at) @compute @threads(64, 1, 1)
 }
 ```
 
+**Post-processing**
+
+A storage image is a texture the shader writes, addressed by texel. Its format
+goes in the angle brackets and decides the texel type:
+
+```c3
+image2d<rgba16f> hdr;
+image2d<rgba8>   ldr;
+
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+
+fn void tonemap(ComputeIn at) @compute @threads(8, 8, 1)
+{
+    int2 extent = ldr.size();
+    if (at.id.x >= uint(extent.x) || at.id.y >= uint(extent.y)) return;
+
+    float4 c = hdr[at.id.xy];
+    ldr[at.id.xy] = float4(c.rgb / (c.rgb + 1.0), 1.0);
+}
+```
+
 **Ray-traced shadows**
 
 A ray query traces from any stage, so a rasterizer's fragment shader can ask
@@ -158,6 +179,7 @@ explicitly; a duplicate binding is an error.
 | **Types** | `bool` `int` `uint` `float` `half` `int8` `uint8`, vectors, matrices, arrays, structs and device pointers |
 | **Buffers** | Uniform buffers (std140), storage buffers (std430) with runtime-sized arrays, push constants and buffer device addresses |
 | **Textures** | 1D, 2D, 3D, cube and layered textures, separate or combined (`Sampler2D`, `SamplerCube`, `Sampler2DArray`, shadow types…). Sampling with bias, level or gradients, depth comparison, gather, texel `load`, `size`/`levels` queries, constant texel offsets, and bindless arrays with `NonUniformResourceIndex` |
+| **Storage images** | `image1d` to `imagecube_array` with a GLSL format (`image2d<rgba8>`, `image2d<r32ui>`…) or one the host picks (`image2d<float4>`). `load`, `store`, `size`, `img[at]` reads and writes, `InterlockedAdd` on `r32ui` texels, and bindless tables. `NonReadable`/`NonWritable` are worked out from use |
 | **Compute** | `shared` workgroup memory, `barrier`, `InterlockedAdd` and cooperative matrices (`coopmat`, `coop_load`, `coop_muladd`, `coop_store`) |
 | **Ray tracing** | Acceleration structures (`accel`, and arrays of them); inline `RayQuery` from any stage, with candidate and committed getters for alpha-tested and procedural geometry; the pipeline stages with payloads, hit attributes, callable data, `trace_ray`, `execute_callable`, `report_intersection`, `ignore_intersection` and `terminate_ray`; HLSL-named `RAY_FLAG_*` constants |
 | **Layout** | std140 and std430 by default, or C3-compatible packing with `scalar_layout: true` |
@@ -172,15 +194,15 @@ explicitly; a duplicate binding is an error.
 
 - There are no geometry, tessellation or mesh stages.
 - Ray tracing has no shader-record buffers, no HLSL `RayDesc`/`TraceRay`
-  spellings, and no cull-mask or vertex-position-fetch built-ins. A
-  ray-generation shader writes its image to a storage buffer, since there are
-  no storage images yet. Any ray feature makes the module SPIR-V 1.4; the host
-  needs `VK_KHR_acceleration_structure` and `VK_KHR_ray_query` or
+  spellings, and no cull-mask or vertex-position-fetch built-ins. Any ray
+  feature makes the module SPIR-V 1.4; the host needs
+  `VK_KHR_acceleration_structure` and `VK_KHR_ray_query` or
   `VK_KHR_ray_tracing_pipeline` (see LANGUAGE.md §11.5).
-- There are no storage images (writable textures), no integer or multisampled
-  textures, no `switch` and no `double`.
+- Sampled textures are float only, and no texture or storage image is
+  multisampled. There are no texel buffers, no `switch` and no `double`.
 - Arrays have one dimension.
-- The only atomic is `InterlockedAdd`, on 32-bit `uint`.
+- The only atomic is `InterlockedAdd`, on a 32-bit `uint` in a buffer, in
+  shared memory or in an `r32ui` storage image.
 - Recursion isn't supported.
 
 ## Tests

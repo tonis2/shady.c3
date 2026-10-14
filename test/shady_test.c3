@@ -237,3 +237,29 @@ fn void the_ray_tracing_numbers_match_the_grammar() @test
 	test::@check((uint)shady::RayFlags.SKIP_AABBS == 0x200, "(uint)shady::RayFlags.SKIP_AABBS");
 	test::@check(shady::VERSION_1_4 == 0x00010400, "shady::VERSION_1_4");
 }
+
+<*
+ The storage-image vocabulary, spot-checked against the SPIR-V grammar: one
+ value from each numbering space, and both ends of the format table.
+*>
+fn void the_storage_image_numbers_match_the_grammar() @test
+{
+	test::@check((uint)shady::Opcode.IMAGE_READ == 98, "(uint)shady::Opcode.IMAGE_READ");
+	test::@check((uint)shady::Opcode.IMAGE_WRITE == 99, "(uint)shady::Opcode.IMAGE_WRITE");
+	test::@check((uint)shady::Opcode.IMAGE_QUERY_SIZE == 104, "(uint)shady::Opcode.IMAGE_QUERY_SIZE");
+	test::@check((uint)shady::Opcode.IMAGE_TEXEL_POINTER == 60, "(uint)shady::Opcode.IMAGE_TEXEL_POINTER");
+	test::@check((uint)shady::Capability.IMAGE_1D == 44, "(uint)shady::Capability.IMAGE_1D");
+	test::@check((uint)shady::Capability.IMAGE_CUBE_ARRAY == 34, "(uint)shady::Capability.IMAGE_CUBE_ARRAY");
+	test::@check((uint)shady::Capability.STORAGE_IMAGE_EXTENDED_FORMATS == 49, "(uint)shady::Capability.STORAGE_IMAGE_EXTENDED_FORMATS");
+	test::@check((uint)shady::Capability.STORAGE_IMAGE_READ_WITHOUT_FORMAT == 55, "(uint)shady::Capability.STORAGE_IMAGE_READ_WITHOUT_FORMAT");
+	test::@check((uint)shady::Capability.STORAGE_IMAGE_WRITE_WITHOUT_FORMAT == 56, "(uint)shady::Capability.STORAGE_IMAGE_WRITE_WITHOUT_FORMAT");
+	test::@check((uint)shady::Capability.STORAGE_IMAGE_ARRAY_NON_UNIFORM_INDEXING == 5309, "(uint)shady::Capability.STORAGE_IMAGE_ARRAY_NON_UNIFORM_INDEXING");
+	test::@check((uint)shady::StorageClass.IMAGE == 11, "(uint)shady::StorageClass.IMAGE");
+	test::@check((uint)shady::Decoration.NON_WRITABLE == 24, "(uint)shady::Decoration.NON_WRITABLE");
+	test::@check((uint)shady::Decoration.NON_READABLE == 25, "(uint)shady::Decoration.NON_READABLE");
+	test::@check((uint)shady::MemorySemantics.IMAGE_MEMORY == 0x800, "(uint)shady::MemorySemantics.IMAGE_MEMORY");
+	test::@check((uint)shady::ImageFormat.RGBA32F == 1, "(uint)shady::ImageFormat.RGBA32F");
+	test::@check((uint)shady::ImageFormat.R11F_G11F_B10F == 8, "(uint)shady::ImageFormat.R11F_G11F_B10F");
+	test::@check((uint)shady::ImageFormat.R32UI == 33, "(uint)shady::ImageFormat.R32UI");
+	test::@check((uint)shady::ImageFormat.R8UI == 39, "(uint)shady::ImageFormat.R8UI");
+}

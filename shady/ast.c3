@@ -37,6 +37,11 @@ struct TypeRef
 	uint   coopmat_columns;
 	String coopmat_scope;
 	String coopmat_use; // `a`, `b` or `accumulator`
+
+	// `image2d<rgba8>`: the name is the image family and this is what the
+	// angle brackets carried - a format, or a texel type for one the host picks.
+	bool   is_image;
+	String image_argument;
 }
 
 // --- Attributes --------------------------------------------------------------

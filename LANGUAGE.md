@@ -115,6 +115,8 @@ sampler sampler_cmp
 Sampler2D Sampler3D SamplerCube Sampler2DArray SamplerCubeArray
 Sampler2DShadow SamplerCubeShadow Sampler2DArrayShadow
 
+image1d<F> image2d<F> image3d<F> imagecube<F> image2d_array<F> imagecube_array<F>
+
 accel RayQuery
 ```
 `texture2d` plus `sampler` are the separate objects, paired only at the point of
@@ -126,13 +128,20 @@ the `Shadow` types are their depth-comparison forms.
 An `_array` or `Array` type is layered: a coordinate into one carries the layer
 as its last component. A cube array needs the `imageCubeArray` device feature.
 
+`image2d<rgba8>` and its family are storage images: textures a shader writes as
+well as reads, by integer texel address and without a sampler. The angle
+brackets name the texel format, which decides the texel type - `rgba8` reads and
+writes `float4`, `r32ui` a `uint` - or name a texel type, as in
+`image2d<float4>`, to leave the format to the host. §12 has the formats and the
+operations. Without the brackets the family names are ordinary names.
+
 `accel` is a ray-tracing acceleration structure - the scene a ray is traced
 against - and `RaytracingAccelerationStructure`, HLSL's name for it, is the same
 type. `RayQuery` is an inline ray query's traversal state. Both are §11's.
 
 An opaque type may be an array: `Sampler2D three_textures[]` is a runtime-sized
 descriptor array, `Sampler2D four[4]` a fixed one. Either way a descriptor - a
-texture, a sampler or an `accel` - may only appear as a module-level resource:
+texture, a sampler, a storage image or an `accel` - may only appear as a module-level resource:
 never as a struct member, local, parameter, return type, `?:` arm or assignment
 target, all of which are refused. Vulkan cannot store one into memory, so each of
 those was a module it refuses anyway. A `RayQuery` is the opposite: a local, or
@@ -383,8 +392,8 @@ comes entirely from the type — there are no `uniform`, `buffer` or
 `push_constant` keywords.
 
 Only some types may be bound: a descriptor (any texture, sampler, combined
-sampler or `accel` of §2.3) or an array of one - a descriptor array, `[]` for a
-runtime-sized one - a
+sampler, storage image or `accel` of §2.3) or an array of one - a descriptor
+array, `[]` for a runtime-sized one - a
 `@uniform` struct, a `@storage` struct, or a `@pushconstant` struct. A plain
 struct has no layout and an `@address` struct is reached through a pointer, so
 neither can be a variable. A bare `T[]` is the short spelling of a `@storage`
@@ -426,8 +435,10 @@ barrier();      // the same
 
 `barrier` synchronises the workgroup and orders the writes before it against
 the reads after it, for shared memory and storage buffers both: its semantics
-are `AcquireRelease | WorkgroupMemory | UniformMemory`. Every invocation of the
-workgroup has to reach it -
+are `AcquireRelease | WorkgroupMemory | UniformMemory`. In a module that
+declares a storage image they add `ImageMemory`, so a texel one invocation
+wrote is the one another reads after the barrier (§12.3). Every invocation of
+the workgroup has to reach it -
 a barrier inside a branch half the workgroup takes leaves the other half
 waiting, and a driver that notices reports a hang rather than a wrong number.
 
@@ -948,8 +959,10 @@ condition)`.
 address, yielding the value the destination held before. Device scope, relaxed
 ordering; anything stronger is a barrier rather than an increment. The
 destination may be shared memory - `InterlockedAdd(bins[i], 1)` is how a
-histogram in a workgroup is built - and the same relaxation applies: reach for
-`barrier` when the order of the increments against other reads matters.
+histogram in a workgroup is built - or a texel of an `r32ui` storage image,
+`InterlockedAdd(counts[at], 1)` (§12.3). The same relaxation applies: reach for
+`barrier` when the order of the increments against other reads matters. An
+integer literal takes the destination's type, so `1` is a `uint` here.
 
 **Workgroup**: `barrier` (`barrier;` or `barrier()`) - workgroup
 synchronisation, described in §3.4.1.
@@ -1014,6 +1027,10 @@ then follows the descriptor to the image instruction (the access chain, the
 load, the sampled image), which is where the driver reads it; an index stored
 in a local first loses the mark. The host enables
 `shaderSampledImageArrayNonUniformIndexing`.
+
+**Storage images** (`image2d<rgba8>` and the rest): `load(address)`,
+`store(address, texel)`, `size()`, and indexing - `img[address]` reads,
+`img[address] = texel` writes. §12.2.
 
 **Derivatives** (fragment only): `ddx` `ddy` `fwidth`
 
@@ -1344,7 +1361,7 @@ The two `SKIP_` flags are a device feature of their own (§11.5).
 struct Camera @uniform { float4x4 inverse_view_projection; float3 position; float3 sun; }
 Camera camera;
 accel  scene;
-float4 image[];
+image2d<rgba8> image;
 
 struct Payload { float3 color; }
 struct Shadow  { bool lit; }
@@ -1362,7 +1379,7 @@ fn void generate(LaunchIn at) @raygen
     p.color = float3(0.0);
     trace_ray(scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0,
               camera.position, 0.001, normalize(target.xyz / target.w - camera.position), 10000.0, p);
-    image[at.id.y * at.size.x + at.id.x] = float4(p.color, 1.0);
+    image[at.id.xy] = float4(p.color, 1.0);
 }
 
 fn void sky(inout Payload p, RayIn ray) @miss
@@ -1508,3 +1525,169 @@ fn void rough(inout Material m) @callable
 4. Bind each `accel` as `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR`.
 5. For the pipeline, create the shader groups and the shader binding table: the
    module's entry points are found by name, as any other stage's are.
+
+## 12. Storage images
+
+A storage image is a texture the shader writes. It is how a compute pass
+post-processes a frame, how a ray-generation shader puts its pixels down, and
+how a histogram or a splat lands in an image rather than a buffer:
+
+```
+image2d<rgba16f> hdr;
+image2d<rgba8>   ldr;
+image2d<r32ui>   histogram;
+
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
+
+fn void tonemap(ComputeIn at) @compute @threads(8, 8, 1)
+{
+    int2 extent = ldr.size();
+    if (at.id.x >= uint(extent.x) || at.id.y >= uint(extent.y)) return;
+
+    float4 c = hdr[at.id.xy];
+    ldr[at.id.xy] = float4(c.rgb / (c.rgb + 1.0), 1.0);
+
+    float luma = dot(c.rgb, float3(0.2126, 0.7152, 0.0722));
+    InterlockedAdd(histogram[int2(int(clamp(luma, 0.0, 1.0) * 255.0), 0)], 1);
+}
+```
+
+A texel has an integer address and no sampler: there is no filtering, no
+wrapping and no mip level. An image that is sampled in one pass and written in
+another is bound twice, as a `texture2d` and as an `image2d<…>`.
+
+### 12.1 Declaring
+
+| Type | Address | `size()` |
+|---|---|---|
+| `image1d<F>` | `int` | `int` |
+| `image2d<F>` | `int2` | `int2` |
+| `image3d<F>` | `int3` | `int3` |
+| `image2d_array<F>` | `int3`: x, y, layer | `int3`: the extent and the layer count |
+| `imagecube<F>` | `int3`: x, y, face | `int2`: one face |
+| `imagecube_array<F>` | `int3`: x, y, layer × 6 + face | `int3`: one face and the cube count |
+
+An address may be signed or unsigned - `at.id.xy` addresses a 2D image as it
+is - and is exactly as wide as the table says.
+
+`F` is a format, under GLSL's name, and the format decides the texel type: what
+a read returns and a write takes. The suffix says the scalar - `i` an `int`,
+`ui` a `uint`, anything else a `float` - and the channels say how many:
+
+| Texel | Formats |
+|---|---|
+| `float4` | `rgba32f` `rgba16f` `rgba8` `rgba8_snorm` · `rgba16` `rgba16_snorm` `rgb10_a2` |
+| `float3` | · `r11f_g11f_b10f` |
+| `float2` | · `rg32f` `rg16f` `rg16` `rg16_snorm` `rg8` `rg8_snorm` |
+| `float` | `r32f` · `r16f` `r16` `r16_snorm` `r8` `r8_snorm` |
+| `int4` | `rgba32i` `rgba16i` `rgba8i` |
+| `int2` | · `rg32i` `rg16i` `rg8i` |
+| `int` | `r32i` · `r16i` `r8i` |
+| `uint4` | `rgba32ui` `rgba16ui` `rgba8ui` · `rgb10_a2ui` |
+| `uint2` | · `rg32ui` `rg16ui` `rg8ui` |
+| `uint` | `r32ui` · `r16ui` `r8ui` |
+
+The formats before the `·` are the thirteen every device stores; the ones after
+it are the extended formats. Vulkan has no three-channel storage format but
+`r11f_g11f_b10f`, so `rgb8` is refused with a pointer at `rgba8`.
+
+In place of a format, the brackets may hold a texel type - a 32-bit `float`,
+`int` or `uint`, or a vector of one - and the host picks the format:
+`image2d<float4> any;`. Such an image costs a device feature for each direction
+it is used in (§12.5).
+
+The texel type is never written separately, because the two have to agree:
+SPIR-V requires an image's sampled type to match its format, and nothing checks
+it but the compiler that wrote both.
+
+A storage image binds like any other descriptor (§3.3), and may be an array -
+`image2d<rgba8> targets[];` is a bindless table, indexed through
+`NonUniformResourceIndex` when the index varies across a wave. Like every
+descriptor it is a module-level variable and nothing else (§2.3).
+
+### 12.2 Reading and writing
+
+| Written | Is |
+|---|---|
+| `img[address]` | the texel, as the texel type |
+| `img.load(address)`, `img.Load(address)` | the same |
+| `img[address] = texel` | a write; the expression's value is the texel |
+| `img.store(address, texel)` | a write, as a statement |
+| `img[address] op= value` | a read, the operator, and a write |
+| `img.size()` | the extent, as in §12.1 |
+
+The texel is the image's texel type: `rgba8`'s is a `float4`, so
+`ldr[at] = 1.0` writes white (a scalar fills a vector, as in an assignment) and
+`ldr[at] = int4(1)` is refused. An indexed texel is a value - `img[at].rgb`
+reads three channels - but a copy: `img[at].x = 1.0` is refused, since writing
+one channel back would mean writing the others too. Read it into a local, change
+it, and write it back.
+
+A compound assignment is two operations, and another invocation can come
+between them, as with any other memory; `InterlockedAdd` (§12.3) is the atomic
+one.
+
+`size()` takes no level, and `levels()` is refused: a storage image is bound as
+one mip level. The sampling methods are refused on a storage image, and `store`
+and indexing on a texture - the refusal names the type that does it.
+
+Any stage may read or write a storage image; §12.5 has the device features a
+vertex or fragment shader's writes need.
+
+### 12.3 Atomics and barriers
+
+`InterlockedAdd(img[address], value)` adds to one texel atomically and yields
+the value it held before, exactly as on a buffer (§8): device scope, relaxed
+ordering. The image is an `r32ui` one - Vulkan's image atomics are on a single
+32-bit channel of a format the shader names, and the language's
+`InterlockedAdd` is on `uint`s - so a host-picked format is refused too.
+
+In a module that declares a storage image, `barrier` (§3.4.1) orders image
+memory as well as shared memory and buffers: a texel one invocation of the
+workgroup writes before the barrier is the one another reads after it. Between
+workgroups nothing is ordered within one dispatch; the host's pipeline barrier
+between dispatches is what orders those.
+
+### 12.4 What the emitter produces
+
+- `OpTypeImage` with the format's scalar, `Sampled 2` and the format; a
+  host-picked one is `Unknown`. The variable is `UniformConstant`, with its
+  `DescriptorSet` and `Binding`.
+- A read is `OpImageRead` of a four-component vector, cut down to the texel
+  type; a write is `OpImageWrite` of four components, a narrower texel padded
+  with 0 and an alpha of 1. Vulkan requires a read to return four
+  (VUID-StandaloneSpirv-Result-04780) and a write to carry at least as many as
+  the bound view has, which four always does.
+- `size()` is `OpImageQuerySize`, with `OpCapability ImageQuery`.
+- An atomic is `OpImageTexelPointer` and `OpAtomicIAdd`.
+- An image the module never reads is decorated `NonReadable`, one it never
+  writes `NonWritable` - GLSL's `writeonly` and `readonly`, from what the
+  shader does rather than from a keyword.
+- Capabilities, each only where it is needed: `Image1D`, `ImageCubeArray`,
+  `StorageImageExtendedFormats` for an extended format,
+  `StorageImageReadWithoutFormat` and `StorageImageWriteWithoutFormat` for a
+  host-picked format read or written, and
+  `StorageImageArrayNonUniformIndexing` for a table indexed non-uniformly.
+- A barrier's semantics gain `ImageMemory`.
+
+### 12.5 What the host has to do
+
+1. Create the image with `VK_IMAGE_USAGE_STORAGE_BIT`, and a view whose format
+   is the declared one (`rgba8` is `VK_FORMAT_R8G8B8A8_UNORM`, `r32ui` is
+   `VK_FORMAT_R32_UINT`, and so on) and whose format features include
+   `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` - and
+   `VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT` for an atomic.
+2. Bind it as `VK_DESCRIPTOR_TYPE_STORAGE_IMAGE`, in
+   `VK_IMAGE_LAYOUT_GENERAL`.
+3. Enable the features the module's capabilities name:
+   `shaderStorageImageExtendedFormats` for an extended format,
+   `shaderStorageImageReadWithoutFormat` and
+   `shaderStorageImageWriteWithoutFormat` for a host-picked one,
+   `imageCubeArray` for a cube array.
+4. Enable `fragmentStoresAndAtomics` for a fragment shader that writes one, and
+   `vertexPipelineStoresAndAtomics` for a vertex shader.
+5. For a table: `shaderStorageImageArrayDynamicIndexing` for a fixed-size one
+   indexed by a variable, `runtimeDescriptorArray` for `[]`, and
+   `shaderStorageImageArrayNonUniformIndexing` for a non-uniform index.
+6. Put a pipeline barrier (`SHADER_WRITE` to `SHADER_READ`, or to whatever reads
+   the image next) between a pass that writes an image and one that reads it.
