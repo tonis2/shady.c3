@@ -63,9 +63,16 @@ struct Type
 	// every scalar was before cooperative matrices needed a byte tile.
 	uint bits;
 
-	// SAMPLED_IMAGE only: the OpTypeImage Depth operand, 1 for a comparison
-	// sampler such as Sampler2DShadow.
+	// SAMPLED_IMAGE: the OpTypeImage Depth operand, 1 for a comparison
+	// sampler such as Sampler2DShadow. SAMPLER: 1 for `sampler_cmp`, the
+	// separate path's comparison sampler - the same OpTypeSampler, marked
+	// only so the language can tell which sample methods it serves.
 	uint depth;
+
+	// TEXTURE and SAMPLED_IMAGE: the OpTypeImage Arrayed operand, 1 for a
+	// layered texture such as `texture2d_array`. A coordinate into one carries
+	// the layer as its last component.
+	uint arrayed;
 
 	// ARRAY only: no declared length, so it is an OpTypeRuntimeArray. Legal as
 	// the tail of a storage block and nowhere else.
@@ -172,6 +179,18 @@ fn Type* TypeTable.add(&self, TypeKind kind, String name, Type* element = null, 
 	Type* type = alloc::new(self.allocator, Type);
 	*type = { .kind = kind, .name = name, .element = element, .count = count, .dim = dim };
 	self.types.push(type);
+	return type;
+}
+
+<*
+ An image type: a separate texture, or a combined image and sampler. `sampled`
+ is the vector a sample yields - `float4` for every texture there is today.
+*>
+fn Type* TypeTable.add_image(&self, TypeKind kind, String name, Type* sampled, Dim dim, uint arrayed = 0, uint depth = 0)
+{
+	Type* type   = self.add(kind, name, sampled, 0, dim);
+	type.arrayed = arrayed;
+	type.depth   = depth;
 	return type;
 }
 
@@ -334,15 +353,29 @@ fn void TypeTable.init(&self, Allocator allocator)
 		}
 	}
 
-	self.add(TEXTURE, "texture1d", float_vectors[3], 0, Dim.D1);
-	self.add(TEXTURE, "texture2d", float_vectors[3], 0, Dim.D2);
-	self.add(TEXTURE, "texture3d", float_vectors[3], 0, Dim.D3);
-	self.add(TEXTURE, "texturecube", float_vectors[3], 0, Dim.CUBE);
+	Type* float4_t = float_vectors[3];
+	self.add_image(TEXTURE, "texture1d",         float4_t, Dim.D1);
+	self.add_image(TEXTURE, "texture2d",         float4_t, Dim.D2);
+	self.add_image(TEXTURE, "texture3d",         float4_t, Dim.D3);
+	self.add_image(TEXTURE, "texturecube",       float4_t, Dim.CUBE);
+	self.add_image(TEXTURE, "texture2d_array",   float4_t, Dim.D2,   arrayed: 1);
+	self.add_image(TEXTURE, "texturecube_array", float4_t, Dim.CUBE, arrayed: 1);
 	self.add(SAMPLER, "sampler");
+	// The separate path's comparison sampler: the same OpTypeSampler as
+	// `sampler`, told apart only so a compare is never paired with a sampler
+	// the host created without a compare op, and the other way round.
+	self.add(SAMPLER, "sampler_cmp").depth = 1;
 
-	self.add(SAMPLED_IMAGE, "Sampler2D", float_vectors[3], 0, Dim.D2);
-	Type* shadow_2d = self.add(SAMPLED_IMAGE, "Sampler2DShadow", float_vectors[3], 0, Dim.D2);
-	shadow_2d.depth = 1;
+	// The combined image-and-samplers. A shadow type is one whose sampler
+	// compares, which is what `depth` says to OpTypeImage.
+	self.add_image(SAMPLED_IMAGE, "Sampler2D",            float4_t, Dim.D2);
+	self.add_image(SAMPLED_IMAGE, "Sampler3D",            float4_t, Dim.D3);
+	self.add_image(SAMPLED_IMAGE, "SamplerCube",          float4_t, Dim.CUBE);
+	self.add_image(SAMPLED_IMAGE, "Sampler2DArray",       float4_t, Dim.D2,   arrayed: 1);
+	self.add_image(SAMPLED_IMAGE, "SamplerCubeArray",     float4_t, Dim.CUBE, arrayed: 1);
+	self.add_image(SAMPLED_IMAGE, "Sampler2DShadow",      float4_t, Dim.D2,   depth: 1);
+	self.add_image(SAMPLED_IMAGE, "SamplerCubeShadow",    float4_t, Dim.CUBE, depth: 1);
+	self.add_image(SAMPLED_IMAGE, "Sampler2DArrayShadow", float4_t, Dim.D2,   arrayed: 1, depth: 1);
 }
 
 // --- Queries -----------------------------------------------------------------
@@ -386,6 +419,26 @@ fn bool Type.contains_16bit(&self)
 	return false;
 }
 
+<*
+ Whether a bool appears anywhere inside this type. Vulkan gives a bool no
+ layout in memory - an OpTypeBool in a uniform, storage, push-constant or
+ device-address block is invalid - so a block holding one is refused where it
+ is declared, rather than given the 4 bytes a host may not have written.
+*>
+fn bool Type.contains_bool(&self)
+{
+	if (self.kind == BOOL) return true;
+	if (self.kind == ARRAY || self.kind == VECTOR) return self.element.contains_bool();
+	if (self.kind == STRUCT)
+	{
+		foreach (&m : self.members)
+		{
+			if (m.type.contains_bool()) return true;
+		}
+	}
+	return false;
+}
+
 // The width in bits, with the default spelled out: a scalar that names no
 // width is 32 bits, which is every scalar but the byte integers.
 fn uint Type.width(&self) => self.bits == 0 ? 32 : self.bits;
@@ -396,6 +449,35 @@ fn bool Type.is_numeric(&self) => self.kind == INT || self.kind == UINT || self.
  image-and-sampler.
 *>
 fn bool Type.is_opaque(&self) => self.kind == TEXTURE || self.kind == SAMPLER || self.kind == SAMPLED_IMAGE;
+
+<*
+ How many components an image's own extent has: 1, 2 or 3, with a cube's
+ direction counting as three. A gradient and a texel offset are this wide, and
+ neither has a layer.
+*>
+fn uint Type.extent_components(&self)
+{
+	switch (self.dim)
+	{
+		case Dim.D1: return 1;
+		case Dim.D2: return 2;
+		default:     return 3;
+	}
+}
+
+<*
+ How wide a coordinate into an image is: its extent, plus the layer when the
+ image is arrayed. `Sampler2DArray` takes a float3 of (u, v, layer), and a cube
+ array a float4 of (direction, layer).
+*>
+fn uint Type.coordinate_components(&self) => self.extent_components() + self.arrayed;
+
+<*
+ How many numbers `size()` answers: the width, height and depth there are,
+ plus the layer count of an arrayed image. A cube's faces are square 2D
+ images, so a cube answers two.
+*>
+fn uint Type.size_components(&self) => (self.dim == Dim.CUBE ? 2 : self.extent_components()) + self.arrayed;
 
 <*
  Component count for scalars and vectors; 1 for a scalar. Meaningless for

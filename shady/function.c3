@@ -170,6 +170,14 @@ fn void Function.ret(&self) => emit(&self.body, Opcode.RETURN);
 fn void Function.ret_value(&self, Id value) => emit(&self.body, Opcode.RETURN_VALUE, value);
 fn void Function.discard(&self) => emit(&self.body, Opcode.KILL);
 
+<*
+ Close a block nothing can reach: the merge of an if whose branches both
+ returned, or of a loop that only ever leaves by `return`. SPIR-V still wants
+ the block to exist, since the merge instruction names it, and wants it
+ terminated.
+*>
+fn void Function.unreachable(&self) => emit(&self.body, Opcode.UNREACHABLE);
+
 // --- Common instructions -----------------------------------------------------
 
 <*
@@ -300,8 +308,7 @@ fn Id Function.image_sample(&self, Id result_type, Id sampled_image, Id coordina
 
 fn Id Function.image_sample_lod(&self, Id result_type, Id sampled_image, Id coordinate, Id lod)
 {
-	// 2 = the Lod image operand bit.
-	return self.emit(Opcode.IMAGE_SAMPLE_EXPLICIT_LOD, result_type, sampled_image, coordinate, 2, lod);
+	return self.emit(Opcode.IMAGE_SAMPLE_EXPLICIT_LOD, result_type, sampled_image, coordinate, (Id)ImageOperand.LOD, lod);
 }
 
 // --- Closing -----------------------------------------------------------------

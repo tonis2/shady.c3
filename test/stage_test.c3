@@ -106,3 +106,81 @@ fn float4 frag(FIn input) @fragment
 	test::@check(shady_support::has_decoration(spirv, shady::Decoration.FLAT),
 		"an integer varying is decorated Flat without being asked");
 }
+
+<*
+ Flat belongs to the two ends of a varying - a vertex output and a fragment
+ input - and Vulkan refuses it anywhere else (VUID-StandaloneSpirv-Flat-06201
+ and 06202). An integer render target is an ordinary fragment output, and an
+ integer vertex attribute an ordinary vertex input, so neither carries it, even
+ when the struct says `@flat`.
+*>
+fn void an_integer_fragment_output_is_not_flat() @test
+{
+	char[] spirv = shady_support::build(`
+struct VIn
+{
+	float3 position;
+	uint id @flat;
+}
+
+struct VOut
+{
+	float4 position @position;
+	float4 color;
+}
+
+struct Targets
+{
+	float4 color;
+	uint id;
+}
+
+fn VOut vert(VIn input) @vertex
+{
+	VOut o;
+	o.position = float4(input.position, float(input.id));
+	o.color = float4(1.0);
+	return o;
+}
+
+fn Targets frag(VOut input) @fragment
+{
+	Targets t;
+	t.color = input.color;
+	t.id = 7u;
+	return t;
+}
+`);
+	defer free(spirv);
+
+	test::@check(!shady_support::has_decoration(spirv, shady::Decoration.FLAT),
+		"neither a vertex input nor a fragment output may be Flat");
+}
+
+fn void an_integer_vector_varying_is_flat() @test
+{
+	char[] spirv = shady_support::build(`
+struct VOut
+{
+	float4 position @position;
+	uint2 tile;
+}
+
+fn VOut vert() @vertex
+{
+	VOut o;
+	o.position = float4(0.0, 0.0, 0.0, 1.0);
+	o.tile = uint2(1u, 2u);
+	return o;
+}
+
+fn float4 frag(VOut input) @fragment
+{
+	return float4(float(input.tile.x));
+}
+`);
+	defer free(spirv);
+
+	test::@check(shady_support::has_decoration(spirv, shady::Decoration.FLAT),
+		"a uint2 varying is an integer varying, and Flat like a uint");
+}

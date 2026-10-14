@@ -145,3 +145,109 @@ fn float4 frag(FragmentIn input) @fragment
 	test::@check(shady_support::has_ext_inst(spirv, shady::GlslOp.ATAN2),
 		"atan2 should be GLSL.std.450's Atan2, not an atan or a division");
 }
+
+<*
+ GLSL.std.450 has no unsigned `abs` or `sign`, and the signed-or-float choice
+ used to fall through to `FAbs` on a uint - invalid SPIR-V. A uint is its own
+ absolute value, and its sign is `min(x, 1)`.
+*>
+fn void abs_and_sign_on_a_uint() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+    uint a = uint(input.color.x * 8.0);
+    uint2 v = uint2(a, 3u);
+    return float4(float(abs(a) + sign(a)), float2(sign(v)), 1.0);
+}
+`));
+	defer free(spirv);
+
+	test::@check(!shady_support::has_ext_inst(spirv, shady::GlslOp.FABS), "abs on a uint should not be FAbs");
+	test::@check(!shady_support::has_ext_inst(spirv, shady::GlslOp.FSIGN), "sign on a uint should not be FSign");
+	test::@check(shady_support::has_ext_inst(spirv, shady::GlslOp.UMIN), "sign on a uint should be UMin(x, 1)");
+}
+
+fn void dot_on_int_vectors_sums_products() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+    int2 a = int2(int(input.color.x), 2);
+    return float4(float(dot(a, int2(1, 3))));
+}
+`));
+	defer free(spirv);
+
+	test::@check(!shady_support::has_opcode(spirv, shady::Opcode.DOT), "OpDot takes floats only");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.I_MUL), "an integer dot should multiply");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.I_ADD), "an integer dot should sum");
+}
+
+fn void dot_refuses_mismatched_vectors() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment { return float4(dot(input.color.xyz, input.color.xy)); }
+`));
+
+	test::@check(error.contains("`dot` takes two"), "a dot of two shapes should be refused; got '%s'", error);
+}
+
+fn void mod_floors_and_fmod_truncates() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+    float2 wrapped = mod(input.color.xy, 2.0);
+    float  cut     = fmod(input.color.z, 2.0);
+    int    i       = mod(int(input.color.w), 3);
+    return float4(wrapped, cut, float(i));
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.F_MOD), "mod on floats should be FMod");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.F_REM), "fmod should be FRem");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.S_MOD), "mod on ints should be SMod");
+}
+
+fn void fwidth_is_the_core_opcode() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment { return float4(fwidth(input.color.xy), 0.0, 1.0); }
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.FWIDTH), "fwidth should be OpFwidth");
+}
+
+fn void faceforward_inverse_and_determinant() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+    float3 n = faceforward(input.color.xyz, input.color.zyx, input.color.xyz);
+    float3x3 m = float3x3(n, n.yzx, n.zxy);
+    float3x3 inv = inverse(m);
+    return float4(inv[0], determinant(m));
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_ext_inst(spirv, shady::GlslOp.FACE_FORWARD), "faceforward should be FaceForward");
+	test::@check(shady_support::has_ext_inst(spirv, shady::GlslOp.MATRIX_INVERSE), "inverse should be MatrixInverse");
+	test::@check(shady_support::has_ext_inst(spirv, shady::GlslOp.DETERMINANT), "determinant should be Determinant");
+}
+
+fn void determinant_refuses_a_non_square_matrix() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+    float2x3 m = float2x3(input.color.xyz, input.color.yzx);
+    return float4(determinant(m));
+}
+`));
+
+	test::@check(error.contains("square matrix"), "a non-square determinant should be refused; got '%s'", error);
+}

@@ -180,3 +180,25 @@ fn Out vert() @vertex { Out o; o.position = float4(0.0, 0.0, 0.0, 1.0); return o
 	defer free(spirv);
 	test::@check(spirv.len > 0, "the module compiled");
 }
+
+<*
+ A second array dimension is refused, whichever way it is written. A TypeRef
+ holds one length, and `float[4] taps[3]` used to keep the second and drop the
+ first without a word - an array of three where the author wrote twelve.
+*>
+fn void a_second_dimension_is_refused() @test
+{
+	String[] sources = {
+		"fn float4 frag(FragmentIn input) @fragment { float[4] taps[3]; return input.color; }",
+		"fn float4 frag(FragmentIn input) @fragment { float taps[3][4]; return input.color; }",
+		"struct Grid { float[3][4] cells; }\nfn float4 frag(FragmentIn input) @fragment { return input.color; }",
+		"struct Grid { float cells[3][4]; }\nfn float4 frag(FragmentIn input) @fragment { return input.color; }",
+	};
+
+	foreach (source : sources)
+	{
+		String error = shady_support::compile_error(shady_support::fragment(source));
+		test::@check(error.contains("multidimensional"),
+			"a second dimension should be refused; for '%s' got '%s'", source, error);
+	}
+}

@@ -1,0 +1,73 @@
+// Separate textures and samplers, paired where they are sampled.
+//
+// Every separate texture type, both samplers - `sampler` for the plain
+// methods and `sampler_cmp` for the comparisons - and the sampled image a
+// pairing makes, including one picked out of a bindless table by a
+// non-uniform index, which has to carry NonUniform all the way to the image
+// instruction.
+
+texture1d         ramp    @set(0) @binding(0);
+texture2d         albedo  @set(0) @binding(1);
+texture3d         volume  @set(0) @binding(2);
+texturecube       sky     @set(0) @binding(3);
+texture2d_array   layers  @set(0) @binding(4);
+texturecube_array probes  @set(0) @binding(5);
+texture2d         depth   @set(0) @binding(6);
+sampler           linear  @set(0) @binding(7);
+sampler_cmp       compare @set(0) @binding(8);
+
+texture2d_array   maps[]  @set(1) @binding(0);
+
+struct VertexIn
+{
+    float3 position;
+    float2 uv;
+    uint   slot;
+}
+
+struct Varyings
+{
+    float4 position @position;
+    float2 uv;
+    float3 normal;
+    uint   slot;
+}
+
+fn Varyings vert(VertexIn input) @vertex(main)
+{
+    float height = albedo.sample_lod(linear, input.uv, 0.0).x
+        + depth.sample_cmp_lod(compare, input.uv, 0.5, 0.0);
+
+    Varyings output;
+    output.position = float4(input.position.xy, height, 1.0);
+    output.uv       = input.uv;
+    output.normal   = float3(0.0, 1.0, 0.0);
+    output.slot     = input.slot;
+    return output;
+}
+
+fn float4 frag(Varyings input) @fragment
+{
+    float2 uv = input.uv;
+    float3 n  = input.normal;
+
+    float4 lines   = ramp.sample(linear, uv.x) + ramp.load(int(uv.x * 16.0), 0);
+    float4 surface = albedo.sample_grad(linear, uv, ddx(uv), ddy(uv))
+        + albedo.sample_bias(linear, uv, 0.5, int2(1, 0))
+        + albedo.load(int2(2, 2), 0);
+    float4 fog     = volume.sample(linear, float3(uv, 0.25));
+    float4 env     = sky.sample(linear, n) + probes.sample(linear, float4(n, 1.0));
+    float4 picked  = layers.gather(linear, float3(uv, 1.0), 1)
+        + maps[NonUniformResourceIndex(input.slot)].sample(linear, float3(uv, 0.0));
+
+    float lit = depth.sample_cmp(compare, uv, 0.5)
+        + depth.sample_cmp_level_zero(compare, uv, 0.5, int2(-1, 0));
+    float4 pcf = depth.gather_cmp(compare, uv, 0.5);
+
+    int  width  = ramp.size();
+    int3 extent = volume.size(0);
+    int3 slices = probes.size(0);
+
+    return lines + surface + fog + env + picked + pcf
+        + float4(lit, float(width + extent.z + slices.z), 0.0, 0.0);
+}

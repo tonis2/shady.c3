@@ -3,7 +3,9 @@
 // `min`, `max` and `clamp` each have one instruction per number family, and
 // only the float one used to be emitted: a `uint` min compiled to `FMin` is
 // invalid SPIR-V, which `spirv-val` catches here rather than a driver crashing
-// on it later. `abs` and `sign` have a signed form and no unsigned one.
+// on it later. `abs` and `sign` have a signed form and no unsigned one, so the
+// uint pair is answered without one: the value itself, and `UMin(x, 1)`.
+// `dot` on ints is the multiply and the sum - `OpDot` is a float instruction.
 
 struct VertexIn
 {
@@ -40,6 +42,10 @@ fn float4 frag(FragmentIn input) @fragment
     int magnitude = abs(c);
     int direction = sign(c);
 
+    uint unsigned_size = abs(a) + sign(b);
+    uint2 unsigned_signs = sign(uint2(a, b));
+    int weighted = dot(int2(c, d), int2(1, 2));
+
     return float4(float(small + big + bounded), float(nearer + farther + limited),
-        float(magnitude + direction), 1.0);
+        float(magnitude + direction), float(unsigned_size + unsigned_signs.x) + float(weighted));
 }

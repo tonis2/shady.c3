@@ -230,3 +230,62 @@ fn float4 frag(FragmentIn input) @fragment
 	test::@check(shady_support::has_opcode(spirv, shady::Opcode.U_MOD), "a uint remainder is OpUMod");
 	test::@check(shady_support::has_opcode(spirv, shady::Opcode.U_LESS_THAN), "a uint compare is OpULessThan");
 }
+
+<*
+ `%` is C3's remainder: the result takes the sign of the left side, so
+ `-7 % 3` is -1. That is OpSRem and OpFRem; OpSMod and OpFMod are GLSL's
+ floored `mod()`, which takes the sign of the right side instead.
+*>
+fn void a_signed_remainder_truncates() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	int   i = int(input.color.x * 8.0) - 4;
+	int   r = i % 3;
+	float f = input.color.y % 2.0;
+	return float4(float(r), f, 0.0, 1.0);
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.S_REM), "an int remainder is OpSRem");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.F_REM), "a float remainder is OpFRem");
+	test::@check(!shady_support::has_opcode(spirv, shady::Opcode.S_MOD), "`%%` is not the floored OpSMod");
+	test::@check(!shady_support::has_opcode(spirv, shady::Opcode.F_MOD), "`%%` is not the floored OpFMod");
+}
+
+fn void a_matrix_divides_and_negates_by_columns() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	float2x2 m = float2x2(input.color.xy, input.color.zw);
+	float2x2 halved  = m / 2.0;
+	float2x2 flipped = -m;
+	float2x2 shifted = 1.0 - m;
+	float2x2 summed  = halved + flipped + shifted;
+	summed /= 4.0;
+	return float4(summed[0], summed[1]);
+}
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.F_DIV), "a matrix divides a column at a time");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.F_NEGATE), "a matrix negates a column at a time");
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.COMPOSITE_EXTRACT), "a matrix is taken apart by column");
+}
+
+fn void a_matrix_cannot_be_compared() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment
+{
+	float2x2 m = float2x2(input.color.xy, input.color.zw);
+	if (m == m) return float4(1.0);
+	return float4(0.0);
+}
+`));
+
+	test::@check(error.contains("a matrix takes"), "a matrix comparison should be refused; got '%s'", error);
+}

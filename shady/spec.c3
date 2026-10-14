@@ -95,7 +95,15 @@ constdef Opcode : uint
 	SAMPLED_IMAGE             = 86,
 	IMAGE_SAMPLE_IMPLICIT_LOD = 87,
 	IMAGE_SAMPLE_EXPLICIT_LOD = 88,
+	IMAGE_SAMPLE_DREF_IMPLICIT_LOD = 89,
 	IMAGE_SAMPLE_DREF_EXPLICIT_LOD = 90,
+	IMAGE_FETCH               = 95,
+	IMAGE_GATHER              = 96,
+	IMAGE_DREF_GATHER         = 97,
+	// The image half of a sampled image: what a fetch or a query reads.
+	IMAGE                     = 100,
+	IMAGE_QUERY_SIZE_LOD      = 103,
+	IMAGE_QUERY_LEVELS        = 106,
 
 	CONVERT_F_TO_U            = 109,
 	CONVERT_F_TO_S            = 110,
@@ -121,8 +129,12 @@ constdef Opcode : uint
 	U_DIV                     = 134,
 	S_DIV                     = 135,
 	F_DIV                     = 136,
+	// REM takes the sign of the dividend, as C3's `%` does; MOD takes the sign
+	// of the divisor, as GLSL's `mod` does. For a uint the two agree.
 	U_MOD                     = 137,
+	S_REM                     = 138,
 	S_MOD                     = 139,
+	F_REM                     = 140,
 	F_MOD                     = 141,
 	VECTOR_TIMES_SCALAR       = 142,
 	MATRIX_TIMES_SCALAR       = 143,
@@ -164,6 +176,7 @@ constdef Opcode : uint
 	// Screen-space derivatives: core opcodes, not GLSL.std.450 instructions.
 	DPDX                      = 207,
 	DPDY                      = 208,
+	FWIDTH                    = 209,
 
 	TYPE_COOPERATIVE_MATRIX_KHR = 4456,
 	COOPERATIVE_MATRIX_LOAD_KHR = 4457,
@@ -181,6 +194,7 @@ constdef Opcode : uint
 	KILL                      = 252,
 	RETURN                    = 253,
 	RETURN_VALUE              = 254,
+	UNREACHABLE               = 255,
 }
 
 // --- Enumerants --------------------------------------------------------------
@@ -197,8 +211,12 @@ constdef Capability : uint
 	MATRIX                             = 0,
 	SHADER                             = 1,
 	INT64                              = 11,
+	SAMPLED_1D                         = 43,
+	SAMPLED_CUBE_ARRAY                 = 45,
+	IMAGE_QUERY                        = 50,
 	SHADER_NON_UNIFORM                 = 5301,
 	RUNTIME_DESCRIPTOR_ARRAY           = 5302,
+	SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING = 5307,
 	PHYSICAL_STORAGE_BUFFER_ADDRESSES  = 5347,
 }
 
@@ -330,13 +348,30 @@ constdef SampledImage : uint
 	STORAGE      = 2,
 }
 
-// Image operand bits, on an explicit or implicit sample instruction. Single
-// bits here, and each sample instruction carries only one of them.
+<*
+ Image operand bits, on a sample, fetch or gather instruction. Unlike the memory
+ operands these do combine - `Lod | ConstOffset` is one mask - and the ids they
+ take follow the mask in ascending bit order: the bias, then the lod, then the
+ two gradients, then the offset.
+*>
 constdef ImageOperand : uint
 {
-	BIAS = 1,
-	LOD  = 2,
-	GRAD = 4,
+	BIAS         = 1,
+	LOD          = 2,
+	GRAD         = 4,
+	CONST_OFFSET = 8,
+}
+
+<*
+ The memory-semantics operand of a barrier. A bit field in the specification;
+ the barrier is the one place that writes it, so the bits it combines are named
+ here rather than written as a number.
+*>
+constdef MemorySemantics : uint
+{
+	ACQUIRE_RELEASE  = 0x8,
+	UNIFORM_MEMORY   = 0x40,
+	WORKGROUP_MEMORY = 0x100,
 }
 
 constdef GlslOp : uint
@@ -364,6 +399,8 @@ constdef GlslOp : uint
 	LOG2          = 30,
 	SQRT          = 31,
 	INVERSE_SQRT  = 32,
+	DETERMINANT   = 33,
+	MATRIX_INVERSE = 34,
 	FMIN          = 37,
 	UMIN          = 38,
 	SMIN          = 39,
@@ -380,6 +417,7 @@ constdef GlslOp : uint
 	DISTANCE      = 67,
 	CROSS         = 68,
 	NORMALIZE     = 69,
+	FACE_FORWARD  = 70,
 	REFLECT       = 71,
 	REFRACT       = 72,
 }

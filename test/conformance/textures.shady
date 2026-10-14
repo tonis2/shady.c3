@@ -1,0 +1,98 @@
+// Combined image-and-samplers: every type, and every method on each.
+//
+// The vertex stage reads only what needs no derivatives - explicit levels,
+// texel fetches and the size queries - which is how a vertex shader samples a
+// heightmap. The fragment stage takes the rest: implicit levels, comparisons,
+// gathers, and constant texel offsets on everything that has an offset.
+
+Sampler2D            albedo       @set(0) @binding(0);
+Sampler3D            volume       @set(0) @binding(1);
+SamplerCube          sky          @set(0) @binding(2);
+Sampler2DArray       layers       @set(0) @binding(3);
+SamplerCubeArray     probes       @set(0) @binding(4);
+Sampler2DShadow      shadow       @set(0) @binding(5);
+SamplerCubeShadow    point_shadow @set(0) @binding(6);
+Sampler2DArrayShadow cascades     @set(0) @binding(7);
+
+struct VertexIn
+{
+    float3 position;
+    float2 uv;
+}
+
+struct Varyings
+{
+    float4 position @position;
+    float2 uv;
+    float3 normal;
+}
+
+fn Varyings vert(VertexIn input) @vertex(main)
+{
+    float  height  = albedo.SampleLevel(input.uv, 0).x;
+    float4 texel   = albedo.load(int2(0, 0), 0) + albedo.load(int2(4, 4), 1, int2(-1, 1));
+    float4 packed  = layers.Load(int4(1, 2, 0, 0));
+    float4 sky_lod = sky.sample_lod(float3(0.0, 1.0, 0.0), 2.0);
+    float4 graded  = probes.SampleLevel(float4(0.0, 0.0, 1.0, 3.0), 0.0);
+
+    int2 extent      = albedo.size(0);
+    int  mips        = albedo.levels();
+    int3 stack       = layers.size();
+    int2 face        = sky.size(1);
+    int3 probe_count = probes.size(0);
+    int3 depth       = volume.size(0);
+
+    Varyings output;
+    output.position = float4(input.position.xy, height + texel.x + packed.x, 1.0);
+    output.uv       = input.uv + float2(float(extent.x + mips + stack.z), float(face.y + probe_count.z + depth.z));
+    output.normal   = sky_lod.xyz + graded.xyz;
+    return output;
+}
+
+fn float4 frag(Varyings input) @fragment
+{
+    float2 uv = input.uv;
+    float3 n  = input.normal;
+
+    float4 flat = albedo.Sample(uv)
+        + albedo.Sample(uv, int2(1, -1))
+        + albedo.SampleBias(uv, 0.5)
+        + albedo.sample_grad(uv, ddx(uv), ddy(uv), int2(0, 1))
+        + albedo.SampleLevel(uv, 1.0, int2(-1, 0));
+
+    float4 solid = volume.sample(float3(uv, 0.5))
+        + volume.sample_grad(float3(uv, 0.5), float3(0.01), float3(0.01))
+        + volume.load(int3(1, 2, 3), 0, int3(1, 0, -1));
+
+    float4 env = sky.Sample(n)
+        + probes.Sample(float4(n, 2.0))
+        + probes.SampleGrad(float4(n, 1.0), float3(0.01), float3(0.01));
+
+    float4 layered = layers.Sample(float3(uv, 1.0), int2(1, 1))
+        + layers.load(int3(4, 5, 1), 0);
+
+    float4 gathered = albedo.Gather(uv)
+        + albedo.GatherGreen(uv, int2(1, 0))
+        + albedo.gather(uv, 3)
+        + sky.GatherAlpha(n)
+        + layers.GatherBlue(float3(uv, 2.0));
+
+    float lit = shadow.SampleCmp(uv, 0.5)
+        + shadow.SampleCmpLevelZero(uv, 0.5, int2(1, 1))
+        + shadow.sample_cmp_lod(uv, 0.5, 0.0)
+        + point_shadow.SampleCmp(n, 0.5)
+        + point_shadow.SampleCmpLevelZero(n, 0.5)
+        + cascades.SampleCmp(float3(uv, 2.0), 0.5)
+        + cascades.SampleCmpLevelZero(float3(uv, 1.0), 0.5, int2(-1, -1));
+
+    float4 pcf = shadow.GatherCmp(uv, 0.5)
+        + shadow.gather_cmp(uv, 0.5, int2(1, 0))
+        + point_shadow.GatherCmp(n, 0.5)
+        + cascades.GatherCmp(float3(uv, 0.0), 0.5);
+
+    float4 raw     = shadow.load(int2(3, 3), 0);
+    int3   cascade = cascades.size(0);
+
+    return flat + solid + env + layered + gathered + pcf + raw
+        + float4(lit, float(cascade.z), 0.0, 0.0);
+}

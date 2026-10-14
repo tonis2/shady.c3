@@ -1,20 +1,18 @@
 # shady.c3
 
-An in-process shader compiler for [C3](https://c3-lang.org): pass it source and
-get SPIR-V back. It creates no temporary files, starts no subprocesses, and
-requires no external shader toolchain.
+**A shader compiler for [C3](https://c3-lang.org) that runs inside your program.**
+Pass it source text and get SPIR-V back. It needs no temporary files, no
+subprocesses and no external toolchain.
 
-- [Install](#install)
-- [Compile a shader](#compile-a-shader)
-- [Shader language](#shader-language)
-- [Supported features](#supported-features)
-- [Tests](#tests)
+[Install](#install) · [Usage](#usage) · [Language](#language) ·
+[Features](#features) · [Limitations](#limitations) · [Tests](#tests) ·
+[Full spec](LANGUAGE.md)
 
 ## Install
 
 Download `shady.c3l` from the
-[latest release](https://github.com/tonis2/shady.c3/releases/latest), place it
-in your project's `lib/` directory, and add the dependency:
+[latest release](https://github.com/tonis2/shady.c3/releases/latest) into your
+project's `lib/` folder, then add it to `project.json`:
 
 ```json
 {
@@ -23,7 +21,7 @@ in your project's `lib/` directory, and add the dependency:
 }
 ```
 
-To follow the source directly instead, add the repository as a submodule:
+To track the source instead, add it as a submodule:
 
 ```sh
 git submodule add https://github.com/tonis2/shady.c3.git lib/shady.c3l
@@ -31,75 +29,55 @@ git submodule add https://github.com/tonis2/shady.c3.git lib/shady.c3l
 
 The library is pure C3, so there is nothing else to build or link.
 
-## Compile a shader
+## Usage
 
 ```c3
 import shady;
 
 shady::Diagnostic diagnostic;
 char[]? spirv = shady::compile(source, &diagnostic);
-
 if (catch spirv)
 {
-    io::eprintfn("%s", diagnostic.render(tmem));
+    io::eprintfn("%s", diagnostic.render(tmem)); // file:line:col, source line and caret
     diagnostic.free();
     return;
 }
-
 diagnostic.free();
 defer free(spirv);
 
-ShaderModule module = vk::loadShaderModule(device, spirv)!!;
+// Pass `spirv` to vkCreateShaderModule.
 ```
 
-`compile` returns one SPIR-V module containing every entry point in the source.
-Entry points use the function name by default, or the name supplied to the stage
-attribute, such as `@fragment(opaque)`.
+- **One module, every entry point.** Each entry point is named after its
+  function unless the stage attribute names it, as in `@fragment(opaque)`.
+- **You own the output.** The SPIR-V and the diagnostic use the `allocator:`
+  argument (`mem` by default) and are yours to free.
+- **Optional arguments:** `scalar_layout: true` packs blocks with C3's own
+  layout. `warnings: &list` collects warnings into a `shady::DiagnosticList`.
+- **Imports:** `shady::resolve_imports` resolves them through a loader you
+  supply, so the compiler never reads files itself.
 
-The returned SPIR-V and diagnostic data belong to the caller. Both use the
-allocator passed to `compile` (`mem` by default). Optional warnings can be
-collected by passing an initialized `shady::DiagnosticList` through the
-`warnings:` argument; free each warning and then the list when finished.
+## Language
 
-Diagnostics include the source line and caret span. `#line` directives can give
-generated or imported source its own file name and line numbering. See
-[Language: `#line` directives](LANGUAGE.md#11-line-directives).
+The language is C3-shaped. It has `float4`/`float4x4` types and postfix
+attributes, and a struct needs no semicolon after its closing brace.
 
-## Shader language
-
-The language is intentionally C3-shaped: familiar scalar, vector, and matrix
-types; postfix attributes; and braces without trailing semicolons. The complete
-reference is in [LANGUAGE.md](LANGUAGE.md).
+**Graphics**
 
 ```c3
-struct Uniforms @uniform
-{
-    float4x4 projection;
-    float4x4 view;
-}
+struct Uniforms @uniform { float4x4 mvp; }
 
-struct VertexIn
-{
-    float3 position;
-    float2 uv;
-}
+struct VertexIn   { float3 position; float2 uv; }
+struct FragmentIn { float4 position @position; float2 uv; }
 
-struct FragmentIn
-{
-    float4 position @position;
-    float2 uv;
-}
-
-Uniforms uniforms;
+Uniforms  uniforms;
 texture2d texture;
-sampler texture_sampler;
+sampler   texture_sampler;
 
 fn FragmentIn vert(VertexIn input) @vertex
 {
     FragmentIn output;
-    output.position = uniforms.projection
-        * uniforms.view
-        * float4(input.position, 1.0);
+    output.position = uniforms.mvp * float4(input.position, 1.0);
     output.uv = input.uv;
     return output;
 }
@@ -110,45 +88,69 @@ fn float4 frag(FragmentIn input) @fragment
 }
 ```
 
-Resource blocks are ordinary structs marked with `@uniform`, `@pushconstant`,
-or `@address`. Descriptor sets and bindings are assigned in declaration order,
-unless `@set` and `@binding` specify them explicitly. Duplicate bindings are
-reported as errors.
+**Compute**
 
-## Supported features
+```c3
+struct Push @pushconstant { uint count; }
 
-- Vertex, fragment, and compute entry points; multiple entry points per module.
-- Scalars, vectors, matrices, arrays, structs, pointers, swizzles, constructors,
-  casts, arithmetic, bitwise operations, and matrix/vector multiplication.
-- Uniform blocks (std140), push constants, and buffer device addresses (std430).
-  C3-compatible scalar packing is available with `scalar_layout: true`.
-- Textures, samplers, combined samplers, descriptor arrays, non-uniform resource
-  indices, several descriptor sets, and specialization constants.
-- Structured `if`, `while`, and `for` control flow with `break`, `continue`, and
-  `discard`, plus common GLSL built-ins and atomic addition.
-- Functions, overloads, C3-style methods, `out`/`inout` parameters, modules,
-  imports, and interfaces.
+float input[];    // a storage buffer holding a runtime-sized array
+float output[];
+Push  push;
 
-Not yet supported: storage buffers and runtime-sized arrays in memory. A
-runtime-sized array of descriptors is supported. Unsupported input produces a
-positioned diagnostic instead of silently generating invalid SPIR-V.
+struct ComputeIn { uint3 id @builtin(global_invocation_id); }
 
-For the exact syntax and behavior, read the [language specification](LANGUAGE.md).
+fn void main(ComputeIn at) @compute @threads(64, 1, 1)
+{
+    uint i = at.id.x;
+    if (i >= push.count) return;
+    output[i] = input[i] * 2.0;
+}
+```
+
+Resources bind in declaration order. Use `@set(n) @binding(n)` to pin one
+explicitly; a duplicate binding is an error.
+
+## Features
+
+| Area | What's supported |
+|---|---|
+| **Stages** | Vertex, fragment and compute (`@threads`, `@subgroup_size`). A module can hold any number of entry points. |
+| **Types** | `bool` `int` `uint` `float` `half` `int8` `uint8`, vectors, matrices, arrays, structs and device pointers |
+| **Buffers** | Uniform buffers (std140), storage buffers (std430) with runtime-sized arrays, push constants and buffer device addresses |
+| **Textures** | 1D, 2D, 3D, cube and layered textures, separate or combined (`Sampler2D`, `SamplerCube`, `Sampler2DArray`, shadow types…). Sampling with bias, level or gradients, depth comparison, gather, texel `load`, `size`/`levels` queries, constant texel offsets, and bindless arrays with `NonUniformResourceIndex` |
+| **Compute** | `shared` workgroup memory, `barrier`, `InterlockedAdd` and cooperative matrices (`coopmat`, `coop_load`, `coop_muladd`, `coop_store`) |
+| **Layout** | std140 and std430 by default, or C3-compatible packing with `scalar_layout: true` |
+| **Control flow** | `if`, `while`, `for`, `break`, `continue`, `discard` and `?:` |
+| **Functions** | Overloads, C3-style methods, `out`/`inout` parameters and forward declarations |
+| **Code organization** | Modules, `import`, interfaces, and templates with `@required`/`@fallback` holes |
+| **Variants** | Specialization constants with `@spec(id)` |
+| **Built-ins** | GLSL.std.450 math and geometry, `mod`/`fmod`, `inverse`/`determinant`, derivatives (`ddx`, `ddy`, `fwidth`) and bit casts (`asuint`, `asfloat`, `ashalf`, …) |
+| **Diagnostics** | The source line with a caret, `#line` remapping and optional warnings. Unsupported input is reported as an error instead of producing invalid SPIR-V. |
+
+## Limitations
+
+- Only vertex, fragment and compute stages are supported. There are no
+  geometry, tessellation, mesh or ray-tracing stages.
+- There are no storage images (writable textures), no integer or multisampled
+  textures, no `switch` and no `double`.
+- Arrays have one dimension.
+- The only atomic is `InterlockedAdd`, on 32-bit `uint`.
+- Recursion isn't supported.
 
 ## Tests
-
-Run the compiler tests with:
 
 ```sh
 c3c test
 ```
 
-The suite checks the emitted SPIR-V structure, including entry points, layouts,
-descriptor decorations, and addressing models. To validate generated modules
-yourself, use Vulkan's rules:
+This runs the unit tests and a conformance corpus in `test/conformance/`. Each
+shader in the corpus is compiled and validated with
+`spirv-val --target-env vulkan1.3`. If `spirv-val` isn't on your `PATH`,
+validation is skipped.
 
-```sh
-spirv-val --target-env vulkan1.3 shader.spv
-```
+Validate your own output with the same Vulkan target, because generic
+`spirv-val` accepts some modules that Vulkan rejects.
 
-The generic `spirv-val` environment accepts some modules that Vulkan rejects.
+## License
+
+[GPL-3.0](LICENSE)

@@ -61,8 +61,19 @@ fn float4 frag(FragmentIn input, FragmentFace face) @fragment
     // both and they are one instruction.
     float folded = frac(input.color.z + 0.5) + fract(input.color.w - 0.5);
 
+    // GLSL's floored `mod` and HLSL's truncated `fmod`, and the pixel width
+    // `fwidth` measures - a fragment-only opcode like the derivatives.
+    float2 wrapped = mod(input.color.xy, 2.0) + fmod(input.color.zw, float2(3.0));
+    float width = fwidth(input.color.x);
+
+    float3 facing = faceforward(input.color.xyz, -input.color.xyz, blended);
+    float3x3 basis = float3x3(facing, facing.yzx, facing.zxy);
+    float3x3 inverted = inverse(basis);
+    float3 undone = inverted[0] * determinant(basis);
+
     return chosen + clip + float4(blended * scaled, total + float(bits & 255u))
-        + float4(slope, 0.0, folded) + float4(face.front_facing ? 0.25 : 0.0);
+        + float4(slope, 0.0, folded) + float4(face.front_facing ? 0.25 : 0.0)
+        + float4(wrapped, width, 0.0) + float4(undone, 0.0);
 }
 
 // `atan2(y, x)` is GLSL.std.450's Atan2 - the quadrant-aware arctangent, which

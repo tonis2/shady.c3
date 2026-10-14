@@ -57,5 +57,17 @@ fn float4 frag(FragmentIn input) @fragment
     spread(a, b);
 
     float pick = input.color.x > 0.5 ? total : float(bits);
-    return float4(small[0], pick) + float4(a, 1.0) - float4(float(count));
+
+    // `%` is a remainder, with the sign of its left side.
+    int signed_rest = (count - 7) % 3;
+    float float_rest = input.color.w % 2.0;
+
+    // Matrix arithmetic beyond the products goes a column at a time.
+    float4x4 scaled = m / 2.0;
+    float4x4 negated = -m;
+    float4x4 shifted = m + 1.0;
+    float4x4 mixed = (scaled - negated) + shifted;
+
+    return float4(small[0], pick) + float4(a, 1.0) - float4(float(count))
+        + float4(float(signed_rest), float_rest, 0.0, 0.0) + mixed[3];
 }

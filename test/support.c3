@@ -175,3 +175,25 @@ fn bool has_decoration(char[] spirv, shady::Decoration decoration)
 	}
 	return false;
 }
+
+<*
+ How many `OpDecorate` instructions carry this decoration - for a decoration
+ that has to land on several ids, such as NonUniform on every step from a
+ descriptor array to the image instruction.
+*>
+fn uint decoration_count(char[] spirv, shady::Decoration decoration)
+{
+	uint* words = (uint*)spirv.ptr;
+	usz   count = (usz)spirv.len / 4;
+	usz   i     = 5;
+	uint  found = 0;
+	while (i < count)
+	{
+		uint word   = words[i];
+		shady::Opcode opcode = (shady::Opcode)(word & 0xffff);
+		usz  len    = (usz)(word >> 16);
+		if (opcode == shady::Opcode.DECORATE && words[i + 2] == (uint)decoration) found++;
+		i += len;
+	}
+	return found;
+}

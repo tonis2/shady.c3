@@ -7,6 +7,7 @@
 module function_test;
 
 import std::core::test;
+import shady;
 import shady_support;
 
 fn void calls_a_function_declared_later() @test
@@ -208,6 +209,55 @@ fn float4 f(float4 color) { if (color.x > 0.0) { return color; } }
 `));
 
 	test::@check(error.len > 0, "a path with no return should be refused; got '%s'", error);
+}
+
+<*
+ Both arms of the if return, so the if itself ends the function: the block
+ after it is unreachable rather than a path that falls off the end.
+*>
+fn void an_if_else_returning_on_both_sides_returns() @test
+{
+	char[] spirv = shady_support::build(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment { return float4(pick(input.color.x > 0.5)); }
+fn float pick(bool b) { if (b) return 1.0; else return 2.0; }
+`));
+	defer free(spirv);
+
+	test::@check(shady_support::has_opcode(spirv, shady::Opcode.UNREACHABLE),
+		"the merge after two returning arms should be unreachable");
+}
+
+fn void a_loop_left_only_by_return_returns() @test
+{
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment { return float4(first_above(input.color.x)); }
+fn float first_above(float limit)
+{
+    float x = 0.0;
+    while (true)
+    {
+        x += 1.0;
+        if (x > limit) return x;
+    }
+}
+`));
+
+	test::@check(error == "", "a loop that only leaves by return should end the function; got '%s'", error);
+}
+
+fn void a_loop_with_a_break_still_falls_through() @test
+{
+	// `break` reaches the merge, so the code after the loop runs and has to
+	// return - the infinite-loop rule must not swallow a missing return.
+	String error = shady_support::compile_error(shady_support::fragment(`
+fn float4 frag(FragmentIn input) @fragment { return float4(f(input.color.x)); }
+fn float f(float limit)
+{
+    for (;;) { if (limit > 1.0) break; }
+}
+`));
+
+	test::@check(error.contains("every path"), "a loop left by break needs a return after it; got '%s'", error);
 }
 
 <*

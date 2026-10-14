@@ -60,6 +60,13 @@ fn void? Codegen.assign_bindings(&self, Ast* ast)
 		resource.type  = type;
 		resource.block = type.kind == STRUCT ? type.block : BlockKind.NONE;
 		if (type.kind == ARRAY && type.runtime && !type.element.is_opaque()) resource.block = STORAGE;
+		if (resource.block == STORAGE && type.kind == ARRAY && type.element.contains_bool())
+		{
+			self.fail(decl.line, decl.column, string::format(self.allocator,
+				"`%s[]` holds a bool, which has no layout in a storage buffer - store a `uint` and compare it with 0u",
+				type.element.name));
+			return CODEGEN_ERROR~;
+		}
 
 		if (resource.block == PUSH_CONSTANT)
 		{
@@ -237,6 +244,24 @@ fn void? Codegen.declare_structs(&self, Ast* ast)
 			}
 		}
 		type.members = members;
+	}
+
+	// A block is memory the host writes, and Vulkan gives a bool no layout in
+	// it. A nested plain struct is reached here too: it is the block's memory
+	// all the same, even though the struct alone is a legal local.
+	foreach (decl : ast.decls)
+	{
+		if (decl.kind != DeclKind.STRUCT) continue;
+		Type* type = self.types.find(decl.name);
+		if (type.block == NONE) continue;
+		foreach (i, &m : type.members)
+		{
+			if (!m.type.contains_bool()) continue;
+			self.fail(decl.struct_decl.members[i].line, decl.struct_decl.members[i].column, string::format(self.allocator,
+				"`%s.%s` holds a bool, which has no layout in a %s block - store a `uint` and compare it with 0u",
+				type.name, m.name, type.block.attribute()));
+			return CODEGEN_ERROR~;
+		}
 	}
 
 	// Now that every @address struct's members are known, emit its type, lay it
@@ -627,10 +652,18 @@ fn void? Codegen.stage_variables(&self, Type* type, StorageClass storage, StageV
 		// or fragment input of integer type without this decoration is a module the
 		// validator refuses, and the author has nothing to decide. `@flat` still
 		// parses, so a file that says it says nothing wrong.
-		bool varying = storage == StorageClass.OUTPUT || execution_model == ExecutionModel.FRAGMENT;
+		//
+		// Only those two are varyings. Interpolation happens between the stages,
+		// so Vulkan forbids Flat on a vertex input and a fragment output
+		// (VUID-StandaloneSpirv-Flat-06201/06202) - an integer render target is
+		// an ordinary output - and `@flat` on a struct shared with either side is
+		// left off there rather than refused.
+		bool varying = (storage == StorageClass.OUTPUT && execution_model == ExecutionModel.VERTEX)
+			|| (storage == StorageClass.INPUT && execution_model == ExecutionModel.FRAGMENT);
+		TypeKind scalar = member.type.scalar().kind;
 		bool integer = !member.is_position && !member.is_builtin
-			&& (member.type.kind == INT || member.type.kind == UINT || member.type.kind == BOOL);
-		if (member.attributes.find("flat") || (varying && integer)) self.mod.decorate(id, Decoration.FLAT);
+			&& (scalar == INT || scalar == UINT || scalar == BOOL);
+		if (varying && (member.attributes.find("flat") || integer)) self.mod.decorate(id, Decoration.FLAT);
 
 		out.push({ .id = id, .type = member.type, .member_index = (usz)i, .is_position = member.is_position });
 		self.interface_ids.push(id);
@@ -680,6 +713,7 @@ fn void? Codegen.emit_entry_point(&self, Decl* decl, ExecutionModel execution_mo
 	self.outputs.clear();
 	self.interface_ids.clear();
 	self.locals.clear();
+	self.execution_model = execution_model;
 
 	Type* void_t  = self.types.find("void");
 	Id    fn_void = self.mod.type_function(self.type_id(void_t));

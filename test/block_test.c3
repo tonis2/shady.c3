@@ -128,3 +128,40 @@ fn void the_attribute_decides_the_layout() @test
 	test::@check(shady::BlockKind.ADDRESS.layout() == shady::Layout.STD430,
 		"an @address block should be std430");
 }
+
+<*
+ Vulkan gives a bool no layout in memory: an OpTypeBool inside a uniform,
+ storage, push-constant or device-address block is invalid, and the 4 bytes
+ the layout would have guessed are not something the host can write to. Each
+ spelling of "a bool in a buffer" is refused where it is written, pointing at
+ the `uint` to use instead. A bool in a local struct stays legal.
+*>
+fn void rejects_a_bool_in_a_block() @test
+{
+	String[] sources = {
+		"struct U @uniform { float x; bool on; }\nU u;\n",
+		"struct P @pushconstant { bool on; }\nP p;\n",
+		"struct S @storage { bool flags[]; }\nS s;\n",
+		"struct A @address { bool on; }\n",
+		"struct Light { float3 color; bool on; }\nstruct U @uniform { Light light; }\nU u;\n",
+		"bool flags[];\n",
+		"struct P @pushconstant { bool* flags; }\nP p;\n",
+	};
+
+	foreach (source : sources)
+	{
+		String error = rejection(source);
+		test::@check(error.contains("bool") && error.contains("uint"),
+			"a bool in a buffer should be refused, pointing at uint; for '%s' got '%s'", source, error);
+	}
+}
+
+fn void a_bool_in_a_local_struct_is_fine() @test
+{
+	String error = rejection(`
+struct Light { float3 color; bool on; }
+fn Light make() { Light l; l.color = float3(1.0); l.on = true; return l; }
+`);
+
+	test::@check(error == "", "a bool outside a block should compile; got '%s'", error);
+}

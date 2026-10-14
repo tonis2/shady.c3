@@ -40,6 +40,9 @@ const char[*] EMBED_SHARED       = $embed("conformance/shared.shady");
 const char[*] EMBED_COOPMAT      = $embed("conformance/coopmat.shady");
 const char[*] EMBED_HALF         = $embed("conformance/half.shady");
 const char[*] EMBED_IMPORT       = $embed("conformance/import.shady");
+const char[*] EMBED_VARYINGS     = $embed("conformance/varyings.shady");
+const char[*] EMBED_TEXTURES     = $embed("conformance/textures.shady");
+const char[*] EMBED_SEPARATE     = $embed("conformance/separate_textures.shady");
 // Not a case of its own: `import.shady` pulls it in, and a module without an
 // entry point is not something to compile on its own.
 const char[*] EMBED_IMPORT_LIB   = $embed("conformance/import_lib.shady");
@@ -91,6 +94,9 @@ const Case[*] CORPUS = {
 	{ "coopmat",      (String)EMBED_COOPMAT[..],      false },
 	{ "half",         (String)EMBED_HALF[..],         false },
 	{ "import",       (String)EMBED_IMPORT[..],       false },
+	{ "varyings",     (String)EMBED_VARYINGS[..],     false },
+	{ "textures",     (String)EMBED_TEXTURES[..],     false },
+	{ "separate_textures", (String)EMBED_SEPARATE[..], false },
 };
 
 fn void the_conformance_corpus_compiles_and_validates() @test

@@ -31,6 +31,11 @@ struct Value
 	Id    id;      // the loaded value; 0 when only a pointer is held
 	Id    pointer; // 0 when the value is not addressable
 	StorageClass storage; // storage class of `pointer`
+
+	// The value came from `NonUniformResourceIndex`, or is a descriptor
+	// reached through one. Carried so every instruction on the way to the
+	// image operation can be decorated, which is where drivers look.
+	bool  non_uniform;
 }
 
 struct Local
@@ -159,6 +164,11 @@ struct Codegen
 	StageVarList outputs;
 	IdListC      interface_ids;
 	bool         terminated; // current block already has a terminator
+
+	// The stage of the entry point being emitted. A helper is emitted inside
+	// the first entry point that calls it, so this is the stage its body runs
+	// in at least there - which is what the fragment-only checks ask.
+	ExecutionModel execution_model;
 
 	Id glsl; // the GLSL.std.450 import
 
@@ -343,9 +353,7 @@ fn Id Codegen.type_id(&self, Type* type)
 			self.coopmat_capability();
 		}
 		case SAMPLER: type.id = self.mod.type_sampler();
-		case SAMPLED_IMAGE:
-			type.id = self.mod.type_sampled_image(
-				self.mod.type_image(self.type_id(type.element.element), type.dim, type.depth));
+		case SAMPLED_IMAGE: type.id = self.mod.type_sampled_image(self.image_type_id(type));
 		case POINTER:
 			// A buffer struct pre-declares its pointer type with
 			// OpTypeForwardPointer, so it exists before this is reached. A
@@ -361,7 +369,7 @@ fn Id Codegen.type_id(&self, Type* type)
 				self.mod.decorate(type.id, Decoration.ARRAY_STRIDE,
 					array_stride(type.element, self.block_layout(ADDRESS)));
 			}
-		case TEXTURE: type.id = self.mod.type_image(self.type_id(type.element.element), type.dim);
+		case TEXTURE: type.id = self.image_type_id(type);
 		case STRUCT:
 			@pool() {
 				Id[] members = alloc::alloc_array(tmem, Id, type.members.len);
@@ -373,6 +381,32 @@ fn Id Codegen.type_id(&self, Type* type)
 	}
 
 	return type.id;
+}
+
+<*
+ The OpTypeImage behind a texture or a combined sampler, declaring the
+ capability its shape needs. Neither of these is implied by Shader: a 1D image
+ needs Sampled1D, which the validator checks, and a cube array needs
+ SampledCubeArray, which it does not - a driver handed one without it may
+ refuse the module, and the host has to enable `imageCubeArray` either way.
+*>
+fn Id Codegen.image_type_id(&self, Type* type)
+{
+	if (type.dim == Dim.D1) self.mod.capability(Capability.SAMPLED_1D);
+	if (type.dim == Dim.CUBE && type.arrayed) self.mod.capability(Capability.SAMPLED_CUBE_ARRAY);
+	return self.mod.type_image(self.type_id(type.element.element), type.dim, type.depth, type.arrayed);
+}
+
+<*
+ Load a descriptor - a texture, a sampler, a combined sampler - from its
+ variable or its slot in a descriptor array, carrying a non-uniform index's
+ decoration onto the loaded value.
+*>
+fn Id Codegen.load_descriptor(&self, Value descriptor)
+{
+	Id id = self.func.load(self.type_id(descriptor.type), descriptor.pointer);
+	if (descriptor.non_uniform) self.mod.decorate(id, Decoration.NON_UNIFORM);
+	return id;
 }
 
 fn Id Codegen.pointer_to(&self, StorageClass storage_class, Type* type)
@@ -417,6 +451,12 @@ fn Type*? Codegen.resolve_type(&self, TypeRef ref, uint line, uint column)
 		// uint4 and float4x4, not arrays of structs.
 		bool addressable = type.kind == VECTOR || type.kind == MATRIX || type.is_scalar()
 			|| (type.kind == STRUCT && type.block == ADDRESS);
+		if (type.contains_bool() && type.kind != STRUCT)
+		{
+			self.fail(line, column, string::format(self.allocator,
+				"`%s*` cannot be a device address - a bool has no layout in memory; point at a `uint`", type.name));
+			return CODEGEN_ERROR~;
+		}
 		if (!addressable)
 		{
 			if (type.kind == STRUCT)
@@ -469,8 +509,9 @@ fn Value Codegen.adapt_literal(&self, Value value, Expr* side, Type* other)
 
  `GLSL.std.450` spells `min` three times - `FMin`, `UMin` and `SMin` - and each
  one takes only its own operands, so an integer `min` compiled as `FMin` is
- invalid SPIR-V rather than a slow path. A uint has no `abs` or `sign` of its
- own: neither can do anything a uint does not already do.
+ invalid SPIR-V rather than a slow path. A uint has no `abs` or `sign` in
+ GLSL.std.450 at all, so `builtin_call` answers those two itself before it gets
+ here; the unsigned choice of either is never taken.
 *>
 fn GlslOp Codegen.by_sign(&self, GlslOp floats, GlslOp unsigned, GlslOp signed, Type* result)
 {
@@ -986,6 +1027,17 @@ fn Value? Codegen.index_expression(&self, Expr* expr)
 	{
 		Id ptr = self.func.access_chain(self.mod.type_pointer(base.storage, self.type_id(element)),
 			base.pointer, (Id[]) { self.rvalue(index) });
+
+		// A descriptor picked by a non-uniform index is itself non-uniform,
+		// and so is everything made from it on the way to the image
+		// operation - the load, the sampled image. The decoration on the
+		// index alone is not what the driver reads.
+		if (index.non_uniform && element.is_opaque())
+		{
+			self.mod.decorate(ptr, Decoration.NON_UNIFORM);
+			self.mod.capability(Capability.SAMPLED_IMAGE_ARRAY_NON_UNIFORM_INDEXING);
+			return (Value) { .type = element, .pointer = ptr, .storage = base.storage, .non_uniform = true };
+		}
 		return (Value) { .type = element, .pointer = ptr, .storage = base.storage };
 	}
 
@@ -1003,6 +1055,12 @@ fn Value? Codegen.unary_expression(&self, Expr* expr)
 	{
 		case MINUS:
 			bool is_float = operand.type.scalar().kind == FLOAT;
+			if (operand.type.kind == MATRIX)
+			{
+				// OpFNegate takes scalars and vectors, so a matrix negates a
+				// column at a time, like its other arithmetic.
+				return (Value) { .type = operand.type, .id = self.matrix_columns(Opcode.F_NEGATE, operand.type, id, operand.type, NO_ID, null) };
+			}
 			return (Value) { .type = operand.type, .id = self.func.unop(is_float ? Opcode.F_NEGATE : Opcode.S_NEGATE, type, id) };
 		case BANG:
 			return (Value) { .type = operand.type, .id = self.func.unop(Opcode.LOGICAL_NOT, type, id) };
@@ -1169,6 +1227,8 @@ fn Value? Codegen.conditional_expression(&self, Expr* expr)
 	self.func.store(pointer, self.coerce(else_value, result, expr.conditional.else_value)!);
 	if (!self.terminated) self.func.branch(merge_label);
 
+	// Unlike an if, both arms always reach the merge: an expression cannot
+	// return or break, so the merge is never the unreachable kind.
 	self.func.label(merge_label);
 	self.terminated = false;
 	return (Value) { .type = result, .pointer = pointer, .storage = StorageClass.FUNCTION };
@@ -1318,23 +1378,34 @@ fn Value? Codegen.binary_expression(&self, Expr* expr)
 }
 
 <*
- Add or subtract two whole matrices, a column at a time.
+ Apply a component-wise operator to a matrix, a column at a time.
 
- SPIR-V's `OpFAdd` and `OpFSub` take scalars and vectors only, so a matrices'
- worth of them would be a miscompile the validator catches - as it caught this
- one. `OpCompositeExtract`/`Construct` is how the columns come apart and go
- back together.
+ SPIR-V's `OpFAdd`, `OpFSub`, `OpFDiv` and `OpFNegate` take scalars and vectors
+ only, so a matrices' worth of any of them is a miscompile the validator
+ catches - as it caught `matrix + matrix` once. `OpCompositeExtract`/`Construct`
+ is how the columns come apart and go back together.
+
+ Either side may be a matrix of the result's type or a float, which is splatted
+ to a column; `m / 2.0` and `1.0 - m` are both GLSL's component-wise forms. A
+ null `right_type` makes the operator unary, which is how `-m` is spelled.
 *>
-fn Id Codegen.matrix_add(&self, Id left, Id right, Type* matrix, bool subtract)
+fn Id Codegen.matrix_columns(&self, Opcode op, Type* matrix, Id left, Type* left_type, Id right, Type* right_type)
 {
 	Id column_type = self.type_id(matrix.element);
+	Id left_splat  = left_type.kind == MATRIX ? NO_ID : self.splat(matrix.element, left);
+	Id right_splat = !right_type || right_type.kind == MATRIX ? NO_ID : self.splat(matrix.element, right);
 	@pool() {
 		Id[] columns = alloc::alloc_array(tmem, Id, (sz)matrix.count);
-		for (usz i = 0; i < (usz)matrix.count; i++)
+		for (uint i = 0; i < matrix.count; i++)
 		{
-			Id a = self.func.composite_extract(column_type, left, (uint)i);
-			Id b = self.func.composite_extract(column_type, right, (uint)i);
-			columns[i] = self.func.binop(subtract ? Opcode.F_SUB : Opcode.F_ADD, column_type, a, b);
+			Id a = left_splat != NO_ID ? left_splat : self.func.composite_extract(column_type, left, i);
+			if (!right_type)
+			{
+				columns[i] = self.func.unop(op, column_type, a);
+				continue;
+			}
+			Id b = right_splat != NO_ID ? right_splat : self.func.composite_extract(column_type, right, i);
+			columns[i] = self.func.binop(op, column_type, a, b);
 		}
 		return self.func.composite_construct(self.type_id(matrix), columns);
 	};
@@ -1418,11 +1489,32 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 		}
 	}
 
-	// SPIR-V has no matrix add or subtract, so they are done a column at a
-	// time - which is also the only place the column type is assumed.
-	if ((op == PLUS || op == MINUS) && lt.kind == MATRIX && rt.kind == MATRIX)
+	// The products are done; what is left of a matrix's arithmetic is
+	// component-wise, and SPIR-V has none of it for matrices, so it goes a
+	// column at a time. The other side is the same matrix type or a float.
+	// Anything else - a comparison, `%`, a bitwise operator - has no meaning
+	// on a matrix and is refused rather than emitted for the validator.
+	if (lt.kind == MATRIX || rt.kind == MATRIX)
 	{
-		return self.matrix_add(left_id, right_id, lt, op == MINUS);
+		Type* matrix = lt.kind == MATRIX ? lt : rt;
+		Type* other  = lt.kind == MATRIX ? rt : lt;
+		bool  fits   = other == matrix || (other.is_scalar() && other.kind == FLOAT && other.width() == 32);
+		Opcode column_op;
+		switch (op)
+		{
+			case PLUS:  column_op = Opcode.F_ADD;
+			case MINUS: column_op = Opcode.F_SUB;
+			case SLASH: column_op = Opcode.F_DIV;
+			default:    fits = false;
+		}
+		if (!fits)
+		{
+			self.fail(expr.line, expr.column, string::format(self.allocator,
+				"a %s cannot be used with a %s here - a matrix takes + - and / with a matrix of its type or a float, and * as a product",
+				lt.name, rt.name));
+			return CODEGEN_ERROR~;
+		}
+		return self.matrix_columns(column_op, matrix, left_id, lt, right_id, rt);
 	}
 
 	// Broadcast a scalar against a vector for the component-wise operators.
@@ -1464,7 +1556,9 @@ fn Id? Codegen.arithmetic(&self, TokenKind op, Value left, Value right, Expr* ex
 		case MINUS:   return self.func.binop(is_float ? Opcode.F_SUB : Opcode.I_SUB, type, left_id, right_id);
 		case STAR:    return self.func.binop(is_float ? Opcode.F_MUL : Opcode.I_MUL, type, left_id, right_id);
 		case SLASH:   return self.func.binop(is_float ? Opcode.F_DIV : (is_uint ? Opcode.U_DIV : Opcode.S_DIV), type, left_id, right_id);
-		case PERCENT: return self.func.binop(is_float ? Opcode.F_MOD : (is_uint ? Opcode.U_MOD : Opcode.S_MOD), type, left_id, right_id);
+		// `%` is C3's remainder: it takes the sign of the left side, so
+		// `-7 % 3` is -1. GLSL's floored modulo is `mod()`.
+		case PERCENT: return self.func.binop(is_float ? Opcode.F_REM : (is_uint ? Opcode.U_MOD : Opcode.S_REM), type, left_id, right_id);
 		case AMP:     return self.func.binop(Opcode.BITWISE_AND, type, left_id, right_id);
 		case PIPE:    return self.func.binop(Opcode.BITWISE_OR, type, left_id, right_id);
 		case CARET:   return self.func.binop(Opcode.BITWISE_XOR, type, left_id, right_id);
@@ -2261,7 +2355,7 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 		Value base = self.expression(callee.member.value)!;
 		if (base.type.kind == TEXTURE || base.type.kind == SAMPLED_IMAGE)
 		{
-			return self.sample_expression(expr, base, callee.member.name);
+			return self.texture_method(expr, base, callee.member.name);
 		}
 		if (self.has_function(callee.member.name)) return self.user_call(expr, callee.member.name, &base);
 
@@ -2282,6 +2376,7 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 	if (self.has_function(name)) return self.user_call(expr, name, null);
 
 	if (name == "mul") return self.mul_call(expr);
+	if (name == "mod" || name == "fmod") return self.mod_call(expr, name);
 	if (name == "select") return self.select_call(expr);
 	if (name == "coop_load") return self.coop_load_call(expr);
 	if (name == "coop_store") return self.coop_store_call(expr);
@@ -2295,15 +2390,23 @@ fn Value? Codegen.call_expression(&self, Expr* expr)
 
 <*
  `barrier()`: every invocation in the workgroup reaches this point, and every
- write to shared memory before it is visible after it.
+ write to shared memory or to a storage buffer before it is visible to the
+ workgroup after it.
 
  The three operands are the ones the SPIR-V environment wants spelled out: the
  execution scope that synchronises, the memory scope whose writes are ordered,
  and the semantics of that ordering. Workgroup for the first two because a
  workgroup is the only thing that can meet at a barrier, and `AcquireRelease`
- with `WorkgroupMemory` for the third, which is what HLSL's
- `GroupMemoryBarrierWithGroupSync` lowers to. The ordering carries into the
+ over `WorkgroupMemory` and `UniformMemory` for the third - shared memory and
+ buffers both, which is GLSL's `barrier()` after a `memoryBarrier()`. Ordering
+ shared memory alone would let one invocation read a buffer element another
+ wrote before the barrier and see the old value. The ordering carries into the
  function rather than inlining, so a body can put the barrier in a helper.
+
+ A Vulkan-memory-model module (one with a cooperative matrix in it) would
+ also want `MakeAvailable | MakeVisible` for the writes to be seen, and
+ `NonPrivatePointer` on the accesses. The model is decided only once a coopmat
+ appears, possibly after a barrier is written, so that is not done yet.
 
  The result is void: an expression statement is the only place this call can
  be written, which is the point of it being a statement in the language.
@@ -2319,7 +2422,8 @@ fn Value? Codegen.workgroup_barrier(&self, Expr* expr)
 	Type* uint_t = self.types.find("uint");
 	Id scope_execution = self.mod.const_u32(self.type_id(uint_t), 2); // Workgroup
 	Id scope_memory    = self.mod.const_u32(self.type_id(uint_t), 2);
-	Id semantics       = self.mod.const_u32(self.type_id(uint_t), 0x108); // AcquireRelease | WorkgroupMemory
+	Id semantics       = self.mod.const_u32(self.type_id(uint_t),
+		(uint)MemorySemantics.ACQUIRE_RELEASE | (uint)MemorySemantics.WORKGROUP_MEMORY | (uint)MemorySemantics.UNIFORM_MEMORY);
 
 	// OpControlBarrier carries no result type and no result id, so it is
 	// emitted by hand rather than through `Function.emit`.
@@ -2524,11 +2628,14 @@ fn Value? Codegen.coop_muladd_call(&self, Expr* expr)
 <*
  `NonUniformResourceIndex(i)`: the index is not the same across the invocations
  of a wave, so the descriptor it selects may differ lane by lane. It decorates
- the index and yields it unchanged.
+ the index and yields it unchanged, marked so the descriptor array it indexes
+ decorates the access chain, the loaded descriptor and the sampled image too.
 
  The decoration is what tells the driver not to hoist one descriptor for the
  whole wave, which is exactly the mistake a material body reading a map inside
- a branch would otherwise invite.
+ a branch would otherwise invite. Vulkan wants it on the operand the image
+ instruction reads, so the call has to be written inside the brackets: an index
+ kept in a local first loses the mark, as it would in HLSL.
 *>
 fn Value? Codegen.non_uniform_call(&self, Expr* expr)
 {
@@ -2548,7 +2655,7 @@ fn Value? Codegen.non_uniform_call(&self, Expr* expr)
 	self.mod.decorate(id, Decoration.NON_UNIFORM);
 	self.mod.capability(Capability.SHADER_NON_UNIFORM);
 	self.mod.extension("SPV_EXT_descriptor_indexing");
-	return (Value) { .type = index.type, .id = id };
+	return (Value) { .type = index.type, .id = id, .non_uniform = true };
 }
 
 <*
@@ -2606,6 +2713,58 @@ fn Value? Codegen.mul_call(&self, Expr* expr)
 	Value right = self.expression(expr.call.args[1])!;
 	Id    id    = self.arithmetic(STAR, left, right, expr)!;
 	return (Value) { .type = self.result_type(STAR, left.type, right.type), .id = id };
+}
+
+<*
+ `mod(x, y)` and `fmod(x, y)`: the two remainders, which differ only when the
+ operands' signs do.
+
+ `mod` is GLSL's: floored, so the result takes the sign of `y` and
+ `mod(-7.5, 2.0)` is 0.5 - what wrapping an angle or a texture coordinate
+ wants. `fmod` is HLSL's and is `%` spelled as a call: truncated, so the result
+ takes the sign of `x` and `fmod(-7.5, 2.0)` is -1.5. For a uint the two agree.
+
+ A scalar on either side is splatted to the other's vector, as `mod(v, 2.0)`
+ is written.
+*>
+fn Value? Codegen.mod_call(&self, Expr* expr, String name)
+{
+	if (expr.call.args.len != 2)
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator, "`%s` takes two arguments", name));
+		return CODEGEN_ERROR~;
+	}
+	Value left  = self.expression(expr.call.args[0])!;
+	Value right = self.expression(expr.call.args[1])!;
+	left  = self.adapt_literal(left, expr.call.args[0], right.type);
+	right = self.adapt_literal(right, expr.call.args[1], left.type);
+
+	Type* scalar = left.type.scalar();
+	bool  shaped = (left.type.kind == VECTOR || left.type.is_scalar())
+		&& (right.type.kind == VECTOR || right.type.is_scalar());
+	if (!shaped || !scalar.is_numeric() || scalar != right.type.scalar()
+		|| (left.type.kind == VECTOR && right.type.kind == VECTOR && left.type != right.type))
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"`%s` takes two numbers of the same kind, got a %s and a %s", name, left.type.name, right.type.name));
+		return CODEGEN_ERROR~;
+	}
+
+	Type* result   = left.type.kind == VECTOR ? left.type : right.type;
+	Id    left_id  = self.rvalue(left);
+	Id    right_id = self.rvalue(right);
+	if (result.kind == VECTOR && left.type.is_scalar())  left_id  = self.splat(result, left_id);
+	if (result.kind == VECTOR && right.type.is_scalar()) right_id = self.splat(result, right_id);
+
+	bool   floored = name == "mod";
+	Opcode opcode;
+	switch (scalar.kind)
+	{
+		case FLOAT: opcode = floored ? Opcode.F_MOD : Opcode.F_REM;
+		case INT:   opcode = floored ? Opcode.S_MOD : Opcode.S_REM;
+		default:    opcode = Opcode.U_MOD;
+	}
+	return (Value) { .type = result, .id = self.func.binop(opcode, self.type_id(result), left_id, right_id) };
 }
 
 <*
@@ -2770,168 +2929,580 @@ fn Id Codegen.convert_scalar(&self, Id id, Type* from, Type* to)
 }
 
 <*
- The canonical name of a sampling method, accepting the Slang spelling a ported
- body writes as well as the lowercase one. Empty for anything else.
+ The canonical name of a texture method, accepting the Slang/HLSL spelling a
+ ported body writes as well as the lowercase one. Empty for anything else.
+
+ `Gather`, `GatherRed` and the rest are one method with the component fixed by
+ the name (see `gather_component`), and `Load` is `load` with the mip level
+ packed into the coordinate's last component.
 *>
-fn String sample_method_name(String written)
+fn String texture_method_name(String written)
 {
 	switch (written)
 	{
 		case "sample":
 		case "Sample":                return "sample";
+		case "sample_bias":
+		case "SampleBias":            return "sample_bias";
 		case "sample_lod":
 		case "SampleLevel":           return "sample_lod";
 		case "sample_grad":
 		case "SampleGrad":            return "sample_grad";
-		case "sample_bias":
-		case "SampleBias":            return "sample_bias";
+		case "sample_cmp":
+		case "SampleCmp":             return "sample_cmp";
+		case "sample_cmp_lod":
+		case "SampleCmpLevel":        return "sample_cmp_lod";
 		case "sample_cmp_level_zero":
 		case "SampleCmpLevelZero":    return "sample_cmp_level_zero";
+		case "gather":
+		case "Gather":
+		case "GatherRed":
+		case "GatherGreen":
+		case "GatherBlue":
+		case "GatherAlpha":           return "gather";
+		case "gather_cmp":
+		case "GatherCmp":
+		case "GatherCmpRed":          return "gather_cmp";
+		case "load":                  return "load";
+		case "Load":                  return "load_packed";
+		case "size":                  return "size";
+		case "levels":                return "levels";
 		default:                      return "";
 	}
 }
 
 <*
- `tex.sample(...)` and its variants.
-
- Two shapes. An image and a sampler kept as separate objects (`texture2d` plus
- `sampler`) are paired only at the point of use, and have `sample` and
- `sample_lod`. A combined `Sampler2D` is one descriptor that samples directly,
- and carries the whole set - the gradient, bias and comparison variants are
- what the material path spends.
+ The component a Slang gather spelling names, or -1 when the component is an
+ argument - the lowercase `gather(uv, component)`.
 *>
-fn Value? Codegen.sample_expression(&self, Expr* expr, Value texture, String written)
+fn int gather_component(String written)
 {
-	String method = sample_method_name(written);
-	if (method.len == 0)
+	switch (written)
 	{
-		self.fail(expr.line, expr.column,
-			string::format(self.allocator, "a texture has no method `%s`", written));
-		return CODEGEN_ERROR~;
+		case "Gather":
+		case "GatherRed":   return 0;
+		case "GatherGreen": return 1;
+		case "GatherBlue":  return 2;
+		case "GatherAlpha": return 3;
+		default:            return -1;
 	}
-
-	if (texture.type.kind == TEXTURE) return self.separate_sample_expression(expr, texture, method);
-
-	Type* float4  = self.types.find("float4");
-	Type* float_t = self.types.find("float");
-	bool  depth   = texture.type.depth != 0;
-
-	usz wanted;
-	if (method == "sample")
-	{
-		wanted = 1;
-	}
-	else if (method == "sample_grad")
-	{
-		wanted = 3;
-	}
-	else
-	{
-		wanted = 2;
-	}
-
-	if (expr.call.args.len != wanted)
-	{
-		self.fail(expr.line, expr.column,
-			string::format(self.allocator, "`%s` takes %d arguments", written, wanted));
-		return CODEGEN_ERROR~;
-	}
-	if (method == "sample_cmp_level_zero" && !depth)
-	{
-		self.fail(expr.line, expr.column,
-			"`sample_cmp_level_zero` needs a comparison sampler such as Sampler2DShadow");
-		return CODEGEN_ERROR~;
-	}
-
-	Id image = self.func.load(self.type_id(texture.type), texture.pointer);
-	Id coord = self.rvalue(self.expression(expr.call.args[0])!);
-
-	Id    result;
-	Type* result_type = float4;
-
-	if (method == "sample")
-	{
-		result = self.func.image_sample(self.type_id(float4), image, coord);
-	}
-	else if (method == "sample_lod")
-	{
-		Value lod = self.expression(expr.call.args[1])!;
-		result = self.func.image_sample_lod(self.type_id(float4), image, coord, self.rvalue(lod));
-	}
-	else if (method == "sample_grad")
-	{
-		Value gx = self.expression(expr.call.args[1])!;
-		Value gy = self.expression(expr.call.args[2])!;
-		result = self.func.emit(Opcode.IMAGE_SAMPLE_EXPLICIT_LOD, self.type_id(float4), image, coord,
-			(Id)ImageOperand.GRAD, self.rvalue(gx), self.rvalue(gy));
-	}
-	else if (method == "sample_bias")
-	{
-		Value bias = self.expression(expr.call.args[1])!;
-		result = self.func.emit(Opcode.IMAGE_SAMPLE_IMPLICIT_LOD, self.type_id(float4), image, coord,
-			(Id)ImageOperand.BIAS, self.rvalue(bias));
-	}
-	else // sample_cmp_level_zero
-	{
-		Value dref = self.expression(expr.call.args[1])!;
-		result = self.func.emit(Opcode.IMAGE_SAMPLE_DREF_EXPLICIT_LOD, self.type_id(float_t), image, coord,
-			self.rvalue(dref), (Id)ImageOperand.LOD, self.const_float(0.0));
-		result_type = float_t;
-	}
-
-	return (Value) { .type = result_type, .id = result };
 }
 
 <*
- The separate image-and-sampler shape: `tex.sample(sampler, uv)` and
- `tex.sample_lod(sampler, uv, lod)`.
+ The optional operands of an image instruction, NO_ID when absent. Written in
+ this order because that is the order SPIR-V wants their ids in after the mask:
+ ascending bit order, Bias then Lod then Grad then ConstOffset.
 *>
-fn Value? Codegen.separate_sample_expression(&self, Expr* expr, Value texture, String method)
+struct ImageOperands
 {
-	if (method != "sample" && method != "sample_lod")
+	Id bias;
+	Id lod;
+	Id grad_x;
+	Id grad_y;
+	Id offset;
+}
+
+<*
+ Emit a sample, fetch or gather: the image, the coordinate, the third operand
+ some of them take - the depth reference, or the gather component - and then
+ the image operand mask with its ids.
+*>
+fn Id Codegen.image_instruction(&self, Opcode opcode, Type* result, Id image, Id coordinate, Id third, ImageOperands operands)
+{
+	Id[10] words;
+	usz    count = 0;
+	words[count++] = image;
+	words[count++] = coordinate;
+	if (third != NO_ID) words[count++] = third;
+
+	uint mask = 0;
+	if (operands.bias   != NO_ID) mask |= (uint)ImageOperand.BIAS;
+	if (operands.lod    != NO_ID) mask |= (uint)ImageOperand.LOD;
+	if (operands.grad_x != NO_ID) mask |= (uint)ImageOperand.GRAD;
+	if (operands.offset != NO_ID) mask |= (uint)ImageOperand.CONST_OFFSET;
+	if (mask)
+	{
+		words[count++] = (Id)mask;
+		if (operands.bias   != NO_ID) words[count++] = operands.bias;
+		if (operands.lod    != NO_ID) words[count++] = operands.lod;
+		if (operands.grad_x != NO_ID) { words[count++] = operands.grad_x; words[count++] = operands.grad_y; }
+		if (operands.offset != NO_ID) words[count++] = operands.offset;
+	}
+	return self.func.emit_slice(opcode, self.type_id(result), words[0:count]);
+}
+
+<*
+ `tex.method(...)` on any texture: the sampling, comparison and gather family,
+ texel fetches, and the size queries.
+
+ Two shapes reach here. A separate texture (`texture2d` and the rest) is paired
+ with a sampler at the point of use, so its sampling methods name the sampler
+ first; a combined one (`Sampler2D` and the rest) is a sampled image already.
+ Fetches and queries read the image alone and take no sampler on either.
+*>
+fn Value? Codegen.texture_method(&self, Expr* expr, Value texture, String written)
+{
+	if (written == "GetDimensions")
 	{
 		self.fail(expr.line, expr.column,
-			string::format(self.allocator, "a texture has no method `%s`", method));
-		return CODEGEN_ERROR~;
-	}
-	bool explicit_lod = method == "sample_lod";
-
-	usz wanted = explicit_lod ? 3 : 2;
-	if (expr.call.args.len != wanted)
-	{
-		self.fail(expr.line, expr.column,
-			string::format(self.allocator, "`%s` takes %d arguments", method, wanted));
+			"`GetDimensions` is spelled `size(lod)`, which returns the extent, and `levels()`, which counts the mips");
 		return CODEGEN_ERROR~;
 	}
 
-	Value sampler = self.expression(expr.call.args[0])!;
-	if (sampler.type.kind != SAMPLER)
+	String method = texture_method_name(written);
+	switch (method)
 	{
-		self.fail(expr.line, expr.column, "the first argument to sample must be a sampler");
+		case "":
+			self.fail(expr.line, expr.column,
+				string::format(self.allocator, "a %s has no method `%s`", texture.type.name, written));
+			return CODEGEN_ERROR~;
+		case "size":        return self.texture_size(expr, texture);
+		case "levels":      return self.texture_levels(expr, texture);
+		case "load":
+		case "load_packed": return self.texture_load(expr, texture, method == "load_packed", written);
+		default:            return self.texture_sample(expr, texture, method, written);
+	}
+}
+
+<*
+ The sampling family: sample, its bias, lod and gradient forms, the depth
+ comparisons, and the gathers.
+
+ Whether a method compares has to agree with the sampler it runs through. A
+ shadow type or a `sampler_cmp` was made with a compare op, so it serves only
+ the `_cmp` methods; any other sampler serves only the rest. Vulkan leaves the
+ mismatch undefined, which is why it is refused here by name.
+*>
+fn Value? Codegen.texture_sample(&self, Expr* expr, Value texture, String method, String written)
+{
+	Type*   image     = texture.type;
+	Expr*[] args      = expr.call.args;
+	bool    separate  = image.kind == TEXTURE;
+	bool    compares  = method.starts_with("sample_cmp") || method == "gather_cmp";
+	bool    gathers   = method.starts_with("gather");
+	int     component = gather_component(written);
+
+	Value sampler;
+	if (separate)
+	{
+		if (args.len == 0 || (sampler = self.expression(args[0])!).type.kind != SAMPLER)
+		{
+			self.fail(expr.line, expr.column, string::format(self.allocator,
+				"`%s` on a %s takes its sampler first - a %s is paired with one where it is sampled",
+				written, image.name, image.name));
+			return CODEGEN_ERROR~;
+		}
+		args = args[1..];
+	}
+
+	bool comparison_sampler = separate ? sampler.type.depth != 0 : image.depth != 0;
+	if (compares && !comparison_sampler)
+	{
+		self.fail(expr.line, expr.column, separate
+			? string::format(self.allocator, "`%s` compares, so its sampler is a `sampler_cmp`", written)
+			: string::format(self.allocator,
+				"`%s` compares, so it needs a comparison sampler such as Sampler2DShadow, not a %s", written, image.name));
+		return CODEGEN_ERROR~;
+	}
+	if (!compares && comparison_sampler)
+	{
+		self.fail(expr.line, expr.column, separate
+			? string::format(self.allocator, "a `sampler_cmp` only compares - `%s` takes a `sampler`", written)
+			: string::format(self.allocator,
+				"a %s compares - write `sample_cmp`, `sample_cmp_level_zero` or `gather_cmp`", image.name));
+		return CODEGEN_ERROR~;
+	}
+	if (compares && image.dim == Dim.D3)
+	{
+		self.fail(expr.line, expr.column, "a 3D texture has no depth comparison");
+		return CODEGEN_ERROR~;
+	}
+	if (gathers && image.dim != Dim.D2 && image.dim != Dim.CUBE)
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"`%s` gathers from a 2D or cube texture, not a %s", written, image.name));
 		return CODEGEN_ERROR~;
 	}
 
-	Value coordinate = self.expression(expr.call.args[1])!;
-
-	Id image_id   = self.func.load(self.type_id(texture.type), texture.pointer);
-	Id sampler_id = self.func.load(self.type_id(sampler.type), sampler.pointer);
-
-	Type* float4 = self.types.find("float4");
-	Id    sampled_type = self.mod.type_sampled_image(self.type_id(texture.type));
-	Id    sampled      = self.func.sampled_image(sampled_type, image_id, sampler_id);
-
-	Id result;
-	if (explicit_lod)
+	// The arguments after the coordinate, before an optional texel offset.
+	usz extra;
+	switch (method)
 	{
-		Value lod = self.expression(expr.call.args[2])!;
-		result = self.func.image_sample_lod(self.type_id(float4), sampled, self.rvalue(coordinate), self.rvalue(lod));
+		case "sample":                extra = 0;
+		case "sample_grad":           extra = 2;
+		case "sample_cmp_lod":        extra = 2;
+		case "gather":                extra = component < 0 ? 1 : 0;
+		default:                      extra = 1; // bias, lod or the depth reference
+	}
+	usz  fixed     = 1 + extra;
+	bool offsets   = image.dim != Dim.CUBE;
+	usz  sampler_n = separate ? 1 : 0;
+	if (args.len != fixed && !(offsets && args.len == fixed + 1))
+	{
+		if (args.len == fixed + 1)
+		{
+			self.fail(args[fixed].line, args[fixed].column, "a cube map takes no texel offset");
+			return CODEGEN_ERROR~;
+		}
+		self.fail(expr.line, expr.column, offsets
+			? string::format(self.allocator, "`%s` takes %d arguments, or %d with a texel offset",
+				written, fixed + sampler_n, fixed + sampler_n + 1)
+			: string::format(self.allocator, "`%s` takes %d arguments", written, fixed + sampler_n));
+		return CODEGEN_ERROR~;
+	}
+
+	// The implicit-LOD forms take their level from screen-space derivatives,
+	// and only a fragment shader has those.
+	bool implicit = method == "sample" || method == "sample_bias" || method == "sample_cmp";
+	if (implicit && self.execution_model != ExecutionModel.FRAGMENT)
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"`%s` takes its level from screen-space derivatives, which only a fragment shader has - write `%s` with an explicit level",
+			written, method == "sample_cmp" ? "sample_cmp_lod" : "sample_lod"));
+		return CODEGEN_ERROR~;
+	}
+
+	Type* float_t = self.types.find("float");
+	Type* float4  = self.types.find("float4");
+	Id    coord   = self.texture_coordinate(args[0], image, written)!;
+
+	ImageOperands operands;
+	Id third = NO_ID;
+	switch (method)
+	{
+		case "sample_bias":
+			operands.bias = self.texture_float(args[1], "bias", written)!;
+		case "sample_lod":
+			operands.lod = self.texture_float(args[1], "level", written)!;
+		case "sample_grad":
+			operands.grad_x = self.texture_gradient(args[1], image, written)!;
+			operands.grad_y = self.texture_gradient(args[2], image, written)!;
+		case "sample_cmp":
+		case "gather_cmp":
+			third = self.texture_float(args[1], "reference", written)!;
+		case "sample_cmp_lod":
+			third = self.texture_float(args[1], "reference", written)!;
+			operands.lod = self.texture_float(args[2], "level", written)!;
+		case "sample_cmp_level_zero":
+			third = self.texture_float(args[1], "reference", written)!;
+			operands.lod = self.const_float(0.0);
+		case "gather":
+			if (component >= 0)
+			{
+				third = self.const_int(component);
+				break;
+			}
+			Expr* written_component = args[1];
+			if (written_component.kind != INT_LITERAL || written_component.literal.value > 3)
+			{
+				self.fail(written_component.line, written_component.column,
+					"`gather`'s component is a literal from 0 to 3 - red, green, blue or alpha");
+				return CODEGEN_ERROR~;
+			}
+			third = self.const_int((int)written_component.literal.value);
+		default:
+			break;
+	}
+	if (args.len == fixed + 1) operands.offset = self.texel_offset(args[fixed], image)!;
+
+	Opcode opcode;
+	Type*  result = float4;
+	switch (method)
+	{
+		case "sample":
+		case "sample_bias":           opcode = Opcode.IMAGE_SAMPLE_IMPLICIT_LOD;
+		case "sample_lod":
+		case "sample_grad":           opcode = Opcode.IMAGE_SAMPLE_EXPLICIT_LOD;
+		case "sample_cmp":            opcode = Opcode.IMAGE_SAMPLE_DREF_IMPLICIT_LOD; result = float_t;
+		case "sample_cmp_lod":
+		case "sample_cmp_level_zero": opcode = Opcode.IMAGE_SAMPLE_DREF_EXPLICIT_LOD; result = float_t;
+		case "gather":                opcode = Opcode.IMAGE_GATHER;
+		default:                      opcode = Opcode.IMAGE_DREF_GATHER;
+	}
+
+	Id sampled = self.sampled_image_of(texture, separate ? &sampler : null);
+	return (Value) { .type = result, .id = self.image_instruction(opcode, result, sampled, coord, third, operands) };
+}
+
+<*
+ `tex.load(coordinate, level)`, and Slang's `tex.Load(coordinate_and_level)`:
+ one texel, read by its integer address without a sampler, so no filtering
+ and no wrapping. A cube map is refused - its faces have no single address
+ space - and so is a float level, which would be a sample rather than a fetch.
+*>
+fn Value? Codegen.texture_load(&self, Expr* expr, Value texture, bool packed, String written)
+{
+	Type*   image = texture.type;
+	Expr*[] args  = expr.call.args;
+	if (image.dim == Dim.CUBE)
+	{
+		self.fail(expr.line, expr.column, "a cube map has no texel addresses - sample it with a direction");
+		return CODEGEN_ERROR~;
+	}
+
+	usz fixed = packed ? 1 : 2;
+	if (args.len != fixed && args.len != fixed + 1)
+	{
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"`%s` takes %d arguments, or %d with a texel offset - and no sampler", written, fixed, fixed + 1));
+		return CODEGEN_ERROR~;
+	}
+
+	uint  width = image.coordinate_components();
+	uint  want  = packed ? width + 1 : width;
+	Type* int_t = self.types.find("int");
+	Value coordinate = self.expression(args[0])!;
+	Type* scalar     = coordinate.type.scalar();
+	bool  integer    = (scalar.kind == INT || scalar.kind == UINT) && scalar.width() == 32
+		&& (coordinate.type.kind == VECTOR || coordinate.type.is_scalar());
+	if (!integer || coordinate.type.components() != want)
+	{
+		Type*  expected = want == 1 ? int_t : self.vector_of(int_t, want);
+		String hint     = packed ? " - the mip level is its last component" : (image.arrayed ? " - the last component is the array layer" : "");
+		self.fail(args[0].line, args[0].column, string::format(self.allocator,
+			"`%s` on a %s takes an %s address, got a %s%s",
+			written, image.name, expected.name, coordinate.type.name, hint));
+		return CODEGEN_ERROR~;
+	}
+
+	ImageOperands operands;
+	Id address;
+	if (packed)
+	{
+		// The level rides in the last component; the rest is the address.
+		Id whole = self.rvalue(coordinate);
+		operands.lod = self.func.composite_extract(self.type_id(scalar), whole, width);
+		if (width == 1)
+		{
+			address = self.func.composite_extract(self.type_id(scalar), whole, 0);
+		}
+		else
+		{
+			Id[4] parts;
+			for (uint i = 0; i < width; i++) parts[i] = self.func.composite_extract(self.type_id(scalar), whole, i);
+			address = self.func.composite_construct(self.type_id(self.vector_of(scalar, width)), parts[0:width]);
+		}
 	}
 	else
 	{
-		result = self.func.image_sample(self.type_id(float4), sampled, self.rvalue(coordinate));
+		address      = self.rvalue(coordinate);
+		operands.lod = self.texel_level(args[1], written)!;
+	}
+	if (args.len == fixed + 1) operands.offset = self.texel_offset(args[fixed], image)!;
+
+	Type* float4 = self.types.find("float4");
+	Id    id     = self.image_instruction(Opcode.IMAGE_FETCH, float4, self.image_of(texture), address, NO_ID, operands);
+	return (Value) { .type = float4, .id = id };
+}
+
+<*
+ `tex.size(level)`: the extent of one mip level, as an int or an int vector -
+ one number per dimension, plus the layer count of an arrayed texture. The
+ level is optional and 0 by default, the full-size image.
+*>
+fn Value? Codegen.texture_size(&self, Expr* expr, Value texture)
+{
+	if (expr.call.args.len > 1)
+	{
+		self.fail(expr.line, expr.column, "`size` takes at most one argument, the mip level");
+		return CODEGEN_ERROR~;
+	}
+	Id level = expr.call.args.len ? self.texel_level(expr.call.args[0], "size")! : self.const_int(0);
+
+	uint  count  = texture.type.size_components();
+	Type* int_t  = self.types.find("int");
+	Type* result = count == 1 ? int_t : self.vector_of(int_t, count);
+	self.mod.capability(Capability.IMAGE_QUERY);
+	Id id = self.func.emit(Opcode.IMAGE_QUERY_SIZE_LOD, self.type_id(result), self.image_of(texture), level);
+	return (Value) { .type = result, .id = id };
+}
+
+<*
+ `tex.levels()`: how many mip levels the bound view has.
+*>
+fn Value? Codegen.texture_levels(&self, Expr* expr, Value texture)
+{
+	if (expr.call.args.len)
+	{
+		self.fail(expr.line, expr.column, "`levels` takes no arguments");
+		return CODEGEN_ERROR~;
+	}
+	Type* int_t = self.types.find("int");
+	self.mod.capability(Capability.IMAGE_QUERY);
+	Id id = self.func.emit(Opcode.IMAGE_QUERY_LEVELS, self.type_id(int_t), self.image_of(texture));
+	return (Value) { .type = int_t, .id = id };
+}
+
+<*
+ The sampled image a sampling instruction reads. A combined descriptor is one
+ already; a separate texture is paired with its sampler here, and the pairing
+ is non-uniform when either half was picked by a non-uniform index.
+*>
+fn Id Codegen.sampled_image_of(&self, Value texture, Value* sampler)
+{
+	Id image = self.load_descriptor(texture);
+	if (!sampler) return image;
+
+	Id sampled = self.func.sampled_image(self.mod.type_sampled_image(self.type_id(texture.type)),
+		image, self.load_descriptor(*sampler));
+	if (texture.non_uniform || sampler.non_uniform) self.mod.decorate(sampled, Decoration.NON_UNIFORM);
+	return sampled;
+}
+
+<*
+ The image alone, which is what a fetch or a query reads: a separate texture
+ is one, and a combined descriptor gives up its image half through OpImage.
+*>
+fn Id Codegen.image_of(&self, Value texture)
+{
+	Id loaded = self.load_descriptor(texture);
+	if (texture.type.kind == TEXTURE) return loaded;
+
+	Id image = self.func.unop(Opcode.IMAGE, self.image_type_id(texture.type), loaded);
+	if (texture.non_uniform) self.mod.decorate(image, Decoration.NON_UNIFORM);
+	return image;
+}
+
+<*
+ A sampling coordinate: a float, or a float vector as wide as the image's
+ extent plus its layer. Exactly that wide - SPIR-V would read a wider vector's
+ first components and ignore the rest, but a coordinate one too wide or one
+ too narrow is almost always a forgotten or a stray array layer.
+*>
+fn Id? Codegen.texture_coordinate(&self, Expr* arg, Type* image, String written)
+{
+	uint  width    = image.coordinate_components();
+	Type* float_t  = self.types.find("float");
+	Type* expected = width == 1 ? float_t : self.vector_of(float_t, width);
+
+	Value value = self.expression(arg)!;
+	if (value.type == expected) return self.rvalue(value);
+	if (width == 1 && arg.kind == INT_LITERAL) return self.coerce(value, expected, arg);
+
+	self.fail(arg.line, arg.column, string::format(self.allocator,
+		"`%s` on a %s takes a %s coordinate, got a %s%s", written, image.name, expected.name, value.type.name,
+		image.arrayed ? " - the last component is the array layer" : ""));
+	return CODEGEN_ERROR~;
+}
+
+<*
+ A gradient for `sample_grad`: the rate the coordinate changes per pixel, as
+ wide as the image's extent. The layer of an arrayed image has none.
+*>
+fn Id? Codegen.texture_gradient(&self, Expr* arg, Type* image, String written)
+{
+	uint  width    = image.extent_components();
+	Type* float_t  = self.types.find("float");
+	Type* expected = width == 1 ? float_t : self.vector_of(float_t, width);
+
+	Value value = self.expression(arg)!;
+	if (value.type == expected) return self.rvalue(value);
+
+	self.fail(arg.line, arg.column, string::format(self.allocator,
+		"`%s` on a %s takes a %s gradient, got a %s", written, image.name, expected.name, value.type.name));
+	return CODEGEN_ERROR~;
+}
+
+<*
+ A float operand of a sample - a bias, a level, a depth reference - with an
+ integer converted the way an integer literal in a float slot always is, so
+ `SampleLevel(uv, 0)` passes the level as the float SPIR-V requires.
+*>
+fn Id? Codegen.texture_float(&self, Expr* arg, String what, String written)
+{
+	Type* float_t = self.types.find("float");
+	Value value   = self.expression(arg)!;
+	if (value.type == float_t || value.type.kind == INT) return self.coerce(value, float_t, arg);
+
+	self.fail(arg.line, arg.column, string::format(self.allocator,
+		"`%s`'s %s is a float, got a %s", written, what, value.type.name));
+	return CODEGEN_ERROR~;
+}
+
+<*
+ The mip level a fetch or a size query reads: an integer, because it names a
+ level rather than blending between two.
+*>
+fn Id? Codegen.texel_level(&self, Expr* arg, String written)
+{
+	Value value = self.expression(arg)!;
+	if ((value.type.kind == INT || value.type.kind == UINT) && value.type.width() == 32) return self.rvalue(value);
+
+	self.fail(arg.line, arg.column, string::format(self.allocator,
+		"`%s`'s mip level is an integer, got a %s", written, value.type.name));
+	return CODEGEN_ERROR~;
+}
+
+<*
+ A constant texel offset: `int2(1, -1)` on a 2D texture, an `int3` on a 3D
+ one, a bare integer on a 1D one. SPIR-V wants a constant here, and a
+ constructor or a negation is an instruction that makes one at run time - so
+ the offset is read off the syntax and emitted as a constant directly. A
+ non-constant offset would need ImageGatherExtended, which is not asked for.
+*>
+fn Id? Codegen.texel_offset(&self, Expr* expr, Type* image)
+{
+	uint  width = image.extent_components();
+	Type* int_t = self.types.find("int");
+	Type* type  = width == 1 ? int_t : self.vector_of(int_t, width);
+
+	int[3] values;
+	bool   constant = false;
+	if (width == 1)
+	{
+		constant = offset_literal(expr, &values[0]);
+	}
+	else if (expr.kind == CALL && expr.call.callee.kind == IDENT && expr.call.callee.ident.name == type.name)
+	{
+		usz count = expr.call.args.len;
+		constant  = count == 1 || count == width;
+		for (uint i = 0; constant && i < width; i++)
+		{
+			constant = offset_literal(expr.call.args[count == 1 ? 0 : i], &values[i]);
+		}
+	}
+	if (!constant)
+	{
+		String example = width == 1 ? "-1" : (width == 2 ? "int2(1, -1)" : "int3(1, 0, -1)");
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"a texel offset is a constant `%s` of integer literals, such as `%s`", type.name, example));
+		return CODEGEN_ERROR~;
 	}
 
-	return (Value) { .type = float4, .id = result };
+	Id[3] ids;
+	for (uint i = 0; i < width; i++)
+	{
+		// The range every device supports; beyond it is the device's
+		// minTexelOffset/maxTexelOffset to allow, and the result is
+		// undefined where it does not.
+		if (values[i] < -8 || values[i] > 7)
+		{
+			self.warn(expr.line, expr.column, string::format(self.allocator,
+				"texel offset %d is outside [-8, 7], the range every device supports", values[i]));
+		}
+		ids[i] = self.const_int(values[i]);
+	}
+	if (width == 1) return ids[0];
+	return self.mod.const_composite(self.type_id(type), ids[0:width]);
+}
+
+<*
+ An integer literal, or a negated one: the two spellings of a constant offset
+ component.
+*>
+fn bool offset_literal(Expr* expr, int* out) @private
+{
+	if (expr.kind == INT_LITERAL)
+	{
+		*out = (int)expr.literal.value;
+		return true;
+	}
+	if (expr.kind == UNARY && expr.unary.op == MINUS && expr.unary.operand.kind == INT_LITERAL)
+	{
+		*out = -(int)expr.unary.operand.literal.value;
+		return true;
+	}
+	return false;
 }
 
 <*
@@ -2966,7 +3537,7 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 	switch (name)
 	{
 		case "dot":
-			return (Value) { .type = float_t, .id = self.func.binop(Opcode.DOT, self.type_id(float_t), args[0], args[1]) };
+			return self.dot_call(expr, args.array_view(), arg_types.array_view());
 		case "transpose":
 			// A floatCxR transposes to floatRxC.
 			Type* result = self.types.find(string::format(self.allocator, "float%dx%d", first.element.count, first.count));
@@ -3004,11 +3575,25 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 		}
 		case "ddx":
 		case "ddy":
+		case "fwidth":
 		{
 			// Core opcodes, so they stay out of the GLSL.std.450 dispatch below.
 			// The result has the operand's own shape, which is what GLSL's
-			// `dFdx` family says as well.
-			Opcode opcode = name == "ddx" ? Opcode.DPDX : Opcode.DPDY;
+			// `dFdx` family says as well. `fwidth` is |ddx| + |ddy| in one
+			// instruction - the width of a pixel in the operand's units.
+			if (self.execution_model != ExecutionModel.FRAGMENT)
+			{
+				self.fail(expr.line, expr.column, string::format(self.allocator,
+					"`%s` is a screen-space derivative, which only a fragment shader has", name));
+				return CODEGEN_ERROR~;
+			}
+			Opcode opcode;
+			switch (name)
+			{
+				case "ddx": opcode = Opcode.DPDX;
+				case "ddy": opcode = Opcode.DPDY;
+				default:    opcode = Opcode.FWIDTH;
+			}
 			return (Value) { .type = first, .id = self.func.unop(opcode, self.type_id(first), args[0]) };
 		}
 		default:
@@ -3024,6 +3609,16 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 	foreach (type : arg_types)
 	{
 		if (type.kind == VECTOR) { result = type; break; }
+	}
+
+	// GLSL.std.450 has no unsigned `abs` or `sign`, and neither needs one: a
+	// uint is its own absolute value, and its sign is 0 or 1.
+	if (result.scalar().kind == UINT && (name == "abs" || name == "sign"))
+	{
+		if (name == "abs") return (Value) { .type = result, .id = args[0] };
+		Id one = self.mod.const_u32(self.type_id(result.scalar()), 1);
+		if (result.kind == VECTOR) one = self.splat(result, one);
+		return (Value) { .type = result, .id = self.ext_inst(GlslOp.UMIN, result, (Id[]) { args[0], one }) };
 	}
 
 	switch (name)
@@ -3054,14 +3649,24 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 		case "clamp":       instruction = self.by_sign(GlslOp.FCLAMP, GlslOp.UCLAMP, GlslOp.SCLAMP, result);
 		case "mix":         instruction = GlslOp.FMIX;
 		case "lerp":        instruction = GlslOp.FMIX;
-		case "inversesqrt": instruction = GlslOp.INVERSE_SQRT;
 		case "rsqrt":       instruction = GlslOp.INVERSE_SQRT;
 		case "step":        instruction = GlslOp.STEP;
 		case "smoothstep":  instruction = GlslOp.SMOOTHSTEP;
 		case "normalize":   instruction = GlslOp.NORMALIZE;
 		case "reflect":     instruction = GlslOp.REFLECT;
 		case "refract":     instruction = GlslOp.REFRACT;
+		case "faceforward": instruction = GlslOp.FACE_FORWARD;
 		case "cross":       instruction = GlslOp.CROSS;
+		case "inverse":
+		case "determinant":
+			if (first.kind != MATRIX || first.count != first.element.count)
+			{
+				self.fail(expr.line, expr.column, string::format(self.allocator,
+					"`%s` takes a square matrix, got a %s", name, first.name));
+				return CODEGEN_ERROR~;
+			}
+			instruction = name == "inverse" ? GlslOp.MATRIX_INVERSE : GlslOp.DETERMINANT;
+			if (name == "determinant") result = first.scalar();
 		case "length":      instruction = GlslOp.LENGTH;   result = float_t;
 		case "distance":    instruction = GlslOp.DISTANCE; result = float_t;
 		case "saturate":
@@ -3084,6 +3689,49 @@ fn Value? Codegen.builtin_call(&self, Expr* expr, String name)
 	}
 
 	return (Value) { .type = result, .id = self.ext_inst(instruction, result, args.array_view()) };
+}
+
+<*
+ `dot(a, b)`. `OpDot` is a float instruction, so an integer dot product is the
+ multiply and the sum written out - SPIR-V before 1.6 has nothing shorter. The
+ result is the operands' own scalar type, which is what keeps a `half` dot
+ product half rather than claiming a float it is not.
+*>
+fn Value? Codegen.dot_call(&self, Expr* expr, Id[] args, Type*[] types)
+{
+	if (args.len != 2 || types[0] != types[1] || !types[0].scalar().is_numeric()
+		|| (types[0].kind != VECTOR && !types[0].is_scalar()))
+	{
+		String got = args.len == 2
+			? string::format(self.allocator, "a %s and a %s", types[0].name, types[1].name)
+			: string::format(self.allocator, "%d arguments", args.len);
+		self.fail(expr.line, expr.column, string::format(self.allocator,
+			"`dot` takes two numeric vectors of the same type, got %s", got));
+		return CODEGEN_ERROR~;
+	}
+
+	Type* vector = types[0];
+	Type* scalar = vector.scalar();
+	bool  floats = scalar.kind == FLOAT;
+
+	if (vector.kind != VECTOR)
+	{
+		Opcode multiply = floats ? Opcode.F_MUL : Opcode.I_MUL;
+		return (Value) { .type = scalar, .id = self.func.binop(multiply, self.type_id(scalar), args[0], args[1]) };
+	}
+	if (floats)
+	{
+		return (Value) { .type = scalar, .id = self.func.binop(Opcode.DOT, self.type_id(scalar), args[0], args[1]) };
+	}
+
+	Id products = self.func.binop(Opcode.I_MUL, self.type_id(vector), args[0], args[1]);
+	Id sum      = self.func.composite_extract(self.type_id(scalar), products, 0);
+	for (uint i = 1; i < vector.count; i++)
+	{
+		Id component = self.func.composite_extract(self.type_id(scalar), products, i);
+		sum = self.func.binop(Opcode.I_ADD, self.type_id(scalar), sum, component);
+	}
+	return (Value) { .type = scalar, .id = sum };
 }
 
 fn Id Codegen.ext_inst(&self, GlslOp instruction, Type* result, Id[] args)
@@ -3130,8 +3778,9 @@ fn void? Codegen.store_initializer(&self, Id pointer, Type* type, Expr* expr)
 
 struct LoopContext
 {
-	Id merge;
-	Id continue_target;
+	Id   merge;
+	Id   continue_target;
+	bool broken; // a `break` reached this loop's merge
 }
 
 alias LoopList = List{LoopContext};
@@ -3203,7 +3852,9 @@ fn void? Codegen.statement(&self, Stmt* stmt)
 				self.fail(stmt.line, stmt.column, "`break` is not inside a loop");
 				return CODEGEN_ERROR~;
 			}
-			self.func.branch(self.loops[self.loops.len() - 1].merge);
+			LoopContext* loop = &self.loops[self.loops.len() - 1];
+			loop.broken = true;
+			self.func.branch(loop.merge);
 			self.terminated = true;
 
 		case CONTINUE:
@@ -3312,17 +3963,30 @@ fn void? Codegen.emit_if(&self, Stmt* stmt)
 	self.func.label(then_label);
 	self.terminated = false;
 	self.statement(stmt.if_stmt.then_branch)!;
+	bool then_left = self.terminated;
 	if (!self.terminated) self.func.branch(merge_label);
 
+	bool else_left = false;
 	if (else_label != NO_ID)
 	{
 		self.func.label(else_label);
 		self.terminated = false;
 		self.statement(stmt.if_stmt.else_branch)!;
+		else_left = self.terminated;
 		if (!self.terminated) self.func.branch(merge_label);
 	}
 
 	self.func.label(merge_label);
+
+	// When both arms returned (or broke, or discarded), nothing reaches the
+	// merge - and the if as a whole ended its block, which is what lets
+	// `if (b) return x; else return y;` close a function that returns a value.
+	if (then_left && else_left)
+	{
+		self.func.unreachable();
+		self.terminated = true;
+		return;
+	}
 	self.terminated = false;
 }
 
@@ -3344,9 +4008,15 @@ fn void? Codegen.emit_loop(&self, uint line, uint column, Stmt* unused, Expr* co
 	self.func.loop_merge(merge_label, continue_label);
 	self.func.branch(condition_label);
 
+	// `for (;;)` and `while (true)` never leave through their condition, so
+	// they branch straight into the body: the merge is then reached only by a
+	// `break`, which is what tells a loop that ends its function from one that
+	// falls out of it.
+	bool forever = !condition || (condition.kind == BOOL_LITERAL && condition.boolean.value);
+
 	self.func.label(condition_label);
 	self.terminated = false;
-	if (condition)
+	if (!forever)
 	{
 		Value test = self.expression(condition)!;
 		self.func.branch_conditional(self.condition(test, condition), body_label, merge_label);
@@ -3360,6 +4030,7 @@ fn void? Codegen.emit_loop(&self, uint line, uint column, Stmt* unused, Expr* co
 	self.terminated = false;
 	self.loops.push({ .merge = merge_label, .continue_target = continue_label });
 	self.statement(body)!;
+	bool broken = self.loops[self.loops.len() - 1].broken;
 	self.loops.size = (sz)(self.loops.len() - 1);
 	if (!self.terminated) self.func.branch(continue_label);
 
@@ -3369,5 +4040,11 @@ fn void? Codegen.emit_loop(&self, uint line, uint column, Stmt* unused, Expr* co
 	self.func.branch(header_label);
 
 	self.func.label(merge_label);
+	if (forever && !broken)
+	{
+		self.func.unreachable();
+		self.terminated = true;
+		return;
+	}
 	self.terminated = false;
 }

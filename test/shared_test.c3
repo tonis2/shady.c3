@@ -156,6 +156,52 @@ fn void store(uint i)
 }
 
 <*
+ The memory semantics a module's first OpControlBarrier was written with: the
+ operand is a constant id, so it is read back through its OpConstant.
+*>
+fn uint barrier_semantics(char[] spirv)
+{
+	uint* words = (uint*)spirv.ptr;
+	usz   count = (usz)spirv.len / 4;
+	uint  id    = 0;
+	for (usz i = 5; i < count; i += (usz)(words[i] >> 16))
+	{
+		if ((words[i] & 0xffff) == (uint)shady::Opcode.CONTROL_BARRIER) { id = words[i + 3]; break; }
+	}
+	for (usz i = 5; i < count; i += (usz)(words[i] >> 16))
+	{
+		if ((words[i] & 0xffff) == (uint)shady::Opcode.CONSTANT && words[i + 2] == id) return words[i + 3];
+	}
+	return 0;
+}
+
+<*
+ A barrier orders storage-buffer writes as well as shared memory: without
+ UniformMemory in its semantics, an invocation reading an element another one
+ wrote to a buffer before the barrier could see the old value.
+*>
+fn void a_barrier_orders_buffer_writes_too() @test
+{
+	char[] spirv = shady_support::build(string::tformat("%s\n%s\n%s\n%s", COMPUTE_HEAD, `
+float data[];
+shared float tile[64];
+`, `
+fn void store(uint i)
+{
+    data[i] = float(i);
+    tile[i % 64u] = 1.0;
+    barrier;
+    data[i] = data[63u - i % 64u] + tile[0];
+}
+`, COMPUTE_TAIL));
+	defer free(spirv);
+
+	// AcquireRelease (0x8) | UniformMemory (0x40) | WorkgroupMemory (0x100).
+	uint semantics = barrier_semantics(spirv);
+	test::@check(semantics == 0x148, "the barrier should order buffers and shared memory; got %x", semantics);
+}
+
+<*
  Cooperative matrices: `coopmat<T, M, N, scope, use>` is a type family, and
  the use is part of the identity - A, B and the accumulator are laid out
  differently, so two shapes that differ only in use are two types.

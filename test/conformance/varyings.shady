@@ -1,0 +1,45 @@
+// Interpolation, and where it does not happen.
+//
+// An integer varying - scalar or vector - is Flat on both ends of the stage
+// boundary, because it cannot be interpolated. The ends are the only places
+// Flat is legal: a vertex input and a fragment output are not interpolated, so
+// an integer vertex attribute and an integer render target carry no
+// decoration at all, and Vulkan's validator refuses one that does.
+
+struct VertexIn
+{
+    float3 position;
+    uint   material @flat;
+}
+
+struct Varyings
+{
+    float4 position @position;
+    float2 uv;
+    uint   material;
+    uint2  tile;
+}
+
+struct Targets
+{
+    float4 color;
+    uint   object_id;
+}
+
+fn Varyings vert(VertexIn input) @vertex(main)
+{
+    Varyings output;
+    output.position = float4(input.position, 1.0);
+    output.uv = input.position.xy;
+    output.material = input.material;
+    output.tile = uint2(input.material, input.material * 2u);
+    return output;
+}
+
+fn Targets frag(Varyings input) @fragment
+{
+    Targets targets;
+    targets.color = float4(input.uv, float(input.tile.x), 1.0);
+    targets.object_id = input.material + input.tile.y;
+    return targets;
+}

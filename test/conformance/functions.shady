@@ -38,6 +38,24 @@ fn float4 Map.Sample(&self, float4 uv)
     return float4(uv.xy, float(self.at), 1.0);
 }
 
+// Both arms return, so the if ends the function and its merge is unreachable.
+fn float pick(bool b)
+{
+    if (b) return 1.0;
+    else return 0.5;
+}
+
+// The loop only ever leaves by `return`, so nothing follows it.
+fn float first_above(float limit)
+{
+    float x = 0.0;
+    while (true)
+    {
+        x += 0.25;
+        if (x > limit) return x;
+    }
+}
+
 fn float2 tint(float2 color)
 {
     return tint(color, 0.5);
@@ -58,5 +76,6 @@ fn FragmentIn vert(VertexIn input) @vertex(main)
 
 fn float4 frag(FragmentIn input) @fragment
 {
-    return map_at(1).Sample(input.color) + float4(tint(input.color.xy), 0.0, 0.0);
+    float scale = pick(input.color.x > 0.5) * first_above(input.color.y);
+    return map_at(1).Sample(input.color) + float4(tint(input.color.xy), 0.0, scale);
 }

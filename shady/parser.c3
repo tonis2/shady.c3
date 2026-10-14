@@ -168,6 +168,10 @@ fn TypeRef? Parser.type_ref(&self)
 			type.array_size = (uint)size.number;
 		}
 		self.expect(RBRACKET, "expected `]` after the array length")!;
+		if (self.check(LBRACKET))
+		{
+			self.refuse_dimension()!;
+		}
 	}
 
 		if (self.match(STAR)) type.is_pointer = true;
@@ -182,7 +186,11 @@ fn TypeRef? Parser.type_ref(&self)
 *>
 fn void? Parser.declarator_array(&self, TypeRef* type)
 {
-	if (!self.match(LBRACKET)) return;
+	if (!self.check(LBRACKET)) return;
+	// `float[4] taps[3]` would be an array of arrays, and a TypeRef holds one
+	// length: the second would silently replace the first.
+	if (type.is_array) return self.refuse_dimension();
+	self.advance();
 	type.is_array = true;
 	if (self.check(RBRACKET))
 	{
@@ -194,6 +202,17 @@ fn void? Parser.declarator_array(&self, TypeRef* type)
 		type.array_size = (uint)size.number;
 	}
 	self.expect(RBRACKET, "expected `]` after the array length")!;
+	if (self.check(LBRACKET)) return self.refuse_dimension();
+}
+
+<*
+ A second array dimension, in any of its spellings. Refused where the second
+ `[` is, rather than parsed into a type with one of its lengths missing.
+*>
+fn void? Parser.refuse_dimension(&self)
+{
+	self.fail("multidimensional arrays are not supported - use one dimension and index it as row * width + column");
+	return PARSE_ERROR~;
 }
 
 <*
